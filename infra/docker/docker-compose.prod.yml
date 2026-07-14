@@ -1,0 +1,156 @@
+# infra/docker/docker-compose.prod.yml
+# Production deployment — runs all 5 services: postgres, redis, api, worker, web
+# Usage:
+#   docker compose -f infra/docker/docker-compose.prod.yml up -d
+#
+# Required env vars (set in .env or shell before running):
+#   POSTGRES_PASSWORD, JWT_SECRET, CREDENTIAL_ENCRYPTION_KEY, COOKIE_SECRET
+#   NEXT_PUBLIC_API_URL (public-facing API URL for the browser)
+#   FRONTEND_URL       (used by API for CORS — same as your web domain)
+
+version: '3.8'
+
+services:
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:16-pgdg
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kuvalam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-kuvalam_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kuvalam} -d ${POSTGRES_DB:-kuvalam_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Do NOT expose 5432 externally in production
+
+  # ── Cache / Queue Broker ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Do NOT expose 6379 externally in production
+
+  # ── DB Migrations (one-shot) ──────────────────────────────────────────────
+  # Runs `node src/db/migrate.js` once, then exits. Migrations are idempotent
+  # (each is recorded in the `schema_migrations` table) so this is safe to
+  # run on every `docker compose up` — new migrations get applied, existing
+  # ones are skipped. Guarantees the DB schema is always current, even if
+  # the operator runs `docker compose up -d` directly instead of update.sh.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-kuvalam}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kuvalam_db}
+    command: ["node", "src/db/migrate.js"]
+
+  # ── API Server ────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgres://${POSTGRES_USER:-kuvalam}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kuvalam_db}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      COOKIE_SECRET: ${COOKIE_SECRET:?COOKIE_SECRET must be set}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY must be set}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # Optional — set to enable S3 storage (falls back to local disk if unset)
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      # Optional — SMTP for any email sending
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── BullMQ Worker ─────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-kuvalam}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kuvalam_db}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
+      TASK_CONCURRENCY: ${TASK_CONCURRENCY:-5}
+      WORKFLOW_CONCURRENCY: ${WORKFLOW_CONCURRENCY:-3}
+      # LLM keys — needed by task.service.js in the worker
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}  # Scale up for higher throughput
+
+  # ── Web Frontend ──────────────────────────────────────────────────────────
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set at build time}
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  redis_data:

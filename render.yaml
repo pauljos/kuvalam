@@ -1,0 +1,195 @@
+# render.yaml — Kuvalam AI Workforce Operating System
+# Render Blueprint: https://render.com/docs/blueprint-spec
+#
+# Deploy steps:
+#   1. Push this repo to GitHub
+#   2. Go to dashboard.render.com → New → Blueprint
+#   3. Connect the repo — Render reads this file and provisions all services
+#   4. Fill in the prompted secrets (OPENAI_API_KEY, etc.)
+#   5. After first deploy, run DB migrations once via the Render Shell on the API service:
+#        node apps/api/src/db/migrate.js
+
+services:
+
+  # ── API (Fastify) ───────────────────────────────────────────────────────────
+  - type: web
+    name: kuvalam-api
+    runtime: docker
+    dockerfilePath: apps/api/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 30
+    # Only rebuild API when relevant files change (monorepo optimisation)
+    buildFilter:
+      paths:
+        - apps/api/**
+        - packages/**
+        - package.json
+        - package-lock.json
+    # Run DB migrations before each new deployment goes live
+    preDeployCommand: node apps/api/src/db/migrate.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      # Auto-wired from managed Postgres
+      - key: DATABASE_URL
+        fromDatabase:
+          name: kuvalam-db
+          property: connectionString
+      # Auto-wired from managed Key Value (Redis)
+      - key: REDIS_URL
+        fromService:
+          name: kuvalam-redis
+          type: keyvalue
+          property: connectionString
+      # CORS — set to the web service's public URL
+      - key: FRONTEND_URL
+        fromService:
+          name: kuvalam-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      # Auto-generated secrets (Render creates random 256-bit values)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECRET
+        generateValue: true
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
+      # LLM keys — prompted in the Dashboard on first deploy
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      # S3 storage — leave blank to use local disk (not recommended for production)
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      # OAuth provider credentials — add whichever connectors you support
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_TENANT_ID
+        value: common
+      - key: JIRA_CLIENT_ID
+        sync: false
+      - key: JIRA_CLIENT_SECRET
+        sync: false
+      - key: SALESFORCE_CLIENT_ID
+        sync: false
+      - key: SALESFORCE_CLIENT_SECRET
+        sync: false
+
+  # ── BullMQ Worker ───────────────────────────────────────────────────────────
+  - type: worker
+    name: kuvalam-worker
+    runtime: docker
+    dockerfilePath: apps/worker/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    buildFilter:
+      paths:
+        - apps/api/**
+        - apps/worker/**
+        - packages/**
+        - package.json
+        - package-lock.json
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: kuvalam-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: kuvalam-redis
+          type: keyvalue
+          property: connectionString
+      - key: JWT_SECRET
+        fromService:
+          name: kuvalam-api
+          type: web
+          envVarKey: JWT_SECRET
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        fromService:
+          name: kuvalam-api
+          type: web
+          envVarKey: CREDENTIAL_ENCRYPTION_KEY
+      - key: TASK_CONCURRENCY
+        value: "5"
+      - key: WORKFLOW_CONCURRENCY
+        value: "3"
+      - key: OPENAI_API_KEY
+        fromService:
+          name: kuvalam-api
+          type: web
+          envVarKey: OPENAI_API_KEY
+      - key: ANTHROPIC_API_KEY
+        fromService:
+          name: kuvalam-api
+          type: web
+          envVarKey: ANTHROPIC_API_KEY
+
+  # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
+  # Uses native Node runtime so NEXT_PUBLIC_API_URL is available at build time
+  - type: web
+    name: kuvalam-web
+    runtime: node
+    region: oregon
+    plan: starter
+    rootDir: apps/web
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    buildFilter:
+      paths:
+        - apps/web/**
+        - packages/**
+        - package.json
+        - package-lock.json
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Baked into Next.js bundle at build time — must point to the API's public URL
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          name: kuvalam-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  # ── Redis-compatible Key Value ──────────────────────────────────────────────
+  - type: keyvalue
+    name: kuvalam-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []  # Internal access only (private network)
+
+# ── Managed PostgreSQL ────────────────────────────────────────────────────────
+databases:
+  - name: kuvalam-db
+    plan: basic-256mb
+    region: oregon
+    postgresMajorVersion: "16"
+    # pgvector is enabled via migrations (CREATE EXTENSION IF NOT EXISTS vector)
+    # Render Postgres 16 supports pgvector natively

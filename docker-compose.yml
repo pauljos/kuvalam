@@ -1,0 +1,51 @@
+# docker-compose.yml
+# Kuvalam AI Workforce Operating System Services
+version: '3.8'
+
+services:
+  # Database Layer (PostgreSQL 16 + pgvector)
+  postgres:
+    image: pgvector/pgvector:16-pgdg
+    container_name: kuvalam-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kuvalam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-kuvalam_db}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kuvalam -d kuvalam_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # In-Memory Cache and Asynchronous Queue Store (Redis)
+  redis:
+    image: redis:7-alpine
+    container_name: kuvalam-redis
+    restart: always
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Maildev (Local SMTP Testing Service)
+  maildev:
+    image: maildev/maildev:latest
+    container_name: kuvalam-maildev
+    restart: always
+    ports:
+      - "1025:1025" # SMTP Port
+      - "1080:1080" # Web UI Port
+
+volumes:
+  postgres_data:
+  redis_data:

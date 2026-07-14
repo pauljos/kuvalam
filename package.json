@@ -1,0 +1,30 @@
+{
+  "name": "kuvalam",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kuvalam — AI Workforce Operating System",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/api\" \"npm run dev --workspace=apps/web\"",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:worker": "npm run dev --workspace=apps/worker",
+    "db:migrate": "npm run migrate --workspace=apps/api",
+    "db:seed": "npm run seed --workspace=apps/api",
+    "docker:up": "docker-compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker-compose -f infra/docker/docker-compose.yml down",
+    "docker:logs": "docker-compose -f infra/docker/docker-compose.yml logs -f",
+    "prod:up": "docker compose -f infra/docker/docker-compose.prod.yml up -d",
+    "prod:down": "docker compose -f infra/docker/docker-compose.prod.yml down",
+    "prod:logs": "docker compose -f infra/docker/docker-compose.prod.yml logs -f",
+    "prod:migrate": "docker compose -f infra/docker/docker-compose.prod.yml run --rm api node apps/api/src/db/migrate.js",
+    "test:web": "npm run test --workspace=apps/web",
+    "test:web:watch": "npm run test:watch --workspace=apps/web"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
