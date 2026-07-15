@@ -47,11 +47,18 @@ export default function AdminTenantsPage() {
   async function approveTenant(tenantId: string) {
     setActionLoading(tenantId)
     try {
-      await api.request(`/admin/tenants/${tenantId}/approve`, { method: 'POST' })
+      await api.request(`/admin/tenants/${tenantId}/approve`, { 
+        method: 'POST',
+        body: JSON.stringify({})
+      })
       setMsg({ type: 'success', text: 'Tenant approved successfully' })
       loadTenants()
     } catch (err: any) {
-      setMsg({ type: 'error', text: err.message })
+      console.error('Approve tenant error:', err)
+      setMsg({ 
+        type: 'error', 
+        text: err.message || 'Failed to approve tenant. Check console for details.' 
+      })
     } finally {
       setActionLoading(null)
     }
