@@ -14,7 +14,6 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules 2>/dev/null || true
 COPY apps/web ./apps/web
-COPY packages ./packages
 
 # Build args become Next.js public env vars at build time
 ARG NEXT_PUBLIC_API_URL

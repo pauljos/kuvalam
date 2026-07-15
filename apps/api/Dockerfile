@@ -7,7 +7,6 @@ RUN apk add --no-cache dumb-init
 FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
-COPY packages/shared/package.json ./packages/shared/ 2>/dev/null || true
 RUN npm ci --workspace=apps/api --include-workspace-root=false --omit=dev
 
 # ── Production image ───────────────────────────────────────────────────────
@@ -21,7 +20,6 @@ COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules 2>/dev/null 
 # Copy source
 COPY apps/api/src ./apps/api/src
 COPY apps/api/package.json ./apps/api/package.json
-COPY packages ./packages
 # Migrations are read at runtime by src/db/migrate.js (used by preDeployCommand on Render
 # and install.sh on-prem). Must be present inside the image.
 COPY infra/migrations ./infra/migrations

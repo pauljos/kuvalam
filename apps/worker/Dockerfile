@@ -8,7 +8,6 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/worker/package.json ./apps/worker/
-COPY packages/shared/package.json ./packages/shared/ 2>/dev/null || true
 RUN npm ci --workspace=apps/api --workspace=apps/worker --include-workspace-root=false --omit=dev
 
 FROM base AS runner
@@ -21,7 +20,6 @@ COPY apps/api/src ./apps/api/src
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/src ./apps/worker/src
 COPY apps/worker/package.json ./apps/worker/package.json
-COPY packages ./packages
 
 WORKDIR /app/apps/worker
 ENTRYPOINT ["dumb-init", "--"]
