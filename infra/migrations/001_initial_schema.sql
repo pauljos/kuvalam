@@ -3,6 +3,9 @@
 -- Migration: 001_initial_schema.sql
 -- ============================================================
 
+-- Enable pgvector extension for AI embeddings
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- ─────────────────────────────────────────
 -- PLATFORM LAYER
 -- ─────────────────────────────────────────
