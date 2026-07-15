@@ -13,9 +13,8 @@ RUN npm ci --workspace=apps/api --include-workspace-root=false --omit=dev
 FROM base AS runner
 ENV NODE_ENV=production
 
-# Copy installed node_modules (api only)
+# Copy installed node_modules
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules 2>/dev/null || true
 
 # Copy source
 COPY apps/api/src ./apps/api/src

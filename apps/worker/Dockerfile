@@ -13,8 +13,6 @@ RUN npm ci --workspace=apps/api --workspace=apps/worker --include-workspace-root
 FROM base AS runner
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules 2>/dev/null || true
-COPY --from=deps /app/apps/worker/node_modules ./apps/worker/node_modules 2>/dev/null || true
 
 COPY apps/api/src ./apps/api/src
 COPY apps/api/package.json ./apps/api/package.json
