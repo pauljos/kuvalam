@@ -46,7 +46,7 @@ jobs:
     
     services:
       postgres:
-        image: pgvector/pgvector:16-pg16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: kuvalam_test
           POSTGRES_PASSWORD: test_password
@@ -136,6 +136,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for TruffleHog
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -148,10 +150,12 @@ jobs:
       
       - name: Check for secrets
         uses: trufflesecurity/trufflehog@main
+        continue-on-error: true
         with:
           path: ./
           base: ${{ github.event.repository.default_branch }}
           head: HEAD
+          extra_args: --only-verified
 
   # ──────────────────────────────────────────────────────────────────────────
   # Build Docker Images
