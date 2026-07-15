@@ -3,6 +3,7 @@ import { query } from '../db/pool.js'
 import { auditLog } from '../utils/audit.js'
 import { errorResponse, AppError } from '../utils/errors.js'
 import { encrypt, decrypt } from '../services/crypto.service.js'
+import { cached, del as cacheDel } from '../services/cache.service.js'
 
 const SUPPORTED_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'ollama', 'groq', 'mistral', 'opencode', 'lmstudio', 'localai', 'custom']
 
@@ -19,10 +20,20 @@ export default async function settingsRoutes(fastify) {
   // GET /tenants/:tenantId/settings
   fastify.get('/tenants/:tenantId/settings', auth, async (req, reply) => {
     try {
-      const { rows: [tenant] } = await query(
-        'SELECT id, name, slug, plan, status, settings, llm_config, created_at FROM tenants WHERE id = $1',
-        [req.params.tenantId]
+      const tenantId = req.params.tenantId
+      
+      const tenant = await cached(
+        `tenant:${tenantId}:settings`,
+        async () => {
+          const { rows: [t] } = await query(
+            'SELECT id, name, slug, plan, status, settings, llm_config, created_at FROM tenants WHERE id = $1',
+            [tenantId]
+          )
+          return t
+        },
+        300 // Cache for 5 minutes
       )
+      
       if (!tenant) throw new AppError('TENANT_NOT_FOUND', 'Tenant not found', 404)
 
       // Mask API keys in response — only show last 4 chars
@@ -70,6 +81,9 @@ export default async function settingsRoutes(fastify) {
 
       await query('UPDATE tenants SET llm_config = $1 WHERE id = $2', [updatedConfig, req.params.tenantId])
 
+      // Invalidate cache
+      await cacheDel(`tenant:${req.params.tenantId}:settings`)
+
       await auditLog({
         eventType: 'tenant.llm_config_updated',
         tenantId: req.params.tenantId,
@@ -99,6 +113,10 @@ export default async function settingsRoutes(fastify) {
       }
 
       await query('UPDATE tenants SET llm_config = $1 WHERE id = $2', [updated, req.params.tenantId])
+      
+      // Invalidate cache
+      await cacheDel(`tenant:${req.params.tenantId}:settings`)
+      
       await auditLog({ eventType: 'tenant.llm_provider_removed', tenantId: req.params.tenantId, actorId: req.user.sub, actorType: 'USER', action: 'REMOVE_LLM_PROVIDER', afterState: { provider: req.params.provider } })
 
       return reply.send({ success: true, data: { llm_config: maskLLMConfig(updated) }, meta: ts() })

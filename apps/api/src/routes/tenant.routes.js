@@ -1,6 +1,7 @@
 // apps/api/src/routes/tenant.routes.js
 import * as tenantService from '../services/tenant.service.js'
 import { errorResponse } from '../utils/errors.js'
+import { cached, del as cacheDel } from '../services/cache.service.js'
 
 export default async function tenantRoutes(fastify) {
   const auth = { preHandler: [fastify.authenticate] }
@@ -23,7 +24,12 @@ export default async function tenantRoutes(fastify) {
   // GET /tenants/:tenantId
   fastify.get('/tenants/:tenantId', auth, async (request, reply) => {
     try {
-      const tenant = await tenantService.getTenant(request.params.tenantId)
+      const tenantId = request.params.tenantId
+      const tenant = await cached(
+        `tenant:${tenantId}:info`,
+        () => tenantService.getTenant(tenantId),
+        600 // Cache for 10 minutes
+      )
       return reply.send({ success: true, data: tenant, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
@@ -31,7 +37,10 @@ export default async function tenantRoutes(fastify) {
   // PATCH /tenants/:tenantId
   fastify.patch('/tenants/:tenantId', requireRole(['OWNER', 'ADMIN']), async (request, reply) => {
     try {
-      const tenant = await tenantService.updateTenant(request.params.tenantId, request.body, request.user.sub)
+      const tenantId = request.params.tenantId
+      const tenant = await tenantService.updateTenant(tenantId, request.body, request.user.sub)
+      // Invalidate cache
+      await cacheDel(`tenant:${tenantId}:info`)
       return reply.send({ success: true, data: tenant, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
@@ -39,7 +48,12 @@ export default async function tenantRoutes(fastify) {
   // GET /tenants/:tenantId/members
   fastify.get('/tenants/:tenantId/members', auth, async (request, reply) => {
     try {
-      const members = await tenantService.getMembers(request.params.tenantId)
+      const tenantId = request.params.tenantId
+      const members = await cached(
+        `tenant:${tenantId}:members`,
+        () => tenantService.getMembers(tenantId),
+        300 // Cache for 5 minutes
+      )
       return reply.send({ success: true, data: { members }, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })

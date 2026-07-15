@@ -29,6 +29,7 @@ import profileRoutes from './routes/profile.routes.js'
 import { initQueues, getQueueStats, shutdownQueues } from './services/queue.service.js'
 import { startScheduler, stopScheduler, getSchedulerStatus } from './services/scheduler.service.js'
 import { initTelemetry } from './services/telemetry.service.js'
+import { initCache, shutdownCache } from './services/cache.service.js'
 
 const fastify = Fastify({
   logger: {
@@ -267,6 +268,10 @@ try {
     fastify.log.info(`📬 Job queue: ${ready ? 'BullMQ/Redis' : 'in-process fallback'}`)
   })
 
+  // Initialize Redis cache
+  const cacheReady = initCache()
+  fastify.log.info(`💾 Cache: ${cacheReady ? 'Redis enabled' : 'disabled'}`)
+
   // Start cron-based workflow schedule trigger (non-blocking)
   startScheduler().catch(err => fastify.log.warn(`[Scheduler] Startup error: ${err.message}`))
 
@@ -283,6 +288,7 @@ async function gracefulShutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down`)
   stopScheduler()
   await shutdownQueues(fastify.log).catch(() => {})
+  await shutdownCache().catch(() => {})
   await fastify.close()
   process.exit(0)
 }
