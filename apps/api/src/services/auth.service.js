@@ -1,7 +1,7 @@
 // apps/api/src/services/auth.service.js
 import bcrypt from 'bcryptjs'
 import { randomBytes } from 'crypto'
-import { query } from '../db/pool.js'
+import { query, getClient } from '../db/pool.js'
 import { hashToken, generateTokens } from '../utils/jwt.js'
 import { sendEmail } from '../utils/email.js'
 import { auditLog } from '../utils/audit.js'
@@ -36,7 +36,7 @@ export async function registerUser({ email, password, name, tenantName, tenantSl
   const passwordHash = await bcrypt.hash(password, 12)
 
   // Start transaction
-  const client = await query.pool.connect()
+  const client = await getClient()
   try {
     await client.query('BEGIN')
 
