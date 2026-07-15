@@ -7,13 +7,13 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/worker/package.json ./apps/worker/
-# Install ALL dependencies at root level
 RUN npm install --production --legacy-peer-deps
 
 FROM base AS runner
 ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
+ENV NODE_PATH=/app/node_modules
 
+COPY --from=deps /app/node_modules ./node_modules
 COPY apps/api/src ./apps/api/src
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/src ./apps/worker/src
