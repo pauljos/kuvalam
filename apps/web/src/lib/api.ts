@@ -55,11 +55,18 @@ async function request(path: string, options: RequestInit = {}, _isRetry = false
 
   if (!res.ok) {
     if (res.status === 401 && typeof window !== 'undefined') {
-      console.warn('Session expired or unauthorized. Redirecting to login.')
-      localStorage.removeItem('kuvalam_user')
-      localStorage.removeItem('kuvalam_tenants')
-      localStorage.removeItem('kuvalam_tenant_id')
-      window.location.href = '/'
+      // Don't auto-logout if accessing admin routes (might be permission issue, not auth)
+      if (!path.startsWith('/admin/')) {
+        console.warn('Session expired or unauthorized. Redirecting to login.')
+        localStorage.removeItem('kuvalam_user')
+        localStorage.removeItem('kuvalam_tenants')
+        localStorage.removeItem('kuvalam_tenant_id')
+        localStorage.removeItem('kuvalam_tenant')
+        window.location.href = '/'
+      } else {
+        // For admin routes, show the error without logging out
+        console.error('Admin access denied:', data.error)
+      }
     }
     const err = new Error(data.error?.message || 'Request failed')
     ;(err as any).code = data.error?.code

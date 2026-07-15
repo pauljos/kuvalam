@@ -25,11 +25,16 @@ export default function AdminTenantsPage() {
 
   async function loadTenants() {
     setLoading(true)
+    setMsg(null)
     try {
       const data = await api.request(`/admin/tenants${filter ? `?status=${filter}` : ''}`)
       setTenants(data.tenants || [])
     } catch (err: any) {
-      setMsg({ type: 'error', text: err.message })
+      console.error('Admin tenants error:', err)
+      setMsg({ 
+        type: 'error', 
+        text: err.message || 'Failed to load tenants. Please check if you have system admin access.' 
+      })
     } finally {
       setLoading(false)
     }
