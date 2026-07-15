@@ -67,7 +67,13 @@ export default function LoginPage() {
           password: form.password,
           tenantSlug: form.tenantSlug 
         })
-        // accessToken is now set as an httpOnly cookie by the API — do NOT store in localStorage
+        
+        // Store access token for Authorization header (needed for cross-origin)
+        if (data.accessToken) {
+          localStorage.setItem('kuvalam_access_token', data.accessToken)
+        }
+        
+        // Store user data
         localStorage.setItem('kuvalam_user', JSON.stringify(data.user))
         
         if (data.tenant) {

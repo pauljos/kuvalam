@@ -37,6 +37,15 @@ async function request(path: string, options: RequestInit = {}, _isRetry = false
     ...(options.headers as Record<string, string> || {}),
   }
 
+  // For cross-origin requests, cookies might not work, so also send token via Authorization header
+  // Read from localStorage as a fallback
+  if (typeof window !== 'undefined') {
+    const tokenData = localStorage.getItem('kuvalam_access_token')
+    if (tokenData) {
+      headers['Authorization'] = `Bearer ${tokenData}`
+    }
+  }
+
   const res = await fetch(`${API}${path}`, {
     ...options,
     headers,

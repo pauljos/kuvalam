@@ -83,9 +83,8 @@ export default async function authRoutes(fastify) {
       return reply.send({
         success: true,
         data: {
-          // accessToken is delivered ONLY via the httpOnly cookie above.
-          // Body still carries the refresh token for non-browser clients
-          // (CLI, scripts). Browser clients ignore it and rely on the cookie.
+          // Return accessToken in body for cross-origin requests where cookies don't work
+          accessToken,
           refreshToken: result.refreshToken,
           user: result.user,
           tenant: result.tenant
