@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import { useConfirm } from '@/components/ConfirmModal'
+import { Shield } from 'lucide-react'
 
 const PROVIDERS: Array<{
   id: string
@@ -257,6 +258,27 @@ export default function SettingsPage() {
   useEffect(() => {
     if (tenantId) load(tenantId)
   }, [tenantId, load])
+
+  // Show message if sysadmin without tenant
+  if (!tenantId) {
+    return (
+      <div className="page">
+        <div className="page-header">
+          <h1>Settings</h1>
+        </div>
+        <div className="card" style={{ padding: 40, textAlign: 'center' }}>
+          <Shield size={48} style={{ color: 'var(--green)', margin: '0 auto 16px' }} />
+          <h2 style={{ fontSize: 18, marginBottom: 8 }}>System Administrator</h2>
+          <p style={{ color: 'var(--text-muted)', marginBottom: 20 }}>
+            You're logged in as a system administrator without an organization.
+          </p>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>
+            Settings are organization-specific. Use the <strong>System Portal</strong> to manage all organizations.
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   const providers = settings?.llm_config?.providers || {}
   const defaultProvider = settings?.llm_config?.defaultProvider

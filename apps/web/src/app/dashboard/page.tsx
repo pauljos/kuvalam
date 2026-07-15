@@ -40,7 +40,7 @@ function humaniseEvent(ev: string): string {
 }
 
 export default function DashboardPage() {
-  const { tenantId } = useApp()
+  const { tenantId, user } = useApp()
   const [agents, setAgents] = useState<any[]>([])
   const [kbs, setKbs] = useState<any[]>([])
   const [tenant, setTenant] = useState<any>(null)
@@ -48,6 +48,13 @@ export default function DashboardPage() {
   const [pendingApprovals, setPendingApprovals] = useState(0)
   const [runningTasks, setRunningTasks] = useState(0)
   const [providerCount, setProviderCount] = useState(0)
+  
+  // Redirect sysadmins without tenant to admin portal
+  useEffect(() => {
+    if (!tenantId && user?.isSystemAdmin && typeof window !== 'undefined') {
+      window.location.href = '/dashboard/admin'
+    }
+  }, [tenantId, user])
   const [workflowCount, setWorkflowCount] = useState(0)
   const [activity, setActivity] = useState<AuditEntry[]>([])
 
