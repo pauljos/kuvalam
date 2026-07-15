@@ -1,5 +1,6 @@
 // src/lib/api.ts — API client
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API = API_BASE.endsWith('/api/v1') ? API_BASE : `${API_BASE}/api/v1`
 
 // Re-export shared API types so consumers can `import { Agent } from '@/lib/api'`
 export * from './api-types'
