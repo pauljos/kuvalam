@@ -244,11 +244,6 @@ export default function LoginPage() {
               <ArrowRight size={13} strokeWidth={2.5} />
             </button>
           </p>
-            >
-              {mode === 'login' ? 'Create an account' : 'Sign in'}
-              <ArrowRight size={13} strokeWidth={2.5} />
-            </button>
-          </p>
 
           <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {mode === 'register' && (
