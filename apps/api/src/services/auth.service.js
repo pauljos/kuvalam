@@ -177,7 +177,7 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     actorId: user.id, 
     actorType: 'USER', 
     action: 'LOGIN', 
-    metadata: { ip, tenantSlug: normalizedSlug } 
+    metadata: { ip, tenantSlug: tenantSlug || null } 
   })
 
   return {
