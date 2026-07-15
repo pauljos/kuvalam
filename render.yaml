@@ -177,14 +177,6 @@ services:
           type: web
           envVarKey: RENDER_EXTERNAL_URL
 
-  # ── Redis-compatible Key Value ──────────────────────────────────────────────
-  - type: keyvalue
-    name: kuvalam-redis
-    plan: free
-    region: oregon
-    maxmemoryPolicy: allkeys-lru
-    ipAllowList: []  # Internal access only (private network)
-
 # ── Managed PostgreSQL ────────────────────────────────────────────────────────
 databases:
   - name: kuvalam-db
@@ -193,3 +185,11 @@ databases:
     postgresMajorVersion: "16"
     # pgvector is enabled via migrations (CREATE EXTENSION IF NOT EXISTS vector)
     # Render Postgres 16 supports pgvector natively
+
+# ── Redis-compatible Key Value ──────────────────────────────────────────────
+keyvalues:
+  - name: kuvalam-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []  # Internal access only (private network)
