@@ -68,9 +68,12 @@ export default function LoginPage() {
           tenantSlug: form.tenantSlug 
         })
         
-        // Store access token for Authorization header (needed for cross-origin)
+        // Store tokens for Authorization header (needed for cross-origin)
         if (data.accessToken) {
           localStorage.setItem('kuvalam_access_token', data.accessToken)
+        }
+        if (data.refreshToken) {
+          localStorage.setItem('kuvalam_refresh_token', data.refreshToken)
         }
         
         // Store user data

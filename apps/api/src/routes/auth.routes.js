@@ -134,8 +134,15 @@ export default async function authRoutes(fastify) {
         maxAge: 15 * 60
       })
 
-      // Token is delivered via httpOnly cookie only
-      return reply.send({ success: true, data: { expiresAt: result.expiresAt }, meta: ts(request) })
+      // Return accessToken in body for cross-origin requests
+      return reply.send({ 
+        success: true, 
+        data: { 
+          accessToken,
+          expiresAt: result.expiresAt 
+        }, 
+        meta: ts(request) 
+      })
     } catch (err) {
       return errorResponse(reply, err)
     }

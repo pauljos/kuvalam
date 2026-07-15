@@ -13,14 +13,25 @@ async function tryRefreshSession(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight
   refreshInFlight = (async () => {
     try {
-      // Server reads the httpOnly kuvalam_refresh cookie — no body needed.
+      // Try to refresh using the refresh token
+      const refreshToken = localStorage.getItem('kuvalam_refresh_token')
+      
       const res = await fetch(`${API}/auth/refresh`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify(refreshToken ? { refreshToken } : {}),
       })
-      return res.ok
+      
+      if (res.ok) {
+        const data = await res.json()
+        // Store new access token
+        if (data.data?.accessToken) {
+          localStorage.setItem('kuvalam_access_token', data.data.accessToken)
+          return true
+        }
+      }
+      return false
     } catch {
       return false
     } finally {
