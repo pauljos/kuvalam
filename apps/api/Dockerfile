@@ -10,8 +10,10 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
 COPY apps/worker/package.json ./apps/worker/
+# Cache bust to force reinstall
+RUN echo "Build date: 2026-07-15-v2" > /tmp/cache-bust
 # Now npm ci will work properly with complete workspace info
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && ls -la node_modules/@fastify/
 
 # ── Production image ───────────────────────────────────────────────────────
 FROM base AS runner
