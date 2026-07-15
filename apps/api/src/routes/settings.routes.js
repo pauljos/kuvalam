@@ -251,7 +251,7 @@ function getDefaultBaseUrl(provider) {
     groq: 'https://api.groq.com/openai/v1',
     mistral: 'https://api.mistral.ai/v1',
     ollama: 'http://localhost:11434/v1',
-    opencode: 'https://console.opencode.ai/inference/openai/v1',
+    opencode: 'https://api.opencode.ai/v1',
     lmstudio: 'http://localhost:1234/v1',
     localai: 'http://localhost:8080/v1',
     custom: null

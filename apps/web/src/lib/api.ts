@@ -67,7 +67,9 @@ async function request(path: string, options: RequestInit = {}, _isRetry = false
   // cookie, then replay the original request exactly once. This makes the
   // 15-minute JWT invisible to users \u2014 sessions feel like they last 30 days.
   if (res.status === 401 && !_isRetry && !path.startsWith('/auth/')) {
+    console.log('Token expired, attempting refresh...')
     const refreshed = await tryRefreshSession()
+    console.log('Refresh result:', refreshed)
     if (refreshed) return request(path, options, true)
   }
 
