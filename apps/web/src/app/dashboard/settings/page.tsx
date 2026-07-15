@@ -221,7 +221,8 @@ export default function SettingsPage() {
   const { tenantId, toast } = useApp()
   const [settings, setSettings] = useState<any>(null)
   const [tab, setTab] = useState<'llm' | 'general' | 'members'>('llm')
-  const [loading, setLoading] = useState(true)
+  const [loadingSettings, setLoadingSettings] = useState(true)
+  const [loadingMembers, setLoadingMembers] = useState(true)
   const [members, setMembers] = useState<any[]>([])
   const [inviteForm, setInviteForm] = useState({ email: '', role: 'BUILDER' })
   const [inviting, setInviting] = useState(false)
@@ -229,13 +230,29 @@ export default function SettingsPage() {
   const [savingGeneral, setSavingGeneral] = useState(false)
 
   const load = useCallback(async (tid: string) => {
-    try {
-      const [s, m] = await Promise.all([api.getSettings(tid), api.getMembers(tid)])
-      setSettings(s)
-      setGeneralForm({ name: s.name })
-      setMembers(m.members || [])
-    } finally { setLoading(false) }
-  }, [])
+    // Load settings first (usually faster and needed for all tabs)
+    api.getSettings(tid)
+      .then(s => {
+        setSettings(s)
+        setGeneralForm({ name: s.name })
+        setLoadingSettings(false)
+      })
+      .catch(err => {
+        toast('error', 'Failed to load settings', err.message)
+        setLoadingSettings(false)
+      })
+    
+    // Load members separately (only needed for members tab)
+    api.getMembers(tid)
+      .then(m => {
+        setMembers(m.members || [])
+        setLoadingMembers(false)
+      })
+      .catch(err => {
+        toast('error', 'Failed to load members', err.message)
+        setLoadingMembers(false)
+      })
+  }, [toast])
 
   useEffect(() => {
     if (tenantId) load(tenantId)
@@ -292,9 +309,10 @@ export default function SettingsPage() {
 
       <div className="page-body" style={{ maxWidth: 860 }}>
 
-      {loading ? <div className="skeleton" style={{ height: 400, borderRadius: 12 }} /> : (
-
-        tab === 'llm' ? (
+      {tab === 'llm' ? (
+        loadingSettings ? (
+          <div className="skeleton" style={{ height: 400, borderRadius: 12 }} />
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {/* Default provider banner */}
             {defaultProvider && (
@@ -325,7 +343,11 @@ export default function SettingsPage() {
               </p>
             </div>
           </div>
-        ) : tab === 'general' ? (
+        )
+      ) : tab === 'general' ? (
+        loadingSettings ? (
+          <div className="skeleton" style={{ height: 400, borderRadius: 12 }} />
+        ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
             <div className="card" style={{ padding: 28 }}>
               <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 20 }}>Organisation Details</h2>
@@ -358,6 +380,10 @@ export default function SettingsPage() {
               <button className="btn btn-danger btn-sm" onClick={() => toast('info', 'Contact support', 'Please email support@kuvalam.ai to delete your organisation.')}>Delete Organisation</button>
             </div>
           </div>
+        )
+      ) : (
+        loadingMembers ? (
+          <div className="skeleton" style={{ height: 400, borderRadius: 12 }} />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {/* Invite form */}
