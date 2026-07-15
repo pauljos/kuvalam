@@ -12,6 +12,7 @@ RUN npm ci --workspace=apps/web --include-workspace-root=false
 FROM base AS builder
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json ./
 COPY apps/web ./apps/web
 
 # Build args become Next.js public env vars at build time
