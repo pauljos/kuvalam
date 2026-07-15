@@ -25,11 +25,8 @@ services:
     buildFilter:
       paths:
         - apps/api/**
-        - packages/**
         - package.json
         - package-lock.json
-    # Run DB migrations before each new deployment goes live
-    preDeployCommand: node apps/api/src/db/migrate.js
     envVars:
       - key: NODE_ENV
         value: production
