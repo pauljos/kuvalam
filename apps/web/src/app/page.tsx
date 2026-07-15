@@ -31,7 +31,14 @@ const BRAND = {
 export default function LoginPage() {
   const router = useRouter()
   const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [form, setForm] = useState({ email: '', password: '', name: '' })
+  const [form, setForm] = useState({ 
+    email: '', 
+    password: '', 
+    name: '', 
+    tenantSlug: '',
+    tenantName: '',
+    orgSlug: '' 
+  })
   const [loading, setLoading] = useState(false)
   const [msg, setMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null)
   const set = (k: string) => (e: any) => setForm(f => ({ ...f, [k]: e.target.value }))
@@ -40,16 +47,33 @@ export default function LoginPage() {
     e.preventDefault(); setLoading(true); setMsg(null)
     try {
       if (mode === 'register') {
-        await api.register(form)
+        const result = await api.register({
+          email: form.email,
+          password: form.password,
+          name: form.name,
+          tenantName: form.tenantName,
+          tenantSlug: form.orgSlug
+        })
+        setMsg({ 
+          type: 'success', 
+          text: result.approvalStatus === 'PENDING' 
+            ? 'Registration successful! Your organization is pending approval. You\'ll receive an email once approved.'
+            : 'Account created! Sign in below.' 
+        })
         setMode('login')
-        setMsg({ type: 'success', text: 'Account created! Sign in below.' })
       } else {
-        const data = await api.login({ email: form.email, password: form.password })
+        const data = await api.login({ 
+          email: form.email, 
+          password: form.password,
+          tenantSlug: form.tenantSlug 
+        })
         // accessToken is now set as an httpOnly cookie by the API — do NOT store in localStorage
         localStorage.setItem('kuvalam_user', JSON.stringify(data.user))
-        localStorage.setItem('kuvalam_tenants', JSON.stringify(data.tenants))
-        if (data.tenants?.length > 0) {
-          localStorage.setItem('kuvalam_tenant_id', data.tenants[0].id)
+        if (data.tenant) {
+          localStorage.setItem('kuvalam_tenant', JSON.stringify(data.tenant))
+          localStorage.setItem('kuvalam_tenant_id', data.tenant.id)
+          router.push('/dashboard')
+        } else if (data.user?.isSystemAdmin) {
           router.push('/dashboard')
         } else {
           router.push('/onboarding')
@@ -223,10 +247,31 @@ export default function LoginPage() {
 
           <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {mode === 'register' && (
-              <div className="form-group">
-                <label className="form-label">Full name</label>
-                <input className="input" placeholder="Paul Joseph" value={form.name} onChange={set('name')} required />
-              </div>
+              <>
+                <div className="form-group">
+                  <label className="form-label">Full name</label>
+                  <input className="input" placeholder="Paul Joseph" value={form.name} onChange={set('name')} required />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Organization name</label>
+                  <input className="input" placeholder="Acme Inc" value={form.tenantName} onChange={set('tenantName')} required />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Organization slug</label>
+                  <input 
+                    className="input" 
+                    placeholder="acme" 
+                    value={form.orgSlug} 
+                    onChange={set('orgSlug')} 
+                    pattern="[a-z0-9-]+"
+                    title="Lowercase letters, numbers, and hyphens only"
+                    required 
+                  />
+                  <p style={{ fontSize: 11, color: BRAND.textMuted, marginTop: 4 }}>
+                    Used in your login URL (lowercase, no spaces)
+                  </p>
+                </div>
+              </>
             )}
             <div className="form-group">
               <label className="form-label">Work email</label>
@@ -243,6 +288,15 @@ export default function LoginPage() {
                 </div>
               )}
             </div>
+            {mode === 'login' && (
+              <div className="form-group">
+                <label className="form-label">Organization slug</label>
+                <input className="input" placeholder="acme" value={form.tenantSlug} onChange={set('tenantSlug')} required />
+                <p style={{ fontSize: 11, color: BRAND.textMuted, marginTop: 4 }}>
+                  The organization slug you registered with
+                </p>
+              </div>
+            )}
 
             {msg && (
               <div

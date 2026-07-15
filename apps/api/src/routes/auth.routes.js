@@ -12,11 +12,13 @@ export default async function authRoutes(fastify) {
     schema: {
       body: {
         type: 'object',
-        required: ['email', 'password', 'name'],
+        required: ['email', 'password', 'name', 'tenantName', 'tenantSlug'],
         properties: {
           email: { type: 'string', format: 'email', maxLength: 254 },
           password: { type: 'string', minLength: 8, maxLength: 200 },
-          name: { type: 'string', minLength: 1, maxLength: 100 }
+          name: { type: 'string', minLength: 1, maxLength: 100 },
+          tenantName: { type: 'string', minLength: 1, maxLength: 255 },
+          tenantSlug: { type: 'string', minLength: 1, maxLength: 100, pattern: '^[a-z0-9-]+$' }
         }
       }
     }
@@ -38,10 +40,11 @@ export default async function authRoutes(fastify) {
     schema: {
       body: {
         type: 'object',
-        required: ['email', 'password'],
+        required: ['email', 'password', 'tenantSlug'],
         properties: {
           email: { type: 'string', maxLength: 254 },
-          password: { type: 'string', maxLength: 200 }
+          password: { type: 'string', maxLength: 200 },
+          tenantSlug: { type: 'string', maxLength: 100 }
         }
       }
     }
@@ -85,7 +88,7 @@ export default async function authRoutes(fastify) {
           // (CLI, scripts). Browser clients ignore it and rely on the cookie.
           refreshToken: result.refreshToken,
           user: result.user,
-          tenants: result.tenants
+          tenant: result.tenant
         },
         meta: ts(request)
       })

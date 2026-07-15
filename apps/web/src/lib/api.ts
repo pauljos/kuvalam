@@ -83,6 +83,9 @@ export async function authedFetch(input: string | URL, init: RequestInit = {}): 
 }
 
 export const api = {
+  // Generic request helper for custom endpoints
+  request: (path: string, options?: RequestInit) => request(path, options),
+  
   // Auth
   register: (body: any) => request('/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   login: (body: any) => request('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
