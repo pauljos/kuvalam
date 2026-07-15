@@ -139,16 +139,13 @@ services:
         value: "5"
       - key: WORKFLOW_CONCURRENCY
         value: "3"
+      # LLM keys — OPTIONAL (inherited from API or tenants configure their own)
       - key: OPENAI_API_KEY
-        fromService:
-          name: kuvalam-api
-          type: web
-          envVarKey: OPENAI_API_KEY
+        sync: false
       - key: ANTHROPIC_API_KEY
-        fromService:
-          name: kuvalam-api
-          type: web
-          envVarKey: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web
