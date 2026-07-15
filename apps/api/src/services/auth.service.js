@@ -98,13 +98,7 @@ export async function registerUser({ email, password, name, tenantName, tenantSl
 }
 
 export async function loginUser({ email, password, tenantSlug, ip }) {
-  // Tenant slug is required
-  if (!tenantSlug) {
-    throw new AppError('TENANT_SLUG_REQUIRED', 'Organization slug is required to login', 400)
-  }
-
   const normalizedEmail = email.toLowerCase()
-  const normalizedSlug = tenantSlug.toLowerCase().trim()
 
   const { rows } = await query(
     `SELECT id, email, name, password_hash, email_verified, mfa_enabled, is_system_admin
@@ -122,21 +116,32 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     throw new AppError('INVALID_CREDENTIALS', 'Invalid email or password', 401)
   }
 
-  // Get user's membership in the specified tenant
-  const { rows: memberships } = await query(
-    `SELECT tm.role, tm.status, t.id, t.name, t.slug, t.plan, t.status as tenant_status, t.approval_status
-     FROM tenant_members tm
-     JOIN tenants t ON t.id = tm.tenant_id
-     WHERE tm.user_id = $1 AND tm.status = 'ACTIVE' AND t.slug = $2`,
-    [user.id, normalizedSlug]
-  )
-
-  // System admins can login without tenant membership
-  if (memberships.length === 0 && !user.is_system_admin) {
-    throw new AppError('TENANT_ACCESS_DENIED', 'You do not have access to this organization', 403)
+  // System admins can login without tenant slug
+  if (!tenantSlug && !user.is_system_admin) {
+    throw new AppError('TENANT_SLUG_REQUIRED', 'Organization slug is required to login', 400)
   }
 
-  const tenantMembership = memberships[0]
+  let tenantMembership = null
+
+  // If tenant slug provided, verify access to that tenant
+  if (tenantSlug) {
+    const normalizedSlug = tenantSlug.toLowerCase().trim()
+    
+    const { rows: memberships } = await query(
+      `SELECT tm.role, tm.status, t.id, t.name, t.slug, t.plan, t.status as tenant_status, t.approval_status
+       FROM tenant_members tm
+       JOIN tenants t ON t.id = tm.tenant_id
+       WHERE tm.user_id = $1 AND tm.status = 'ACTIVE' AND t.slug = $2`,
+      [user.id, normalizedSlug]
+    )
+
+    // System admins can access any tenant, regular users need membership
+    if (memberships.length === 0 && !user.is_system_admin) {
+      throw new AppError('TENANT_ACCESS_DENIED', 'You do not have access to this organization', 403)
+    }
+
+    tenantMembership = memberships[0]
+  }
 
   // Check tenant approval status (system admins can bypass)
   if (!user.is_system_admin && tenantMembership) {

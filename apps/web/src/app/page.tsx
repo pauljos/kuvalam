@@ -233,12 +233,17 @@ export default function LoginPage() {
           <p style={{ color: BRAND.textMuted, marginBottom: 30, fontSize: 14 }}>
             {mode === 'login' ? "New to Kuvalam? " : 'Already have an account? '}
             <button
-              onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMsg(null) }}
+              onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMsg(null); setForm({ email: '', password: '', name: '', tenantSlug: '', tenantName: '', orgSlug: '' }) }}
               style={{
                 background: 'none', border: 'none', color: BRAND.green,
                 fontWeight: 700, cursor: 'pointer', fontSize: 14, fontFamily: 'inherit',
                 padding: 0, display: 'inline-flex', alignItems: 'center', gap: 3,
               }}
+            >
+              {mode === 'login' ? 'Create an account' : 'Sign in'}
+              <ArrowRight size={13} strokeWidth={2.5} />
+            </button>
+          </p>
             >
               {mode === 'login' ? 'Create an account' : 'Sign in'}
               <ArrowRight size={13} strokeWidth={2.5} />
@@ -290,10 +295,10 @@ export default function LoginPage() {
             </div>
             {mode === 'login' && (
               <div className="form-group">
-                <label className="form-label">Organization slug</label>
-                <input className="input" placeholder="acme" value={form.tenantSlug} onChange={set('tenantSlug')} required />
+                <label className="form-label">Organization slug (optional for system admins)</label>
+                <input className="input" placeholder="acme" value={form.tenantSlug} onChange={set('tenantSlug')} />
                 <p style={{ fontSize: 11, color: BRAND.textMuted, marginTop: 4 }}>
-                  The organization slug you registered with
+                  Leave blank if you're a system administrator
                 </p>
               </div>
             )}

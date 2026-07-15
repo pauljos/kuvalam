@@ -40,7 +40,7 @@ export default async function authRoutes(fastify) {
     schema: {
       body: {
         type: 'object',
-        required: ['email', 'password', 'tenantSlug'],
+        required: ['email', 'password'],
         properties: {
           email: { type: 'string', maxLength: 254 },
           password: { type: 'string', maxLength: 200 },
