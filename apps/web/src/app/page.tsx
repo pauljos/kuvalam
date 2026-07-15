@@ -69,11 +69,16 @@ export default function LoginPage() {
         })
         // accessToken is now set as an httpOnly cookie by the API — do NOT store in localStorage
         localStorage.setItem('kuvalam_user', JSON.stringify(data.user))
+        
         if (data.tenant) {
+          // Store tenant as both singular and in array format for compatibility
           localStorage.setItem('kuvalam_tenant', JSON.stringify(data.tenant))
+          localStorage.setItem('kuvalam_tenants', JSON.stringify([data.tenant]))
           localStorage.setItem('kuvalam_tenant_id', data.tenant.id)
           router.push('/dashboard')
         } else if (data.user?.isSystemAdmin) {
+          // System admins don't need a tenant
+          localStorage.setItem('kuvalam_tenants', JSON.stringify([]))
           router.push('/dashboard')
         } else {
           router.push('/onboarding')

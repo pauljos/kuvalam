@@ -58,13 +58,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const u = localStorage.getItem('kuvalam_user')
       const t = localStorage.getItem('kuvalam_tenant_id')
       const ts = localStorage.getItem('kuvalam_tenants')
-      if (u) setUser(JSON.parse(u))
+      
+      if (u) {
+        const parsedUser = JSON.parse(u)
+        setUser(parsedUser)
+        
+        // System admins don't need a tenant
+        if (parsedUser.isSystemAdmin && (!ts || ts === '[]')) {
+          setTenants([])
+          setTenantState(null)
+          return
+        }
+      }
+      
       if (ts) {
         const parsed: Tenant[] = JSON.parse(ts)
         setTenants(parsed)
         if (t) {
           const active = parsed.find(x => x.id === t) || parsed[0] || null
           setTenantState(active)
+        } else if (parsed.length > 0) {
+          setTenantState(parsed[0])
         }
       }
     } catch { /* ignore corrupt localStorage */ }
