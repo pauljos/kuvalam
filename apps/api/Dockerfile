@@ -14,8 +14,9 @@ RUN npm ci --omit=dev
 FROM base AS runner
 ENV NODE_ENV=production
 
-# Copy installed node_modules
+# Copy installed node_modules to both root and api directory
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/node_modules ./apps/api/node_modules
 
 # Copy source
 COPY apps/api/src ./apps/api/src
