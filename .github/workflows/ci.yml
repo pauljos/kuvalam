@@ -205,9 +205,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Deploy to Render (Staging)
+      - name: Trigger Render Deployment
         run: |
-          echo "Deployment to staging triggered"
-          # Add Render deploy webhook or other deployment steps here
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          if [ -z "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" ]; then
+            echo "⚠️ RENDER_DEPLOY_HOOK_URL secret not set"
+            echo "To enable auto-deploy:"
+            echo "1. Get deploy hook from Render Dashboard → Service → Settings"
+            echo "2. Add to GitHub Secrets as RENDER_DEPLOY_HOOK_URL"
+            echo ""
+            echo "For now, deploy manually at https://dashboard.render.com"
+          else
+            echo "🚀 Triggering Render deployment..."
+            curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+            echo "✅ Deployment triggered!"
+          fi

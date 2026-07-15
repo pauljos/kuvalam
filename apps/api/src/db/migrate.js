@@ -33,7 +33,12 @@ async function migrate() {
     // Auto-discover migrations from infra/migrations — pick up any *.sql file
     // ordered by filename (which starts with NNN_). This way ops don't have to
     // remember to edit this file when adding a new migration.
-    const migrationsDir = join(__dirname, '../../../../infra/migrations')
+    // In Docker: /app/infra/migrations (from container root)
+    // In local dev: ../../../../infra/migrations (from apps/api/src/db)
+    const migrationsDir = process.env.NODE_ENV === 'production'
+      ? '/app/infra/migrations'
+      : join(__dirname, '../../../../infra/migrations')
+    
     const { readdirSync } = await import('fs')
     const migrations = readdirSync(migrationsDir)
       .filter(f => /^\d+_.+\.sql$/i.test(f))
