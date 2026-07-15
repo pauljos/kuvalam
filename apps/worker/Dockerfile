@@ -11,7 +11,6 @@ RUN npm install --production --legacy-peer-deps
 
 FROM base AS runner
 ENV NODE_ENV=production
-ENV NODE_PATH=/app/node_modules
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/api/src ./apps/api/src
@@ -19,6 +18,9 @@ COPY apps/api/package.json ./apps/api/package.json
 COPY apps/worker/src ./apps/worker/src
 COPY apps/worker/package.json ./apps/worker/package.json
 
-WORKDIR /app/apps/worker
+# Stay at /app root
+WORKDIR /app
+
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "src/index.js"]
+# Run from root with full path
+CMD ["node", "apps/worker/src/index.js"]
