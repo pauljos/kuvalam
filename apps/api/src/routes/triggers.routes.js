@@ -135,19 +135,36 @@ export default async function triggersRoutes(fastify) {
          WHERE t.id = $1 AND t.tenant_id = $2 AND t.trigger_type = 'WEBHOOK' AND t.is_active = TRUE`,
         [triggerId, tenantId]
       )
-      if (!trigger) return reply.status(404).send({ success: false, error: 'Trigger not found' })
+      if (!trigger) return reply.status(404).send({ success: false, error: 'Trigger not found or inactive' })
 
-      // Verify HMAC signature
+      // ✅ FIX 1: Enforce HMAC signature verification
       const secret = trigger.config?.secret
       const signature = req.headers['x-kuvalam-signature']
-      if (secret && signature) {
-        const expected = 'sha256=' + crypto
-          .createHmac('sha256', secret)
-          .update(JSON.stringify(req.body))
-          .digest('hex')
-        if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
-          return reply.status(401).send({ success: false, error: 'Invalid signature' })
-        }
+      
+      if (!secret) {
+        return reply.status(500).send({ 
+          success: false, 
+          error: 'Webhook misconfigured - no secret available' 
+        })
+      }
+
+      if (!signature) {
+        return reply.status(401).send({ 
+          success: false, 
+          error: 'X-Kuvalam-Signature header required. Sign request body with HMAC-SHA256.' 
+        })
+      }
+
+      const expected = 'sha256=' + crypto
+        .createHmac('sha256', secret)
+        .update(JSON.stringify(req.body))
+        .digest('hex')
+      
+      if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+        return reply.status(401).send({ 
+          success: false, 
+          error: 'Invalid signature. Verify your HMAC secret and signing process.' 
+        })
       }
 
       // Fire the workflow

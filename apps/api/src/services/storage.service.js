@@ -24,10 +24,8 @@ async function initS3() {
       region: process.env.AWS_REGION || 'eu-west-1',
       // Credentials auto-resolve from env/IAM role
     })
-    console.log(`[Storage] S3 configured — bucket: ${S3_BUCKET}`)
     return true
-  } catch (err) {
-    console.warn('[Storage] S3 init failed, falling back to local:', err.message)
+  } catch {
     return false
   }
 }
@@ -46,7 +44,6 @@ export async function uploadFile(key, buffer, contentType = 'application/octet-s
       ContentType: contentType,
       ServerSideEncryption: 'AES256'
     }))
-    console.log(`[Storage] S3 upload: documents/${key} (${buffer.length} bytes)`)
     return { provider: 's3', key: `documents/${key}`, bucket: S3_BUCKET }
   }
 
@@ -54,7 +51,6 @@ export async function uploadFile(key, buffer, contentType = 'application/octet-s
   const localPath = join(process.env.STORAGE_PATH || './uploads', key)
   await mkdir(dirname(localPath), { recursive: true })
   await writeFile(localPath, buffer)
-  console.log(`[Storage] Local upload: ${localPath} (${buffer.length} bytes)`)
   return { provider: 'local', path: localPath }
 }
 

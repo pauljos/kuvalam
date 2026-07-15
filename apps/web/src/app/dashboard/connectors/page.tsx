@@ -140,6 +140,8 @@ export default function ConnectorsPage() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<Record<string, 'ok' | 'fail'>>({})
+  const [modalTestState, setModalTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
+  const [modalTestError, setModalTestError] = useState<string | null>(null)
 
   const [loadingOauth, setLoadingOauth] = useState(false)
 
@@ -174,7 +176,7 @@ export default function ConnectorsPage() {
   useEffect(() => {
     if (!configuring) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setConfiguring(null); setRestConfig(null); setOauthAppForm(null) }
+      if (e.key === 'Escape') { setConfiguring(null); setRestConfig(null); setOauthAppForm(null); setModalTestState('idle'); setModalTestError(null) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -184,6 +186,13 @@ export default function ConnectorsPage() {
     setLoadingOauth(true)
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+      // Clean up any stale PENDING OAuth connector for this provider so we don't accumulate orphan rows
+      const stale = activeConnections.find(c => c.tool_id === providerId && c.status === 'PENDING' && c.auth_type === 'OAUTH2')
+      if (stale) {
+        await fetch(`${API_BASE}/tenants/${tenantId}/connectors/${stale.id}`, {
+          method: 'DELETE', credentials: 'include'
+        }).catch(() => {})
+      }
       const res = await fetch(`${API_BASE}/tenants/${tenantId}/connectors/oauth/initiate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -268,16 +277,50 @@ export default function ConnectorsPage() {
     return activeConnections.some(c => c.tool_id === toolId && c.status === 'ACTIVE')
   }
 
-  async function saveConnector(e: React.FormEvent, authTypeOverride?: string) {
-    e.preventDefault()
-    if (!configuring) return
-    setSaving(true)
+  // For OAuth connectors: proactively check if the tenant has registered OAuth credentials.
+  // If not, immediately open the BYOC form so the user isn't bounced through a 409 first.
+  async function openOAuthConnector(connector: typeof CONNECTORS[0]) {
+    setConfiguring(connector)
+    setModalTestState('idle')
+    setModalTestError(null)
+    setOauthAppForm(null)
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+      const res = await fetch(`${API_BASE}/tenants/${tenantId}/oauth/apps/${connector.id}`, {
+        credentials: 'include'
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && !data.data?.configured) {
+        // Credentials not yet set up — show the registration form immediately
+        setOauthAppForm({
+          show: true,
+          provider: connector.id,
+          redirectUri: data.data?.defaultRedirectUri || 'http://localhost:3001/api/v1/oauth/callback',
+          clientId: '',
+          clientSecret: '',
+          saving: false
+        })
+      }
+      // If configured, oauthAppForm stays null → modal shows 'Authorise with X →' button
+    } catch {
+      // API unreachable — fall through to normal 'Authorise with X →' flow
+    }
+  }
+
+  async function testAndSave(e: React.FormEvent, authTypeOverride?: string) {
+    e.preventDefault()
+    if (!configuring) return
+    setModalTestState('testing')
+    setModalTestError(null)
+    setSaving(true)
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+    let connId: string | null = null
+    try {
       const config = configuring.id === 'rest'
         ? (restConfig || { baseUrl: '', auth: { type: 'none' }, operations: [] })
         : formValues
-      await fetch(`${API_BASE}/tenants/${tenantId}/connectors`, {
+      // Step 1: Save as PENDING
+      const saveRes = await fetch(`${API_BASE}/tenants/${tenantId}/connectors`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -290,14 +333,52 @@ export default function ConnectorsPage() {
           config,
         })
       })
-      setConfiguring(null)
-      setFormValues({})
-      setRestConfig(null)
-      loadConnectors(tenantId)
-      // Connectors start as PENDING; the Test button promotes them to ACTIVE.
-      toast('info', 'Credentials saved', `Click "Test" on ${configuring?.name} to verify and activate it.`)
+      const saveData = await saveRes.json().catch(() => ({}))
+      if (!saveRes.ok) throw new Error(saveData?.error?.message || 'Save failed')
+      connId = saveData.data?.id
+
+      // Step 2: Test immediately
+      const testRes = await fetch(`${API_BASE}/tenants/${tenantId}/connectors/${connId}/test`, {
+        method: 'POST',
+        credentials: 'include'
+      })
+      const testData = await testRes.json().catch(() => ({}))
+      const result = testData?.data
+      const ok = testRes.ok && result?.success === true
+
+      if (ok) {
+        // Test passed — connector is now ACTIVE
+        setModalTestState('ok')
+        loadConnectors(tenantId)
+        toast('success', 'Connection verified!', `${configuring.name} is now active.`)
+        setTimeout(() => {
+          setConfiguring(null)
+          setFormValues({})
+          setRestConfig(null)
+          setModalTestState('idle')
+          setModalTestError(null)
+        }, 900)
+      } else {
+        // Test failed — delete the connector so we don't leave junk behind
+        const errMsg = result?.message || 'Credentials could not be verified. Check your settings and try again.'
+        if (connId) {
+          await fetch(`${API_BASE}/tenants/${tenantId}/connectors/${connId}`, {
+            method: 'DELETE', credentials: 'include'
+          }).catch(() => {})
+        }
+        setModalTestState('fail')
+        setModalTestError(errMsg)
+      }
     } catch (err: any) {
-      toast('error', 'Save failed', err.message)
+      // Clean up if we saved before the error
+      if (connId) {
+        const API_BASE2 = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+        await fetch(`${API_BASE2}/tenants/${tenantId}/connectors/${connId}`, {
+          method: 'DELETE', credentials: 'include'
+        }).catch(() => {})
+      }
+      setModalTestState('fail')
+      setModalTestError(err.message || 'An unexpected error occurred.')
     } finally {
       setSaving(false)
     }
@@ -407,7 +488,11 @@ export default function ConnectorsPage() {
                           <div style={{ fontSize: 11, color: '#991b1b', marginTop: 2 }}>{conn.last_error}</div>
                         )}
                         {conn.status === 'PENDING' && (
-                          <div style={{ fontSize: 11, color: '#92400e', marginTop: 2 }}>Click "Test" to verify credentials and activate.</div>
+                          <div style={{ fontSize: 11, color: '#92400e', marginTop: 2 }}>
+                            {conn.auth_type === 'OAUTH2'
+                              ? 'Awaiting OAuth authorisation — click Reconnect to retry.'
+                              : 'Click "Test" to verify credentials and activate.'}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -453,20 +538,34 @@ export default function ConnectorsPage() {
                     <div style={{ display: 'flex', gap: 8 }}>
                       {connected ? (
                         <button className="btn btn-secondary btn-sm" style={{ flex: 1 }}
-                          onClick={() => setConfiguring(connector)}>
+                          onClick={() => {
+                            if (connector.authType === 'OAUTH') {
+                              openOAuthConnector(connector)
+                            } else {
+                              setConfiguring(connector)
+                              setModalTestState('idle')
+                              setModalTestError(null)
+                            }
+                          }}>
                           Reconfigure
                         </button>
                       ) : (
                         <button className="btn btn-primary btn-sm" style={{ flex: 1 }}
                           onClick={() => {
-                            setConfiguring(connector)
-                            // Seed defaults so `select` fields (e.g. flavor) are submitted even if untouched.
-                            const seeded: Record<string, string> = {}
-                            for (const f of (connector.fields || [])) {
-                              const d = (f as { defaultValue?: string }).defaultValue
-                              if (d) seeded[f.name] = d
+                            if (connector.authType === 'OAUTH') {
+                              openOAuthConnector(connector)
+                            } else {
+                              setConfiguring(connector)
+                              setModalTestState('idle')
+                              setModalTestError(null)
+                              // Seed defaults so `select` fields (e.g. flavor) are submitted even if untouched.
+                              const seeded: Record<string, string> = {}
+                              for (const f of (connector.fields || [])) {
+                                const d = (f as { defaultValue?: string }).defaultValue
+                                if (d) seeded[f.name] = d
+                              }
+                              setFormValues(seeded)
                             }
-                            setFormValues(seeded)
                           }}>
                           + Connect
                         </button>
@@ -490,14 +589,14 @@ export default function ConnectorsPage() {
           onClick={(e) => {
             // Only close when the click hits the backdrop itself
             if (e.target === e.currentTarget) {
-              setConfiguring(null); setRestConfig(null); setOauthAppForm(null)
+              setConfiguring(null); setRestConfig(null); setOauthAppForm(null); setModalTestState('idle'); setModalTestError(null)
             }
           }}
         >
           <div className="modal" style={{ maxWidth: configuring.id === 'rest' ? 780 : 480 }}>
             <div className="modal-header">
               <h2 className="modal-title">{configuring.icon} Connect {configuring.name}</h2>
-              <button onClick={() => { setConfiguring(null); setRestConfig(null); setOauthAppForm(null) }}
+              <button onClick={() => { setConfiguring(null); setRestConfig(null); setOauthAppForm(null); setModalTestState('idle'); setModalTestError(null) }}
                 style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 18 }}>✕</button>
             </div>
             {configuring.authType === 'OAUTH' ? (
@@ -518,12 +617,12 @@ export default function ConnectorsPage() {
                     // production installs never require .env-based secrets.
                     <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: 16 }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>
-                        Register your OAuth app
+                        Register your {configuring.name} OAuth app (one-time setup)
                       </div>
                       <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
-                        Create an OAuth 2.0 Client in the {configuring.name} developer console,
-                        then paste the Client ID and Client Secret below. Add the redirect URI
-                        shown here to the app's allowed redirect list.
+                        To connect {configuring.name}, create an OAuth 2.0 Client ID in the {configuring.name} developer console.
+                        Set the <strong>Authorised redirect URI</strong> to the value below, then paste your Client ID and Secret here.
+                        These are saved encrypted to your tenant — you only do this once.
                       </p>
                       <div className="form-group" style={{ marginBottom: 10 }}>
                         <label className="form-label" style={{ fontSize: 11 }}>Authorised redirect URI (copy into provider console)</label>
@@ -599,8 +698,7 @@ export default function ConnectorsPage() {
                       </div>
                       <form
                         onSubmit={async (e) => {
-                          e.preventDefault()
-                          await saveConnector(e, 'API_KEY')
+                          await testAndSave(e, 'API_KEY')
                         }}
                       >
                         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-sub)', marginBottom: 10 }}>
@@ -619,8 +717,13 @@ export default function ConnectorsPage() {
                             />
                           </div>
                         ))}
-                        <button type="submit" className="btn btn-secondary btn-sm" disabled={saving} style={{ width: '100%', justifyContent: 'center' }}>
-                          {saving ? 'Saving...' : 'Save token & connect'}
+                        {modalTestState === 'fail' && modalTestError && (
+                          <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, color: '#991b1b', fontSize: 12, marginBottom: 8 }}>
+                            ⚠ {modalTestError}
+                          </div>
+                        )}
+                        <button type="submit" className="btn btn-secondary btn-sm" disabled={saving || modalTestState === 'testing'} style={{ width: '100%', justifyContent: 'center' }}>
+                          {modalTestState === 'testing' ? '⏳ Testing…' : modalTestState === 'ok' ? '✓ Connected!' : 'Test & Connect'}
                         </button>
                       </form>
                     </>
@@ -628,7 +731,7 @@ export default function ConnectorsPage() {
                 </div>
               </>
             ) : configuring.id === 'rest' ? (
-              <form onSubmit={saveConnector}>
+              <form onSubmit={testAndSave}>
                 <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
                   <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
                     Configure a REST API. Each operation you define becomes a callable tool for your agents.
@@ -638,15 +741,20 @@ export default function ConnectorsPage() {
                     onChange={setRestConfig}
                   />
                 </div>
+                {modalTestState === 'fail' && modalTestError && (
+                  <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, color: '#991b1b', fontSize: 12, marginBottom: 12 }}>
+                    ⚠ {modalTestError}
+                  </div>
+                )}
                 <div className="modal-footer">
-                  <button type="button" className="btn btn-secondary" onClick={() => { setConfiguring(null); setRestConfig(null) }}>Cancel</button>
-                  <button type="submit" className="btn btn-primary" disabled={saving || !restConfig?.baseUrl || (restConfig?.operations?.length || 0) === 0}>
-                    {saving ? 'Saving...' : 'Save Connection'}
+                  <button type="button" className="btn btn-secondary" onClick={() => { setConfiguring(null); setRestConfig(null); setModalTestState('idle'); setModalTestError(null) }}>Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={saving || modalTestState === 'testing' || !restConfig?.baseUrl || (restConfig?.operations?.length || 0) === 0}>
+                    {modalTestState === 'testing' ? '⏳ Testing…' : modalTestState === 'ok' ? '✓ Connected!' : 'Test & Connect'}
                   </button>
                 </div>
               </form>
             ) : (
-              <form onSubmit={saveConnector}>
+              <form onSubmit={testAndSave}>
                 <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                   <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
                     Enter your {configuring.name} credentials. They are stored encrypted and only used server-side.
@@ -678,10 +786,15 @@ export default function ConnectorsPage() {
                     </div>
                   ))}
                 </div>
+                {modalTestState === 'fail' && modalTestError && (
+                  <div style={{ padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, color: '#991b1b', fontSize: 12 }}>
+                    ⚠ {modalTestError}
+                  </div>
+                )}
                 <div className="modal-footer">
-                  <button type="button" className="btn btn-secondary" onClick={() => setConfiguring(null)}>Cancel</button>
-                  <button type="submit" className="btn btn-primary" disabled={saving}>
-                    {saving ? 'Saving...' : 'Save Connection'}
+                  <button type="button" className="btn btn-secondary" onClick={() => { setConfiguring(null); setModalTestState('idle'); setModalTestError(null) }}>Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={saving || modalTestState === 'testing'}>
+                    {modalTestState === 'testing' ? '⏳ Testing…' : modalTestState === 'ok' ? '✓ Connected!' : 'Test & Connect'}
                   </button>
                 </div>
               </form>

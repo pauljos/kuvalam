@@ -23,14 +23,12 @@ function getRedisConnection() {
 
   connection.on('connect', () => {
     isRedisAvailable = true
-    console.log('[Queue] Redis connected')
   })
 
   connection.on('error', (err) => {
     if (isRedisAvailable) {
-      console.warn('[Queue] Redis error — falling back to in-process execution:', err.message)
+      isRedisAvailable = false
     }
-    isRedisAvailable = false
   })
 
   return connection
@@ -53,13 +51,13 @@ const QUEUE_DEFAULTS = {
 
 // ─── Initialise Queues & Workers ─────────────────────────────────────────────
 
-export async function initQueues() {
+export async function initQueues(logger) {
   try {
     const conn = getRedisConnection()
     await conn.connect()
 
     if (!isRedisAvailable) {
-      console.warn('[Queue] Redis not available — using in-process fallback (setImmediate)')
+      if (logger) logger.warn('[Queue] Redis not available — using in-process fallback (setImmediate)')
       return false
     }
 
@@ -73,8 +71,6 @@ export async function initQueues() {
     const taskWorker = new Worker('agent-tasks', async (job) => {
       const { executeTask } = await import('./task.service.js')
       const { task, agent } = job.data
-
-      console.log(`[Queue] Processing task ${task.id} for agent ${agent.name}`)
       await executeTask(task, agent)
     }, {
       connection: conn,
@@ -83,19 +79,17 @@ export async function initQueues() {
     })
 
     taskWorker.on('completed', (job) => {
-      console.log(`[Queue] Task ${job.data.task.id} completed`)
+      // Task completion logged by task.service.js
     })
 
     taskWorker.on('failed', (job, err) => {
-      console.error(`[Queue] Task ${job?.data?.task?.id} failed (attempt ${job?.attemptsMade}):`, err.message)
+      // Task failure logged by task.service.js
     })
 
     // ─── Workflow Step Worker ─────────────────────────────────────────────────
     const workflowWorker = new Worker('workflow-executions', async (job) => {
       const { runWorkflowStep } = await import('./workflow.service.js')
       const { execId, steps, stepIdx, context } = job.data
-
-      console.log(`[Queue] Processing workflow step ${stepIdx} for execution ${execId}`)
       await runWorkflowStep(execId, steps, stepIdx, context)
     }, {
       connection: conn,
@@ -103,15 +97,15 @@ export async function initQueues() {
     })
 
     workflowWorker.on('failed', (job, err) => {
-      console.error(`[Queue] Workflow step failed for exec ${job?.data?.execId}:`, err.message)
+      // Workflow step failure logged by workflow.service.js
     })
 
     workerInstances = [taskWorker, workflowWorker]
 
-    console.log('[Queue] BullMQ workers initialised — task concurrency:', process.env.TASK_CONCURRENCY || '5')
+    if (logger) logger.info({ concurrency: process.env.TASK_CONCURRENCY || '5' }, '[Queue] BullMQ workers initialised')
     return true
   } catch (err) {
-    console.warn('[Queue] Failed to initialise BullMQ:', err.message, '— using in-process fallback')
+    if (logger) logger.warn({ error: err.message }, '[Queue] Failed to initialise BullMQ — using in-process fallback')
     return false
   }
 }
@@ -132,11 +126,10 @@ export async function enqueueTask(task, agent, executeTaskFn) {
         priority: task.priority === 'HIGH' ? 1 : task.priority === 'LOW' ? 10 : 5,
       }
     )
-    console.log(`[Queue] Task ${task.id} enqueued`)
   } else {
     // Fallback: in-process execution
-    setImmediate(() => executeTaskFn(task, agent).catch(err => {
-      console.error(`[Queue:fallback] Task ${task.id} failed:`, err.message)
+    setImmediate(() => executeTaskFn(task, agent).catch(() => {
+      // Error logged by task.service.js
     }))
   }
 }
@@ -155,10 +148,9 @@ export async function enqueueWorkflowStep(execId, steps, stepIdx, context, runSt
         attempts: 2,  // Workflow steps are less retry-friendly
       }
     )
-    console.log(`[Queue] Workflow step ${stepIdx} enqueued for exec ${execId}`)
   } else {
-    setImmediate(() => runStepFn(execId, steps, stepIdx, context).catch(err => {
-      console.error(`[Queue:fallback] Workflow step ${stepIdx} failed:`, err.message)
+    setImmediate(() => runStepFn(execId, steps, stepIdx, context).catch(() => {
+      // Error logged by workflow.service.js
     }))
   }
 }
@@ -186,9 +178,9 @@ export async function getQueueStats() {
 /**
  * Gracefully shut down all workers.
  */
-export async function shutdownQueues() {
-  console.log('[Queue] Shutting down workers...')
+export async function shutdownQueues(logger) {
+  if (logger) logger.info('[Queue] Shutting down workers...')
   await Promise.all(workerInstances.map(w => w.close()))
   if (connection) await connection.quit()
-  console.log('[Queue] Workers shut down')
+  if (logger) logger.info('[Queue] Workers shut down')
 }

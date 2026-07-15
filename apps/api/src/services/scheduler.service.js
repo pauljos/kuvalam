@@ -123,8 +123,6 @@ let schedulerInterval = null
 const activeTimers = new Map()
 
 export async function startScheduler() {
-  console.log('[Scheduler] Starting workflow trigger scheduler...')
-
   // Check every 60s for new/updated scheduled workflows
   schedulerInterval = setInterval(loadScheduledWorkflows, 60_000)
   await loadScheduledWorkflows()
@@ -150,7 +148,6 @@ async function loadScheduledWorkflows() {
 
       const parsed = parseCron(cron)
       if (!parsed) {
-        console.warn(`[Scheduler] Could not parse cron "${cron}" for workflow ${wf.id}`)
         continue
       }
 
@@ -168,7 +165,6 @@ async function loadScheduledWorkflows() {
           }, parsed.intervalMs)
 
           activeTimers.set(wf.id, { timer, cronKey, cron, name: wf.name })
-          console.log(`[Scheduler] Scheduled "${wf.name}" every ${parsed.intervalMs / 60000}m`)
         } else {
           // Exact-time execution — schedule the next fire and re-queue after each run
           scheduleNextFire(wf, parsed)
@@ -181,8 +177,8 @@ async function loadScheduledWorkflows() {
     for (const [id] of activeTimers) {
       if (!activeIds.has(id)) clearWorkflowTimer(id)
     }
-  } catch (err) {
-    console.error('[Scheduler] Error loading scheduled workflows:', err.message)
+  } catch {
+    // Scheduler errors are non-critical
   }
 }
 

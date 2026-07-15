@@ -1,6 +1,7 @@
 // apps/api/src/routes/agent.routes.js
 import * as agentService from '../services/agent.service.js'
 import * as taskService from '../services/task.service.js'
+import { executeCustomSkill } from '../services/skill-executor.service.js'
 import { errorResponse, AppError } from '../utils/errors.js'
 
 // In-memory per-tenant task dispatch rate limiter
@@ -113,6 +114,17 @@ export default async function agentRoutes(fastify) {
       const rule = await agentService.addRule(req.params.tenantId, req.params.agentId, req.body, req.user.sub)
       return reply.status(201).send({ success: true, data: rule, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/agents/:agentId/test-skill
+  fastify.post('/tenants/:tenantId/agents/:agentId/test-skill', auth, async (req, reply) => {
+    try {
+      const { code, input, env } = req.body
+      const result = await executeCustomSkill(code, input || {}, env || {})
+      return reply.send({ success: true, data: result, meta: ts() })
+    } catch (err) { 
+      return reply.status(400).send({ success: false, error: err.message, meta: ts() }) 
+    }
   })
 
   // POST /tenants/:tenantId/agents/:agentId/knowledge-bases/:kbId

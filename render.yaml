@@ -59,7 +59,8 @@ services:
         generateValue: true
       - key: CREDENTIAL_ENCRYPTION_KEY
         generateValue: true
-      # LLM keys — prompted in the Dashboard on first deploy
+      # LLM keys — OPTIONAL (tenants configure their own)
+      # Only needed if you want a global fallback for tenants without keys
       - key: OPENAI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
@@ -152,15 +153,14 @@ services:
           envVarKey: ANTHROPIC_API_KEY
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
-  # Uses native Node runtime so NEXT_PUBLIC_API_URL is available at build time
   - type: web
     name: kuvalam-web
-    runtime: node
+    runtime: docker
+    dockerfilePath: apps/web/Dockerfile
+    dockerContext: .
     region: oregon
     plan: starter
-    rootDir: apps/web
-    buildCommand: npm install && npm run build
-    startCommand: npm start
+    healthCheckPath: /
     buildFilter:
       paths:
         - apps/web/**
@@ -170,6 +170,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "3000"
       # Baked into Next.js bundle at build time — must point to the API's public URL
       - key: NEXT_PUBLIC_API_URL
         fromService:

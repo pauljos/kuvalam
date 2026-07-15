@@ -36,8 +36,7 @@ export async function extractText(buffer, mimeType, filename = '') {
     return buffer.toString('utf8')
   }
 
-  // Fallback: attempt UTF-8 decode
-  console.warn(`[DocumentExtractor] Unknown type "${mimeType}" / ext "${ext}" — falling back to UTF-8`)
+  // Fallback: attempt UTF-8 decode (unknown type)
   return buffer.toString('utf8')
 }
 
@@ -52,7 +51,6 @@ async function extractPDF(buffer) {
     })
     return data.text || ''
   } catch (err) {
-    console.error('[DocumentExtractor] PDF extraction failed:', err.message)
     throw new Error(`PDF_EXTRACTION_FAILED: ${err.message}`)
   }
 }
@@ -62,12 +60,8 @@ async function extractDOCX(buffer) {
   try {
     const mammoth = await import('mammoth')
     const result = await mammoth.default.extractRawText({ buffer })
-    if (result.messages?.length > 0) {
-      console.warn('[DocumentExtractor] DOCX warnings:', result.messages.map(m => m.message).join('; '))
-    }
     return result.value || ''
   } catch (err) {
-    console.error('[DocumentExtractor] DOCX extraction failed:', err.message)
     throw new Error(`DOCX_EXTRACTION_FAILED: ${err.message}`)
   }
 }

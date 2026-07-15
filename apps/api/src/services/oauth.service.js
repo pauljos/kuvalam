@@ -134,11 +134,13 @@ export function defaultOAuthRedirectUri() {
 }
 
 export async function getTenantOAuthApp(tenantId, provider) {
+  // Resolve UI-catalog aliases before querying (e.g. 'gmail' → 'google', 'outlook' → 'microsoft')
+  const { provider: resolvedProvider } = resolveOAuthTarget(provider)
   const { rows: [row] } = await query(
     `SELECT client_id, client_secret_enc, redirect_uri
        FROM tenant_oauth_apps
       WHERE tenant_id = $1 AND provider = $2`,
-    [tenantId, provider]
+    [tenantId, resolvedProvider]
   )
   if (!row) return null
   return {
@@ -239,7 +241,6 @@ export async function getAuthorizationUrl({ provider: providerOrAlias, service: 
     // legacy behaviour of issuing a fake code so the flow can be exercised
     // end-to-end without real credentials.
     if (process.env.ENABLE_MOCK_OAUTH === '1' && process.env.NODE_ENV !== 'production') {
-      console.warn(`[OAuth] Using mock flow for ${provider} (ENABLE_MOCK_OAUTH=1).`)
       return `${defaultOAuthRedirectUri()}?code=mock-auth-code&state=${state}`
     }
     const err = new Error(`No OAuth credentials configured for ${provider}. Add a Client ID and Secret for this tenant, then retry.`)
@@ -276,7 +277,6 @@ export async function exchangeCodeForTokens({ provider, code, tenantId }) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('Invalid authorization code')
     }
-    console.log(`[OAuth] Exchanging mock authorization code for mock tokens for provider ${provider}`)
     return {
       accessToken: 'mock-access-token',
       refreshToken: 'mock-refresh-token',
@@ -334,7 +334,6 @@ export async function refreshAccessToken({ provider, refreshToken, tenantId }) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('Invalid refresh token')
     }
-    console.log(`[OAuth] Refreshing mock access token for provider ${provider}`)
     return {
       accessToken: 'mock-access-token',
       refreshToken: 'mock-refresh-token',
@@ -441,7 +440,6 @@ export async function getValidAccessToken(tenantId, connectorId) {
 
   // If token expires within 5 minutes, refresh it
   if (expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
-    console.log(`[OAuth] Token expiring soon for connector ${connectorId}, refreshing...`)
     const newTokens = await refreshAccessToken({
       provider: oauth.provider,
       refreshToken: oauth.refreshToken,

@@ -56,6 +56,8 @@ export default function TriggersPage() {
   const [form, setForm] = useState({ name: '', workflowId: '', triggerType: 'WEBHOOK', cron: '0 9 * * *', cronCustom: false, eventType: 'agent.completed', condition: '' })
   const [creating, setCreating] = useState(false)
   const [webhookSecret, setWebhookSecret] = useState<{ id: string; url: string; secret: string } | null>(null)
+  const [showSecret, setShowSecret] = useState(false)
+  const [testingTrigger, setTestingTrigger] = useState<string | null>(null)
 
   const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
 
@@ -67,8 +69,14 @@ export default function TriggersPage() {
         fetch(`${API}/tenants/${tenantId}/triggers`, { credentials: 'include' }),
         fetch(`${API}/tenants/${tenantId}/workflows`, { credentials: 'include' }),
       ])
-      if (tRes.ok) setTriggers((await tRes.json()).data || [])
-      if (wRes.ok) setWorkflows((await wRes.json()).data || [])
+      if (tRes.ok) {
+        const tData = await tRes.json()
+        setTriggers(Array.isArray(tData.data) ? tData.data : [])
+      }
+      if (wRes.ok) {
+        const wData = await wRes.json()
+        setWorkflows(Array.isArray(wData.data) ? wData.data : [])
+      }
     } catch { /* ignore */ }
     finally { setLoading(false) }
   }, [tenantId, API])
@@ -77,6 +85,25 @@ export default function TriggersPage() {
 
   async function createTrigger(e: React.FormEvent) {
     e.preventDefault()
+    
+    // Validation
+    if (!form.name.trim()) {
+      toast('error', 'Name required', 'Please enter a trigger name.')
+      return
+    }
+    if (!form.workflowId) {
+      toast('error', 'Workflow required', 'Please select a workflow.')
+      return
+    }
+    if (form.triggerType === 'SCHEDULE' && form.cronCustom && !form.cron.trim()) {
+      toast('error', 'Schedule required', 'Please enter a cron expression.')
+      return
+    }
+    if (form.triggerType === 'CONDITION' && !form.condition.trim()) {
+      toast('error', 'Condition required', 'Please enter a condition expression.')
+      return
+    }
+    
     setCreating(true)
     const config: any = {}
     if (form.triggerType === 'SCHEDULE') config.cron = form.cron
@@ -89,8 +116,10 @@ export default function TriggersPage() {
         credentials: 'include',
         body: JSON.stringify({ workflowId: form.workflowId, triggerType: form.triggerType, name: form.name, config }),
       })
-      if (!res.ok) throw new Error((await res.json()).message || 'Create failed')
-      const created = (await res.json()).data
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error?.message || data.message || 'Create failed')
+      
+      const created = data.data
       if (form.triggerType === 'WEBHOOK' && created.config?.secret) {
         setWebhookSecret({
           id: created.id,
@@ -146,6 +175,24 @@ export default function TriggersPage() {
       toast('success', 'Trigger duplicated', `Created "${clone.name}" (paused).`)
     } catch (err: any) {
       toast('error', 'Duplicate failed', err.message)
+    }
+  }
+
+  async function testFireTrigger(trigger: Trigger) {
+    setTestingTrigger(trigger.id)
+    try {
+      await api.startWorkflowExecution(tenantId, trigger.workflow_id, { 
+        context: { test: true, triggerId: trigger.id, triggerType: trigger.trigger_type } 
+      })
+      toast('success', 'Workflow triggered', `"${trigger.workflow_name}" execution started from trigger.`)
+    } catch (err: any) {
+      if (err.status === 429) {
+        toast('warning', 'Too many executions', err.message || 'Concurrent execution limit reached. Try again shortly.')
+      } else {
+        toast('error', 'Test fire failed', err.message)
+      }
+    } finally {
+      setTestingTrigger(null)
     }
   }
 
@@ -230,6 +277,9 @@ export default function TriggersPage() {
                     <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 20, background: t.is_active ? '#d1fae5' : '#f3f4f6', color: t.is_active ? '#065f46' : '#9ca3af' }}>
                       {t.is_active ? 'Active' : 'Paused'}
                     </span>
+                    <button className="btn btn-secondary btn-sm" onClick={() => testFireTrigger(t)} title="Test trigger by firing workflow" disabled={testingTrigger === t.id}>
+                      {testingTrigger === t.id ? '⏳' : '🔥'} Test
+                    </button>
                     <button className="btn btn-secondary btn-sm" onClick={() => toggleTrigger(t.id, t.is_active)}>
                       {t.is_active ? 'Pause' : 'Enable'}
                     </button>
@@ -354,17 +404,66 @@ export default function TriggersPage() {
               </div>
               <div className="form-group">
                 <label className="form-label">HMAC Secret</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input className="input" readOnly value={webhookSecret.secret} style={{ fontFamily: 'monospace', fontSize: 12, flex: 1 }} />
-                  <button className="btn btn-secondary btn-sm" onClick={() => { navigator.clipboard.writeText(webhookSecret.secret); toast('success', 'Copied!', '') }}>Copy</button>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <input 
+                    className="input" 
+                    readOnly 
+                    type={showSecret ? 'text' : 'password'}
+                    value={webhookSecret.secret} 
+                    style={{ fontFamily: 'monospace', fontSize: 12, flex: 1 }} 
+                  />
+                  <button 
+                    type="button"
+                    className="btn btn-secondary btn-sm" 
+                    onClick={() => setShowSecret(!showSecret)}
+                    style={{ minWidth: 60 }}
+                    title={showSecret ? 'Hide secret' : 'Show secret'}
+                  >
+                    {showSecret ? '👁️ Hide' : '👁️ Show'}
+                  </button>
+                  <button 
+                    className="btn btn-secondary btn-sm" 
+                    onClick={() => { 
+                      navigator.clipboard.writeText(webhookSecret.secret)
+                      toast('success', 'Copied!', '') 
+                    }}
+                    title="Copy secret to clipboard"
+                  >
+                    Copy
+                  </button>
                 </div>
+                <span className="form-hint" style={{ marginTop: 6, display: 'block', color: '#d97706' }}>
+                  ⚠️ This secret will not be shown again. Save it securely now.
+                </span>
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                Sign requests with: <code style={{ background: 'var(--bg)', padding: '2px 6px', borderRadius: 4 }}>X-Hub-Signature-256: sha256=&lt;hmac&gt;</code>
+                Sign requests with: <code style={{ background: 'var(--bg)', padding: '2px 6px', borderRadius: 4 }}>X-Kuvalam-Signature: sha256=&lt;hmac&gt;</code>
+                <br />
+                <strong style={{ marginTop: 8, display: 'block' }}>Example (Node.js):</strong>
+                <pre style={{ background: 'var(--bg)', padding: 8, borderRadius: 4, fontSize: 11, marginTop: 4, overflowX: 'auto' }}>
+{`const crypto = require('crypto');
+const signature = 'sha256=' + crypto
+  .createHmac('sha256', SECRET)
+  .update(JSON.stringify(body))
+  .digest('hex');
+  
+fetch(webhookUrl, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-Kuvalam-Signature': signature
+  },
+  body: JSON.stringify(body)
+});`}
+                </pre>
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-primary" onClick={() => { setWebhookSecret(null); toast('success', 'Trigger created', 'Webhook is active.') }}>Done</button>
+              <button className="btn btn-primary" onClick={() => { 
+                setWebhookSecret(null)
+                setShowSecret(false)
+                toast('success', 'Trigger created', 'Webhook is active.') 
+              }}>Done</button>
             </div>
           </div>
         </div>

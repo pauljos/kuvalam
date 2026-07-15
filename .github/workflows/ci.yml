@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Lint & Type Check
+  # ──────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Lint web app
+        working-directory: apps/web
+        run: npm run lint
+      
+      - name: Type check web app
+        working-directory: apps/web
+        run: npx tsc --noEmit
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # API Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  test-api:
+    name: API Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: pgvector/pgvector:16-pg16
+        env:
+          POSTGRES_USER: kuvalam_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: kuvalam_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    env:
+      DATABASE_URL: postgresql://kuvalam_test:test_password@localhost:5432/kuvalam_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: test-jwt-secret-min-32-chars-for-testing
+      COOKIE_SECRET: test-cookie-secret-min-32-chars-for-testing
+      CREDENTIAL_ENCRYPTION_KEY: test-credential-encryption-key-min-32-chars
+      NODE_ENV: test
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run migrations
+        working-directory: apps/api
+        run: node src/db/migrate.js
+      
+      - name: Run unit tests
+        working-directory: apps/api
+        run: npm run test:unit
+      
+      - name: Run integration tests
+        working-directory: apps/api
+        run: npm run test:integration
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Web Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  test-web:
+    name: Web Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run tests
+        working-directory: apps/web
+        run: npm test
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Security Audit
+  # ──────────────────────────────────────────────────────────────────────────
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      
+      - name: Run npm audit
+        run: npm audit --production --audit-level=moderate
+        continue-on-error: true
+      
+      - name: Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build Docker Images
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [lint, test-api, test-web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    strategy:
+      matrix:
+        service: [api, web, worker]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: apps/${{ matrix.service }}/Dockerfile
+          push: false
+          tags: kuvalam-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ matrix.service == 'web' && 'https://kuvalam-api.onrender.com' || '' }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Deploy to Staging (optional)
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.kuvalam.ai
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Render (Staging)
+        run: |
+          echo "Deployment to staging triggered"
+          # Add Render deploy webhook or other deployment steps here
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}

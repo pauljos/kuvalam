@@ -17,8 +17,10 @@
     "dagre": "^0.8.5",
     "lucide-react": "^1.24.0",
     "next": "16.2.10",
+    "prismjs": "^1.30.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "react-simple-code-editor": "^0.14.1"
   },
   "devDependencies": {
     "@rolldown/binding-darwin-arm64": "^1.1.5",
@@ -26,6 +28,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^20",
+    "@types/prismjs": "^1.26.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.3",

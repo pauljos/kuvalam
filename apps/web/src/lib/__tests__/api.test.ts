@@ -69,6 +69,30 @@ describe('API client (api.ts)', () => {
     expect(result).toEqual(mockResponse.data)
   })
 
+  it('performs successful POST requests for testSkill with correct payload', async () => {
+    const mockResponse = { data: { message: 'Hello from sandbox!' } }
+    const testSkillPayload = { code: 'return "Hello from sandbox!"', input: {} }
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => mockResponse,
+    } as Response)
+
+    const result = await api.testSkill('tenant-1', 'agent-1', testSkillPayload)
+
+    expect(fetch).toHaveBeenCalledWith(
+      'http://localhost:3001/api/v1/tenants/tenant-1/agents/agent-1/test-skill',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify(testSkillPayload),
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      })
+    )
+    expect(result).toEqual(mockResponse.data)
+  })
+
   it('throws an error with details when the request is not ok', async () => {
     const mockErrorResponse = {
       error: {

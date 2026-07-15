@@ -153,7 +153,9 @@ const postgresDriver = {
       statement_timeout: DEFAULT_STATEMENT_TIMEOUT,
       application_name: 'kuvalam-agent',
     })
-    pool.on('error', (err) => console.error('[db-connector pg] pool error:', err.message))
+    pool.on('error', () => {
+      // Pool errors logged by pg library
+    })
     return pool
   },
 

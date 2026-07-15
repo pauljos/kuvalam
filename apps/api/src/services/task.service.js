@@ -17,6 +17,7 @@ import {
   executeConnectorTool,
   CONNECTOR_TOOL_PREFIXES,
 } from './connector-tools.service.js'
+import { executeCustomSkill } from './skill-executor.service.js'
 
 /**
  * Sign a short-lived scoped bearer token for outbound A2A delegation calls.
@@ -241,7 +242,7 @@ export async function executeTask(task, agent) {
         }
       }
     } catch (err) {
-      console.error('[MCP] Error fetching tools during task planning:', err.message)
+      // Non-critical: MCP tools optional
     }
 
     // Load configured connector tools (Slack, Jira, GitHub, Gmail, Webhook, …)
@@ -251,7 +252,7 @@ export async function executeTask(task, agent) {
       const connectorDefs = await getConnectorToolDefinitions(agent.tenant_id)
       for (const def of connectorDefs) toolDefinitions.push(def)
     } catch (err) {
-      console.error('[Connectors] Error building connector tool definitions:', err.message)
+      // Non-critical: connector tools are optional
     }
 
     // Built-in HTTP tool
@@ -270,7 +271,7 @@ export async function executeTask(task, agent) {
     // A2A — call an external agent by URL
     toolDefinitions.push({
       name: 'a2a_call',
-      description: 'Delegate a subtask to another AI agent (internal or external) via the A2A protocol. Use this to collaborate with specialised agents.',
+      description: 'Delegate a subtask to another AI agent (external) via the A2A protocol. Use this to collaborate with specialised agents outside your system.',
       inputSchema: {
         type: 'object', required: ['agentUrl', 'goal'],
         properties: {
@@ -279,6 +280,31 @@ export async function executeTask(task, agent) {
         }
       }
     })
+
+    // --- Phase 3: CrewAI-style Internal Delegation ---
+    try {
+      const { rows: otherAgents } = await query(
+        `SELECT id, name, description FROM agents WHERE tenant_id = $1 AND status = 'ACTIVE' AND id != $2`,
+        [agent.tenant_id, agent.id]
+      )
+      
+      if (otherAgents.length > 0) {
+        const agentListString = otherAgents.map(a => `- ID: ${a.id} | Name: ${a.name} | Desc: ${a.description}`).join('\n')
+        toolDefinitions.push({
+          name: 'delegate_task',
+          description: `Delegate a sub-task to another specialized agent in your team. Wait for their response. Available agents:\n${agentListString}`,
+          inputSchema: {
+            type: 'object', required: ['target_agent_id', 'goal'],
+            properties: {
+              target_agent_id: { type: 'string', description: 'The exact ID of the agent to delegate to (from the list above)' },
+              goal: { type: 'string', description: 'The specific task goal to delegate to this worker agent' }
+            }
+          }
+        })
+      }
+    } catch (err) {
+      // Non-critical: internal delegation is optional
+    }
 
     // Browser control tool
     toolDefinitions.push({
@@ -298,32 +324,42 @@ export async function executeTask(task, agent) {
 
     let actionCount = 0
     const maxActions = agent.max_actions_per_run || 20
-    let continueLoop = true
+    let taskSatisfied = false
+    let reflectionLoops = 0
+    const MAX_REFLECTION_LOOPS = 3
 
-    while (continueLoop && actionCount < maxActions) {
-      broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'thinking', label: 'Thinking...' })
+    // Expose current task ID to the agent object for tools like a2a_call and delegate_task
+    agent._currentTaskId = task.id
 
-      const response = await completeStream({
-        tenantId: agent.tenant_id,
-        agentId: agent.id,
-        messages: execMessages,
-        tools: toolDefinitions,
-        model: agent.llm_model,
-        llmConfig: agent.llm_config,
-        provider: agent.llm_provider,
-        onToken: (token) => {
-          broadcastTelemetry(tenantId, 'agent.token', { taskId: task.id, phase: 'thinking', token })
-        }
-      })
+    while (!taskSatisfied && reflectionLoops < MAX_REFLECTION_LOOPS && actionCount < maxActions) {
+      reflectionLoops++
+      let continueToolLoop = true
 
-      totalTokens.prompt += response.usage.prompt
-      totalTokens.completion += response.usage.completion
-      totalTokens.total += response.usage.total
+      // Tool execution sub-loop
+      while (continueToolLoop && actionCount < maxActions) {
+        broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'thinking', label: 'Thinking...' })
 
-      if (response.finishReason === 'stop' || !response.toolCalls?.length) {
-        execMessages.push({ role: 'assistant', content: response.content })
-        continueLoop = false
-      } else if (response.toolCalls?.length > 0) {
+        const response = await completeStream({
+          tenantId: agent.tenant_id,
+          agentId: agent.id,
+          messages: execMessages,
+          tools: toolDefinitions,
+          model: agent.llm_model,
+          llmConfig: agent.llm_config,
+          provider: agent.llm_provider,
+          onToken: (token) => {
+            broadcastTelemetry(tenantId, 'agent.token', { taskId: task.id, phase: 'thinking', token })
+          }
+        })
+
+        totalTokens.prompt += response.usage.prompt
+        totalTokens.completion += response.usage.completion
+        totalTokens.total += response.usage.total
+
+        if (response.finishReason === 'stop' || !response.toolCalls?.length) {
+          execMessages.push({ role: 'assistant', content: response.content })
+          continueToolLoop = false
+        } else if (response.toolCalls?.length > 0) {
         execMessages.push({ role: 'assistant', content: response.content, tool_calls: response.toolCalls })
 
         for (const toolCall of response.toolCalls) {
@@ -363,6 +399,45 @@ export async function executeTask(task, agent) {
             content: JSON.stringify(toolResult)
           })
         }
+      }
+      } // Ends inner while(continueToolLoop)
+
+      // If we ran out of actions, break entirely
+      if (actionCount >= maxActions) break
+
+      // --- LangGraph-style Reflection Phase ---
+      // Instead of blindly trusting the agent is done, we explicitly evaluate its output
+      broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'reflecting', label: 'Reflecting on progress...' })
+      
+      const reflectionResult = await complete({
+        tenantId: agent.tenant_id,
+        agentId: agent.id,
+        messages: [
+          ...execMessages, 
+          { 
+            role: 'user', 
+            content: `CRITICAL REFLECTION PHASE: Review your progress against the original goal: "${task.goal}". 
+Are you completely finished? If yes, output only exactly "YES_FINISHED". 
+If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing and what you must do next.` 
+          }
+        ],
+        model: agent.llm_model,
+        llmConfig: agent.llm_config,
+        provider: agent.llm_provider
+      })
+      
+      totalTokens.prompt += reflectionResult.usage.prompt
+      totalTokens.completion += reflectionResult.usage.completion
+      totalTokens.total += reflectionResult.usage.total
+
+      if (reflectionResult.content.trim().startsWith('YES_FINISHED')) {
+        taskSatisfied = true
+      } else {
+        // Feed the critique back into the context so the agent tries again
+        execMessages.push({ 
+          role: 'user', 
+          content: `Reflection Critique: ${reflectionResult.content}\n\nYou must continue working to satisfy the original goal.` 
+        })
       }
     }
 
@@ -472,8 +547,8 @@ async function saveEpisodicMemory(agent, task, result, actions) {
        VALUES ($1,$2,$3,$4,$5,'SUCCESS',$6,$7)`,
       [agent.id, agent.tenant_id, task.id, task.priority, task.goal.substring(0, 200), JSON.stringify(actions.map(a => a.skill)), result.summary]
     )
-  } catch (err) {
-    console.error('[Memory] Non-critical error saving episodic memory:', err.message)
+  } catch {
+    // Non-critical error - episodic memory is best-effort
   }
 }
 
@@ -616,6 +691,49 @@ async function executeTool(toolName, input, agent, skills) {
     }
   }
 
+  // --- Phase 3: CrewAI-style Internal Delegation ---
+  if (toolName === 'delegate_task') {
+    try {
+      const { target_agent_id, goal: delegateGoal } = input
+      if (!target_agent_id || !delegateGoal) return { success: false, error: 'target_agent_id and goal are required' }
+
+      // Validate the target agent belongs to the same tenant and is active
+      const { rows: [targetAgent] } = await query(
+        `SELECT id FROM agents WHERE id = $1 AND tenant_id = $2 AND status = 'ACTIVE'`,
+        [target_agent_id, agent.tenant_id]
+      )
+      if (!targetAgent) return { success: false, error: 'Invalid or inactive target agent ID' }
+
+      // Dispatch the sub-task
+      const subtask = await dispatchTask({
+        tenantId: agent.tenant_id,
+        agentId: target_agent_id,
+        goal: delegateGoal,
+        priority: 'HIGH',
+        context: { parentTaskId: agent._currentTaskId }
+      })
+
+      // Poll for completion (max 5 minutes)
+      const deadline = Date.now() + 5 * 60 * 1000
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000))
+        const { rows: [pollData] } = await query(
+          `SELECT status, result, error FROM agent_tasks WHERE id = $1`,
+          [subtask.taskId]
+        )
+        if (pollData?.status === 'COMPLETED') {
+          return { success: true, result: pollData.result?.summary || 'Task completed successfully' }
+        }
+        if (pollData?.status === 'FAILED') {
+          return { success: false, error: pollData.error || 'Sub-task failed' }
+        }
+      }
+      return { success: false, error: 'Delegated task timed out' }
+    } catch (err) {
+      return { success: false, error: `Delegation error: ${err.message}` }
+    }
+  }
+
   // Browser / computer use — delegates to sidecar service
   if (toolName === 'browser_use') {
     const browserUrl = process.env.BROWSER_AGENT_URL
@@ -654,7 +772,54 @@ async function executeTool(toolName, input, agent, skills) {
   const skill = skills.find(s => s.name.replace(/\s+/g, '_').toLowerCase() === toolName)
   if (!skill) return { success: false, error: `Unknown tool: ${toolName}` }
 
-  // Execute based on skill config
+  // Execute custom code skill (Kuvalam NextGen)
+  if (skill.config?.code) {
+    try {
+      // Execute the JS snippet in the sandbox
+      // Pass any decrypted environment secrets configured for this script
+      const envVars = decryptCredentials(skill.config?.env || {})
+      const result = await executeCustomSkill(skill.config.code, input, envVars)
+      return { success: true, data: result }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }
+
+  // Execute Natural Language skill (Business Playbooks)
+  if (skill.config?.instruction) {
+    try {
+      // We spawn a specialized sub-task to handle this plain-english request.
+      const subGoal = `PLAYBOOK INSTRUCTION:\n${skill.config.instruction}\n\nINPUT DATA:\n${JSON.stringify(input, null, 2)}`
+      
+      // Enqueue the sub-task on the SAME agent.
+      const { rows: [subTask] } = await query(
+        `INSERT INTO agent_tasks (agent_id, tenant_id, goal, context, priority, status, created_by)
+         VALUES ($1,$2,$3,$4,$5,'QUEUED',$6) RETURNING *`,
+        [agent.id, agent.tenant_id, subGoal, { parentTaskId: agent._currentTaskId }, 5, 'system']
+      )
+      
+      const { enqueueTask } = await import('./queue.service.js')
+      await enqueueTask(subTask, agent, async (t, a) => {
+        // dynamic import to avoid circular dependency
+        const { executeTask } = await import('./task.service.js')
+        return executeTask(t, a)
+      })
+
+      // Wait up to 5 minutes for the sub-agent to finish
+      const deadline = Date.now() + 5 * 60 * 1000
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000))
+        const { rows } = await query(`SELECT status, result, error FROM agent_tasks WHERE id = $1`, [subTask.id])
+        if (rows[0]?.status === 'COMPLETED') return { success: true, data: rows[0].result }
+        if (rows[0]?.status === 'FAILED') return { success: false, error: rows[0].error }
+      }
+      return { success: false, error: 'Natural language skill timed out' }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }
+
+  // Execute based on skill config (Legacy HTTP webhook)
   if (skill.config?.url) {
     try {
       // Decrypt stored config credentials

@@ -103,6 +103,7 @@ export const api = {
   updateAgent: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   activateAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/activate`, { method: 'POST' }),
   addSkill: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/skills`, { method: 'POST', body: JSON.stringify(body) }),
+  testSkill: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/test-skill`, { method: 'POST', body: JSON.stringify(body) }),
   addRule: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/rules`, { method: 'POST', body: JSON.stringify(body) }),
   dispatchTask: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`, { method: 'POST', body: JSON.stringify(body) }),
   listTasks: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`),

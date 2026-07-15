@@ -1,0 +1,738 @@
+openapi: 3.1.0
+info:
+  title: Kuvalam AI Workforce Operating System API
+  version: 0.1.0
+  description: |
+    Kuvalam is an AI Workforce Operating System that enables deployment of autonomous AI agents
+    with human-in-the-loop oversight, knowledge augmentation, and multi-tenant isolation.
+    
+    ## Authentication
+    The API uses JWT-based authentication with httpOnly cookies:
+    - Access tokens (15min TTL) via `kuvalam_token` cookie
+    - Refresh tokens (30d TTL) via `kuvalam_refresh` cookie
+    
+    ## Rate Limiting
+    - Global: 200 requests/minute per IP
+    - Auth endpoints: 10 login attempts/15min, 5 registrations/hour
+    - Task dispatch: 20 tasks/minute per tenant
+    
+    ## Multi-Tenancy
+    All resource endpoints require a `tenantId` path parameter. Row-Level Security (RLS)
+    enforces isolation at the database layer.
+    
+  contact:
+    name: Kuvalam Support
+    email: support@kuvalam.ai
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:3001/api/v1
+    description: Local development
+  - url: https://api.kuvalam.ai/api/v1
+    description: Production
+
+tags:
+  - name: Authentication
+    description: User registration, login, token refresh
+  - name: Tenants
+    description: Tenant management and team members
+  - name: Agents
+    description: AI agent lifecycle and configuration
+  - name: Tasks
+    description: Agent task dispatch and execution
+  - name: Workflows
+    description: Multi-step workflow orchestration
+  - name: Knowledge
+    description: Knowledge base and document management
+  - name: Connectors
+    description: External tool and API integrations
+  - name: Settings
+    description: Tenant configuration and LLM providers
+  - name: Analytics
+    description: Usage metrics and insights
+  - name: Admin
+    description: System administration (admin-only)
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: kuvalam_token
+      description: JWT access token (httpOnly cookie)
+    
+  schemas:
+    Error:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: AGENT_NOT_FOUND
+            message:
+              type: string
+              example: Agent not found
+            details:
+              type: object
+              description: Additional structured error data
+        meta:
+          type: object
+          properties:
+            requestId:
+              type: string
+              format: uuid
+            timestamp:
+              type: string
+              format: date-time
+    
+    Agent:
+      type: object
+      required: [id, tenant_id, name, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Customer Support Agent
+        description:
+          type: string
+        archetype:
+          type: string
+          enum: [RESEARCHER, ANALYST, EXECUTOR, COMMUNICATOR]
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, PAUSED, ARCHIVED]
+        autonomy_level:
+          type: string
+          enum: [SUPERVISED, SEMI_AUTONOMOUS, AUTONOMOUS]
+          default: SUPERVISED
+        llm_provider:
+          type: string
+          example: openai
+        llm_model:
+          type: string
+          example: gpt-4o
+        system_prompt:
+          type: string
+        confidence_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.75
+        max_actions_per_run:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    
+    Task:
+      type: object
+      required: [id, agent_id, goal, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        goal:
+          type: string
+          example: Research competitor pricing and create a summary
+        context:
+          type: object
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH]
+          default: MEDIUM
+        status:
+          type: string
+          enum: [QUEUED, RUNNING, COMPLETED, FAILED]
+        plan:
+          type: object
+        result:
+          type: object
+        actions:
+          type: array
+          items:
+            type: object
+        token_usage:
+          type: object
+        error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    
+    Workflow:
+      type: object
+      required: [id, name, trigger, steps]
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        trigger:
+          type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [MANUAL, SCHEDULE, WEBHOOK]
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowStep'
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, PAUSED, ARCHIVED]
+        on_failure:
+          type: string
+          enum: [STOP, CONTINUE, RETRY]
+          default: STOP
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+    
+    WorkflowStep:
+      type: object
+      required: [id, type]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [AGENT, CREW, HTTP, APPROVAL, SET, DELAY, TRANSFORM, NOTIFY, TOOL, SCRIPT, LOOP, PARALLEL]
+        input:
+          type: object
+        retry:
+          type: object
+          properties:
+            attempts:
+              type: integer
+              minimum: 1
+              maximum: 5
+            backoffMs:
+              type: integer
+            jitter:
+              type: number
+              minimum: 0
+              maximum: 1
+        routes:
+          type: array
+          items:
+            type: object
+            properties:
+              when:
+                type: string
+              goto:
+                oneOf:
+                  - type: string
+                  - type: integer
+
+paths:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Authentication
+  # ────────────────────────────────────────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user account
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                name:
+                  type: string
+      responses:
+        '201':
+          description: Account created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      userId:
+                        type: string
+                        format: uuid
+                      email:
+                        type: string
+                      message:
+                        type: string
+        '409':
+          description: Email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate and receive access tokens
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: httpOnly cookies for access and refresh tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      refreshToken:
+                        type: string
+                      user:
+                        type: object
+                      tenants:
+                        type: array
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh access token using refresh token
+      operationId: refreshToken
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Logout and invalidate tokens
+      operationId: logout
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Logged out successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get current authenticated user
+      operationId: getCurrentUser
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Current user data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      user:
+                        type: object
+  
+  # ────────────────────────────────────────────────────────────────────────────
+  # Agents
+  # ────────────────────────────────────────────────────────────────────────────
+  /tenants/{tenantId}/agents:
+    parameters:
+      - $ref: '#/components/parameters/tenantId'
+    
+    get:
+      tags: [Agents]
+      summary: List all agents
+      operationId: listAgents
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, ACTIVE, PAUSED, ARCHIVED]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      agents:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Agent'
+                      pagination:
+                        type: object
+    
+    post:
+      tags: [Agents]
+      summary: Create a new agent
+      operationId: createAgent
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                archetype:
+                  type: string
+                  enum: [RESEARCHER, ANALYST, EXECUTOR, COMMUNICATOR]
+                autonomyLevel:
+                  type: string
+                  enum: [SUPERVISED, SEMI_AUTONOMOUS, AUTONOMOUS]
+                llmProvider:
+                  type: string
+                llmModel:
+                  type: string
+                systemPrompt:
+                  type: string
+                confidenceThreshold:
+                  type: number
+                maxActionsPerRun:
+                  type: integer
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/Agent'
+        '402':
+          description: Agent limit reached for plan
+  
+  /tenants/{tenantId}/agents/{agentId}:
+    parameters:
+      - $ref: '#/components/parameters/tenantId'
+      - $ref: '#/components/parameters/agentId'
+    
+    get:
+      tags: [Agents]
+      summary: Get agent by ID
+      operationId: getAgent
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/Agent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    
+    patch:
+      tags: [Agents]
+      summary: Update agent configuration
+      operationId: updateAgent
+      security:
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                systemPrompt:
+                  type: string
+                autonomyLevel:
+                  type: string
+                llmProvider:
+                  type: string
+                llmModel:
+                  type: string
+      responses:
+        '200':
+          description: Agent updated
+        '404':
+          $ref: '#/components/responses/NotFound'
+  
+  /tenants/{tenantId}/agents/{agentId}/activate:
+    parameters:
+      - $ref: '#/components/parameters/tenantId'
+      - $ref: '#/components/parameters/agentId'
+    
+    post:
+      tags: [Agents]
+      summary: Activate an agent
+      operationId: activateAgent
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Agent activated
+        '404':
+          $ref: '#/components/responses/NotFound'
+  
+  /tenants/{tenantId}/agents/{agentId}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/tenantId'
+      - $ref: '#/components/parameters/agentId'
+    
+    post:
+      tags: [Tasks]
+      summary: Dispatch a task to an agent
+      operationId: dispatchTask
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goal]
+              properties:
+                goal:
+                  type: string
+                  maxLength: 10000
+                  example: Research the top 5 competitors and summarize their pricing
+                context:
+                  type: object
+                priority:
+                  type: string
+                  enum: [LOW, MEDIUM, HIGH]
+                  default: MEDIUM
+                attachments:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+      responses:
+        '202':
+          description: Task queued for execution
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      taskId:
+                        type: string
+                        format: uuid
+        '422':
+          description: No active agent available
+        '429':
+          description: Rate limit exceeded
+    
+    get:
+      tags: [Tasks]
+      summary: List tasks for an agent
+      operationId: listTasks
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [QUEUED, RUNNING, COMPLETED, FAILED]
+      responses:
+        '200':
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      tasks:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Task'
+
+components:
+  parameters:
+    tenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Tenant identifier
+    
+    agentId:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Agent identifier
+  
+  responses:
+    Unauthorized:
+      description: Authentication required or token expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            success: false
+            error:
+              code: UNAUTHENTICATED
+              message: Valid authentication token required
+    
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            success: false
+            error:
+              code: AGENT_NOT_FOUND
+              message: Agent not found
+    
+    Forbidden:
+      description: Access denied
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            success: false
+            error:
+              code: TENANT_FORBIDDEN
+              message: You do not have access to this tenant

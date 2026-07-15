@@ -50,8 +50,7 @@ export async function listMcpTools(mcpServer) {
 
     // Return array of tools
     return payload.result?.tools || []
-  } catch (err) {
-    console.error(`[MCP] Failed to list tools from ${mcpServer.name}:`, err.message)
+  } catch {
     return []
   }
 }
@@ -94,8 +93,7 @@ export async function callMcpTool(mcpServer, toolName, args) {
     }
 
     return payload.result || { isError: false, content: [] }
-  } catch (err) {
-    console.error(`[MCP] Failed to call tool ${toolName} on ${mcpServer.name}:`, err.message)
+  } catch {
     return {
       isError: true,
       content: [{ type: 'text', text: `Failed to execute MCP tool: ${err.message}` }]

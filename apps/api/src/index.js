@@ -263,7 +263,7 @@ try {
   fastify.log.info(`🗄️  Database: ${process.env.DATABASE_URL?.split('@')[1] || 'localhost:5432'}`)
 
   // Initialise BullMQ queue workers (non-blocking — degrades to in-process if no Redis)
-  initQueues().then(ready => {
+  initQueues(fastify.log).then(ready => {
     fastify.log.info(`📬 Job queue: ${ready ? 'BullMQ/Redis' : 'in-process fallback'}`)
   })
 
@@ -282,7 +282,7 @@ try {
 async function gracefulShutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down`)
   stopScheduler()
-  await shutdownQueues().catch(() => {})
+  await shutdownQueues(fastify.log).catch(() => {})
   await fastify.close()
   process.exit(0)
 }

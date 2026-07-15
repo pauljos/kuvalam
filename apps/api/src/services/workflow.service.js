@@ -249,6 +249,38 @@ export async function startWorkflowExecution(tenantId, workflowId, { context = {
   )
   if (!wf) throw new AppError('WORKFLOW_NOT_ACTIVE', 'Workflow is not active or does not exist', 422)
 
+  // ✅ FIX 3: Check concurrent execution limits
+  const MAX_CONCURRENT_PER_TENANT = 20
+  const { rows: [{ count: tenantCount }] } = await query(
+    `SELECT COUNT(*) as count FROM workflow_executions 
+     WHERE tenant_id = $1 AND status = 'RUNNING'`,
+    [tenantId]
+  )
+  
+  if (parseInt(tenantCount) >= MAX_CONCURRENT_PER_TENANT) {
+    throw new AppError(
+      'EXECUTION_LIMIT_REACHED', 
+      `Maximum ${MAX_CONCURRENT_PER_TENANT} concurrent workflow executions allowed. Please wait for some to complete.`,
+      429
+    )
+  }
+
+  // Also check per-workflow limit (prevent runaway single workflow)
+  const MAX_CONCURRENT_PER_WORKFLOW = 5
+  const { rows: [{ count: workflowCount }] } = await query(
+    `SELECT COUNT(*) as count FROM workflow_executions 
+     WHERE workflow_id = $1 AND status = 'RUNNING'`,
+    [workflowId]
+  )
+  
+  if (parseInt(workflowCount) >= MAX_CONCURRENT_PER_WORKFLOW) {
+    throw new AppError(
+      'WORKFLOW_BUSY',
+      `This workflow has ${MAX_CONCURRENT_PER_WORKFLOW} executions running. Please wait.`,
+      429
+    )
+  }
+
   const { rows: [exec] } = await query(
     `INSERT INTO workflow_executions (workflow_id, tenant_id, workflow_version, status, context, started_at)
      VALUES ($1, $2, $3, 'RUNNING', $4, NOW()) RETURNING *`,
@@ -637,6 +669,21 @@ export async function executeStepBody(step, context, { tenantId, execId } = {}) 
       const result = await executeConnectorTool(tool, args, tenantId)
       if (!result?.success) throw new Error(result?.error || `Tool ${tool} failed`)
       output = result
+
+    // ── SCRIPT step ──────────────────────────────────────────────────────────
+    // Executes a sandboxed Node.js snippet securely. `input.code` contains the JS. 
+    // `input.args` are deep-interpolated and passed into the sandbox as `input`.
+    } else if (step.type === 'SCRIPT') {
+      const code = step.input?.code || ''
+      const args = interpolateDeep(step.input?.args || {}, context)
+      const env = interpolateDeep(step.input?.env || {}, context)
+      const { executeCustomSkill } = await import('./skill-executor.service.js')
+      try {
+        const result = await executeCustomSkill(code, args, env)
+        output = result
+      } catch (err) {
+        throw new Error(`Script execution failed: ${err.message}`)
+      }
 
     // ── LOOP step ────────────────────────────────────────────────────────────
     // Iterate over an array from the context and run a sub-goal per item on a

@@ -6,6 +6,11 @@ import { useApp } from '@/lib/context'
 import Link from 'next/link'
 import { FeedbackModal } from '@/components/FeedbackModal'
 import { Breadcrumbs } from '@/components/Breadcrumbs'
+import Editor from 'react-simple-code-editor'
+import Prism from 'prismjs'
+import 'prismjs/components/prism-clike'
+import 'prismjs/components/prism-javascript'
+import 'prismjs/themes/prism-tomorrow.css'
 
 // ─── Live execution trace types ──────────────────────────────────────────────
 type TraceEvent =
@@ -51,6 +56,13 @@ export default function AgentDetailPage() {
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({})
   const [showFeedback, setShowFeedback] = useState(false)
   const [currentPhase, setCurrentPhase] = useState<string>('')
+
+  // Skill Modal State
+  const [showSkillModal, setShowSkillModal] = useState(false)
+  const [newSkill, setNewSkill] = useState({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '' })
+  const [testInput, setTestInput] = useState('{}')
+  const [testResult, setTestResult] = useState<any>(null)
+  const [isTesting, setIsTesting] = useState(false)
 
   const wsRef = useRef<WebSocket | null>(null)
   const pollRef = useRef<any>(null)
@@ -189,6 +201,72 @@ export default function AgentDetailPage() {
     } catch (err: any) { toast('error', 'Activation failed', err.message) }
   }
 
+  async function saveSkill(e: any) {
+    e.preventDefault()
+    try {
+      const isCode = newSkill.type === 'code'
+      const isNL = newSkill.type === 'nl'
+      
+      let config: any = {}
+      if (isNL) {
+        config = { instruction: newSkill.instruction }
+      } else if (isCode) {
+        config = { code: newSkill.code }
+      } else {
+        let parsedHeaders = {}
+        let parsedBody = undefined
+        try { parsedHeaders = JSON.parse(newSkill.headers || '{}') } catch { throw new Error('Headers must be valid JSON') }
+        try { if (newSkill.bodyTemplate) parsedBody = JSON.parse(newSkill.bodyTemplate) } catch { throw new Error('Body Template must be valid JSON') }
+        
+        config = {
+          url: newSkill.url,
+          method: newSkill.method,
+          headers: parsedHeaders,
+          ...(parsedBody ? { body: parsedBody } : {})
+        }
+      }
+
+      const skillData = {
+        name: newSkill.name,
+        description: newSkill.description,
+        actionId: isNL ? 'nl_instruction' : (isCode ? 'custom_script' : 'webhook'),
+        config
+      }
+      const added = await api.addSkill(tenantId, agentId, skillData)
+      setAgent((a: any) => ({ ...a, skills: [...(a.skills || []), added] }))
+      setShowSkillModal(false)
+      setNewSkill({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '' })
+      setTestResult(null)
+      toast('success', 'Skill Added', 'Custom skill has been attached to the agent.')
+    } catch (err: any) {
+      toast('error', 'Failed to add skill', err.message)
+    }
+  }
+
+  async function testSkill(e: any) {
+    e.preventDefault()
+    if (newSkill.type === 'api' || newSkill.type === 'nl') {
+      toast('info', 'Testing coming soon', 'For now, you can save this skill and test it via the agent chat.')
+      return
+    }
+    
+    setIsTesting(true)
+    setTestResult(null)
+    try {
+      let parsedInput = {}
+      try { parsedInput = JSON.parse(testInput) } catch { /* ignore */ }
+      const res = await api.testSkill(tenantId, agentId, {
+        code: newSkill.code,
+        input: parsedInput
+      })
+      setTestResult({ success: true, data: res })
+    } catch (err: any) {
+      setTestResult({ success: false, error: err.message })
+    } finally {
+      setIsTesting(false)
+    }
+  }
+
   async function startTask(e: any) {
     e.preventDefault()
     if (!goal.trim()) return
@@ -321,6 +399,29 @@ export default function AgentDetailPage() {
               </div>
               <button className="btn btn-primary" type="submit" style={{ alignSelf: 'flex-start' }}>Save Configuration</button>
             </form>
+          </div>
+
+          {/* Custom Skills Section */}
+          <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800 }}>Custom Skills</h2>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowSkillModal(true)}>+ Add Skill</button>
+            </div>
+            {agent.skills?.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 300, overflowY: 'auto', paddingRight: 8 }}>
+                {agent.skills.map((s: any) => (
+                  <div key={s.id} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{s.name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{s.description}</div>
+                    {s.action_id === 'nl_instruction' && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#a855f7', display: 'inline-block' }}>Natural Language</div>}
+                    {s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--green-dark)', display: 'inline-block' }}>JS Script</div>}
+                    {s.config?.url && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--blue)', display: 'inline-block' }}>API Endpoint</div>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No custom skills attached.</div>
+            )}
           </div>
         </div>
 
@@ -456,6 +557,164 @@ export default function AgentDetailPage() {
         title="How did the agent do?"
         subtitle={`Rate the response for "${task?.goal?.slice(0, 60) || 'this task'}"`}
       />
+
+      {showSkillModal && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ width: 800, maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>Add Custom Skill</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 24 }}>
+              Define a new capability for your agent using plain English, an API endpoint, or custom Node.js code.
+            </p>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 24, borderBottom: '1px solid var(--border)', paddingBottom: 16 }}>
+              <button 
+                type="button"
+                className={`btn ${newSkill.type === 'nl' ? 'btn-primary' : 'btn-secondary'}`} 
+                onClick={() => setNewSkill({ ...newSkill, type: 'nl' })}
+              >
+                Natural Language
+              </button>
+              <button 
+                type="button"
+                className={`btn ${newSkill.type === 'api' ? 'btn-primary' : 'btn-secondary'}`} 
+                onClick={() => setNewSkill({ ...newSkill, type: 'api' })}
+              >
+                API Endpoint
+              </button>
+              <button 
+                type="button"
+                className={`btn ${newSkill.type === 'code' ? 'btn-primary' : 'btn-secondary'}`} 
+                onClick={() => setNewSkill({ ...newSkill, type: 'code' })}
+              >
+                Advanced Script
+              </button>
+            </div>
+
+            <form onSubmit={saveSkill} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <div className="form-group">
+                  <label className="form-label">Skill Name (No spaces, e.g. search_crm)</label>
+                  <input className="input" value={newSkill.name} onChange={e => setNewSkill({ ...newSkill, name: e.target.value.replace(/\s+/g, '_') })} required />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Description (Tell the AI *when* to use this)</label>
+                  <input className="input" value={newSkill.description} onChange={e => setNewSkill({ ...newSkill, description: e.target.value })} required />
+                </div>
+              </div>
+              
+              {newSkill.type === 'nl' ? (
+                <div className="form-group">
+                  <label className="form-label">Instructions (Plain English)</label>
+                  <textarea 
+                    className="input" 
+                    rows={6} 
+                    value={newSkill.instruction} 
+                    onChange={e => setNewSkill({ ...newSkill, instruction: e.target.value })} 
+                    placeholder="Describe exactly what the agent should do when using this skill. e.g. 'To generate a report, first fetch the sales data, then format it as a markdown table...'" 
+                    required={newSkill.type === 'nl'}
+                  />
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                    When the agent uses this skill, it will read these instructions and spawn a specialized sub-agent to execute them securely.
+                  </p>
+                </div>
+              ) : newSkill.type === 'api' ? (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">Method</label>
+                      <select className="input" value={newSkill.method} onChange={e => setNewSkill({ ...newSkill, method: e.target.value })}>
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                        <option value="PUT">PUT</option>
+                        <option value="DELETE">DELETE</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">API URL</label>
+                      <input className="input" value={newSkill.url} onChange={e => setNewSkill({ ...newSkill, url: e.target.value })} placeholder="https://api.example.com/v1/data" required={newSkill.type === 'api'} />
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>You can use `{"{{input.parameter}}"}` to map AI arguments into the URL.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="form-group">
+                    <label className="form-label">Headers (JSON format)</label>
+                    <textarea className="input" rows={3} style={{ fontFamily: 'monospace' }} value={newSkill.headers} onChange={e => setNewSkill({ ...newSkill, headers: e.target.value })} />
+                  </div>
+                  
+                  {['POST', 'PUT', 'PATCH'].includes(newSkill.method) && (
+                    <div className="form-group">
+                      <label className="form-label">Body Template (JSON format)</label>
+                      <textarea className="input" rows={4} style={{ fontFamily: 'monospace' }} value={newSkill.bodyTemplate} onChange={e => setNewSkill({ ...newSkill, bodyTemplate: e.target.value })} placeholder={'{\n  "query": "{{input.query}}"\n}'} />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">Node.js Sandbox Script</label>
+                    <div style={{ borderRadius: 6, overflow: 'hidden', border: '1px solid #1e293b' }}>
+                      <Editor
+                        value={newSkill.code}
+                        onValueChange={code => setNewSkill({ ...newSkill, code })}
+                        highlight={code => Prism.highlight(code, Prism.languages.javascript, 'javascript')}
+                        padding={16}
+                        style={{
+                          fontFamily: '"Fira Code", "JetBrains Mono", monospace',
+                          fontSize: 13,
+                          backgroundColor: '#1d1f21',
+                          color: '#c5c8c6',
+                          minHeight: 200
+                        }}
+                        textareaClassName="code-editor-textarea"
+                      />
+                    </div>
+                    <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                      Example: <code>{"const res = await fetch(`https://api.example.com/data?q=${input.query}`); return await res.json();"}</code>
+                    </p>
+                  </div>
+
+                  {/* Test Panel */}
+                  <div style={{ background: 'var(--surface)', padding: 16, borderRadius: 8, border: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+                      <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                        <label className="form-label" style={{ fontSize: 12 }}>Test Input (JSON)</label>
+                        <textarea 
+                          className="input" 
+                          rows={3} 
+                          style={{ fontFamily: 'monospace', fontSize: 12 }}
+                          value={testInput} 
+                          onChange={e => setTestInput(e.target.value)} 
+                        />
+                      </div>
+                      <button type="button" className="btn btn-secondary" onClick={testSkill} disabled={isTesting || !newSkill.code} style={{ marginTop: 24 }}>
+                        {isTesting ? 'Running...' : '▶ Test Skill'}
+                      </button>
+                    </div>
+                    
+                    {testResult && (
+                      <div style={{ marginTop: 12, padding: 12, borderRadius: 6, background: '#0f1117', borderLeft: `3px solid ${testResult.success ? '#22c55e' : '#ef4444'}` }}>
+                        <div style={{ color: testResult.success ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4 }}>
+                          {testResult.success ? 'Success' : 'Error'}
+                        </div>
+                        <pre style={{ margin: 0, color: '#e2e8f0', fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 150, overflowY: 'auto' }}>
+                          {testResult.success ? JSON.stringify(testResult.data, null, 2) : testResult.error}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 8 }}>
+                <button type="button" className="btn btn-secondary" onClick={() => {
+                  setShowSkillModal(false); setTestResult(null)
+                }}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={!newSkill.name || (newSkill.type === 'code' ? !newSkill.code : newSkill.type === 'api' ? !newSkill.url : !newSkill.instruction)}>Save Skill</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -38,8 +38,7 @@ export async function ingestDocument({ tenantId, knowledgeBaseId, name, content,
   await auditLog({ eventType: 'knowledge.document_received', tenantId, actorId: userId, actorType: 'USER', resourceType: 'KnowledgeDocument', resourceId: doc.id, action: 'INGEST' })
 
   // Process asynchronously
-  setImmediate(() => processDocument(doc, content, tenantId).catch(err => {
-    console.error(`Document ${doc.id} processing failed:`, err.message)
+  setImmediate(() => processDocument(doc, content, tenantId).catch(() => {
     query(`UPDATE knowledge_documents SET status = 'FAILED' WHERE id = $1`, [doc.id])
   }))
 
@@ -56,8 +55,7 @@ export async function ingestFile({ tenantId, knowledgeBaseId, filename, fileBuff
   let content = ''
   try {
     content = await extractText(fileBuffer, mimeType, filename)
-  } catch (err) {
-    console.error(`[ingestFile] Text extraction failed for ${filename}:`, err.message)
+  } catch {
     content = fileBuffer.toString('utf8') // last-resort fallback
   }
 
@@ -102,8 +100,7 @@ async function processDocument(doc, content, tenantId) {
           [batch[j].id, tenantId, JSON.stringify(embeddings[j])]
         )
       }
-    } catch (err) {
-      console.error('Embedding batch failed:', err.message)
+    } catch {
       // Continue with remaining batches
     }
   }
@@ -169,8 +166,7 @@ export async function searchKnowledge({ tenantId, query: searchQuery, knowledgeB
       score: parseFloat(r.score),
       metadata: r.metadata
     }))
-  } catch (err) {
-    console.error('Search error:', err.message)
+  } catch {
     return []
   }
 }

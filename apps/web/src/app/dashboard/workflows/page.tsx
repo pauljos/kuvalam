@@ -103,7 +103,13 @@ export default function WorkflowsPage() {
       toast('success', 'Workflow started', 'Execution is now running.')
       viewExecution(exec.id)
     } catch (err: any) {
-      toast('error', 'Failed to start workflow', err.message)
+      if (err.status === 429) {
+        toast('warning', 'Execution limit reached', err.message || 'Too many workflows running. Please wait.')
+      } else if (err.status === 422) {
+        toast('error', 'Workflow not active', 'This workflow must be active to execute.')
+      } else {
+        toast('error', 'Failed to start workflow', err.message)
+      }
     }
   }
 
@@ -155,9 +161,14 @@ export default function WorkflowsPage() {
   return (
     <div className="animate-in">
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Workflows</h1>
-          <p className="page-sub">Chain agents, decision gates, and integrations into repeatable sequences</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <a href="/dashboard" className="btn btn-secondary btn-sm" style={{ textDecoration: 'none', padding: '6px 12px' }}>
+            ← Home
+          </a>
+          <div>
+            <h1 className="page-title" style={{ marginBottom: 2 }}>Workflows</h1>
+            <p className="page-sub">Chain agents, decision gates, and integrations into repeatable sequences</p>
+          </div>
         </div>
         <button className="btn btn-primary" onClick={openCanvasNew}>+ Build Workflow</button>
       </div>

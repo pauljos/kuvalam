@@ -72,15 +72,12 @@ export function initTelemetry(server, verifyToken) {
   })
 
   wss.on('connection', (ws, tenantId) => {
-    console.log(`[Telemetry] Client connected to tenant: ${tenantId}`)
-    
     if (!clients.has(tenantId)) {
       clients.set(tenantId, new Set())
     }
     clients.get(tenantId).add(ws)
 
     ws.on('close', () => {
-      console.log(`[Telemetry] Client disconnected from tenant: ${tenantId}`)
       const tenantClients = clients.get(tenantId)
       if (tenantClients) {
         tenantClients.delete(ws)
@@ -90,12 +87,10 @@ export function initTelemetry(server, verifyToken) {
       }
     })
 
-    ws.on('error', (err) => {
-      console.error('[Telemetry] Socket error:', err.message)
+    ws.on('error', () => {
+      // WebSocket errors are expected during normal disconnect flows
     })
   })
-
-  console.log('📡 Telemetry service initialized (WS server attached)')
 }
 
 /**
