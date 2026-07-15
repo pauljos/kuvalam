@@ -8,7 +8,8 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/worker/package.json ./apps/worker/
-RUN npm ci --workspace=apps/api --workspace=apps/worker --include-workspace-root=false --omit=dev
+# Install all dependencies including workspace root
+RUN npm ci --omit=dev
 
 FROM base AS runner
 ENV NODE_ENV=production

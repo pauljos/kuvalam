@@ -7,7 +7,8 @@ RUN apk add --no-cache dumb-init
 FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
-RUN npm ci --workspace=apps/api --include-workspace-root=false --omit=dev
+# Install all dependencies including workspace root
+RUN npm ci --omit=dev
 
 # ── Production image ───────────────────────────────────────────────────────
 FROM base AS runner

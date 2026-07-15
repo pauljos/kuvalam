@@ -6,7 +6,8 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/web/package.json ./apps/web/
-RUN npm ci --workspace=apps/web --include-workspace-root=false
+# Install all dependencies
+RUN npm ci
 
 # ── Build Next.js ──────────────────────────────────────────────────────────
 FROM base AS builder
