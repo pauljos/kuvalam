@@ -5,17 +5,18 @@ RUN apk add --no-cache dumb-init
 
 # ── Install dependencies ───────────────────────────────────────────────────
 FROM base AS deps
-# Copy package files
+# Copy ALL workspace package.json files for npm to understand workspace structure
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
-# Force clean install without cache
-RUN npm ci --omit=dev --no-optional 2>&1 || npm install --production --legacy-peer-deps
+COPY apps/web/package.json ./apps/web/
+COPY apps/worker/package.json ./apps/worker/
+# Now npm ci will work properly with complete workspace info
+RUN npm ci --omit=dev
 
 # ── Production image ───────────────────────────────────────────────────────
 FROM base AS runner
 ENV NODE_ENV=production
 
-# Copy root package.json so Node knows about workspace structure
 COPY package.json package-lock.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/api/src ./apps/api/src
