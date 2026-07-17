@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useApp } from '@/lib/context'
+import { api } from '@/lib/api'
 import { useConfirm } from '@/components/ConfirmModal'
 import RestConnectorForm, { type RestConfig } from '@/components/RestConnectorForm'
 
@@ -130,6 +131,38 @@ const CONNECTORS = [
   },
 ]
 
+const LOCAL_CONNECTORS = [
+  {
+    id: 'local-shell',
+    name: 'Local Terminal / Shell',
+    icon: '💻',
+    description: 'Grant agents the ability to run bash/zsh commands directly on this machine.',
+    category: 'Local Machine',
+    authType: 'API_KEY',
+    fields: [], // No fields needed
+  },
+  {
+    id: 'local-applescript',
+    name: 'Mac Automation',
+    icon: '🍎',
+    description: 'Execute AppleScript to control macOS desktop applications.',
+    category: 'Local Machine',
+    authType: 'API_KEY',
+    fields: [],
+  },
+  {
+    id: 'local-dir',
+    name: 'Local Directory',
+    icon: '📁',
+    description: 'Allow agents to read files directly from a local folder on this machine.',
+    category: 'Local Machine',
+    authType: 'API_KEY',
+    fields: [
+      { name: 'path', label: 'Absolute Folder Path', type: 'text', placeholder: '/Users/you/projects/docs' },
+    ],
+  },
+]
+
 export default function ConnectorsPage() {
   const { tenantId, toast } = useApp()
   const { confirm, ConfirmDialog } = useConfirm()
@@ -193,20 +226,17 @@ export default function ConnectorsPage() {
           method: 'DELETE', credentials: 'include'
         }).catch(() => {})
       }
-      const res = await fetch(`${API_BASE}/tenants/${tenantId}/connectors/oauth/initiate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ provider: providerId, service: 'default' })
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        // No OAuth app registered for this tenant — open the BYOC form
-        // so the user can paste their Client ID / Client Secret without
-        // ever setting an env var. The server tells us which BACKEND
-        // provider needs credentials (e.g. 'gmail' UI id → 'google' app).
-        if (data?.error?.code === 'OAUTH_APP_NOT_CONFIGURED') {
-          const details = data.error.details || {}
+      try {
+        const data = await api.request(`/tenants/${tenantId}/connectors/oauth/initiate`, {
+          method: 'POST',
+          body: JSON.stringify({ provider: providerId, service: 'default' })
+        })
+        const authUrl = data?.authorizationUrl
+        if (authUrl) { window.location.href = authUrl }
+        else throw new Error('No authorization URL returned from server')
+      } catch (err: any) {
+        if (err.code === 'OAUTH_APP_NOT_CONFIGURED') {
+          const details = err.details || {}
           setOauthAppForm({
             show: true,
             provider: details.provider || providerId,
@@ -219,14 +249,8 @@ export default function ConnectorsPage() {
             `Paste your ${details.provider || providerId} OAuth Client ID and Secret to continue. Nothing is stored in env vars.`)
           return
         }
-        // Surface the exact server error message so misconfigurations
-        // (missing client ID, unknown provider, etc.) are actionable.
-        const msg = data?.error?.message || `Failed to initiate OAuth (HTTP ${res.status})`
-        throw new Error(msg)
+        throw new Error(err.message || `Failed to initiate OAuth (HTTP ${err.status})`)
       }
-      const authUrl = data.data?.authorizationUrl
-      if (authUrl) { window.location.href = authUrl }
-      else throw new Error('No authorization URL returned from server')
     } catch (err: any) {
       toast('error', 'OAuth failed', err.message)
     } finally {
@@ -238,19 +262,14 @@ export default function ConnectorsPage() {
     if (!oauthAppForm || !configuring) return
     setOauthAppForm(f => f && { ...f, saving: true })
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
-      const res = await fetch(`${API_BASE}/tenants/${tenantId}/oauth/apps/${oauthAppForm.provider}`, {
+      await api.request(`/tenants/${tenantId}/oauth/apps/${oauthAppForm.provider}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({
           clientId: oauthAppForm.clientId.trim(),
           clientSecret: oauthAppForm.clientSecret,
           redirectUri: oauthAppForm.redirectUri
         })
       })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.error?.message || `Failed to save (HTTP ${res.status})`)
       // Immediately proceed to the OAuth handshake now that creds exist.
       setOauthAppForm(null)
       await initiateOAuthFlow(configuring.id)
@@ -262,14 +281,8 @@ export default function ConnectorsPage() {
 
   async function loadConnectors(tid: string) {
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
-      const res = await fetch(`${API_BASE}/tenants/${tid}/connectors`, {
-        credentials: 'include'
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setActiveConnections(data.data?.connectors || data.data || [])
-      }
+      const data = await api.request(`/tenants/${tid}/connectors`)
+      setActiveConnections(data?.connectors || data || [])
     } catch { /* API may not have this endpoint yet */ }
   }
 
@@ -285,17 +298,13 @@ export default function ConnectorsPage() {
     setModalTestError(null)
     setOauthAppForm(null)
     try {
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
-      const res = await fetch(`${API_BASE}/tenants/${tenantId}/oauth/apps/${connector.id}`, {
-        credentials: 'include'
-      })
-      const data = await res.json().catch(() => ({}))
-      if (res.ok && !data.data?.configured) {
+      const data = await api.request(`/tenants/${tenantId}/oauth/apps/${connector.id}`)
+      if (!data?.configured) {
         // Credentials not yet set up — show the registration form immediately
         setOauthAppForm({
           show: true,
           provider: connector.id,
-          redirectUri: data.data?.defaultRedirectUri || 'http://localhost:3001/api/v1/oauth/callback',
+          redirectUri: data?.defaultRedirectUri || 'http://localhost:3001/api/v1/oauth/callback',
           clientId: '',
           clientSecret: '',
           saving: false
@@ -313,17 +322,14 @@ export default function ConnectorsPage() {
     setModalTestState('testing')
     setModalTestError(null)
     setSaving(true)
-    const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
     let connId: string | null = null
     try {
       const config = configuring.id === 'rest'
         ? (restConfig || { baseUrl: '', auth: { type: 'none' }, operations: [] })
         : formValues
       // Step 1: Save as PENDING
-      const saveRes = await fetch(`${API_BASE}/tenants/${tenantId}/connectors`, {
+      const saveData = await api.request(`/tenants/${tenantId}/connectors`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({
           toolId: configuring.id,
           name: configuring.id === 'rest' && (restConfig?.baseUrl)
@@ -333,18 +339,13 @@ export default function ConnectorsPage() {
           config,
         })
       })
-      const saveData = await saveRes.json().catch(() => ({}))
-      if (!saveRes.ok) throw new Error(saveData?.error?.message || 'Save failed')
-      connId = saveData.data?.id
+      connId = saveData?.id
 
       // Step 2: Test immediately
-      const testRes = await fetch(`${API_BASE}/tenants/${tenantId}/connectors/${connId}/test`, {
-        method: 'POST',
-        credentials: 'include'
+      const result = await api.request(`/tenants/${tenantId}/connectors/${connId}/test`, {
+        method: 'POST'
       })
-      const testData = await testRes.json().catch(() => ({}))
-      const result = testData?.data
-      const ok = testRes.ok && result?.success === true
+      const ok = result?.success === true
 
       if (ok) {
         // Test passed — connector is now ACTIVE
@@ -431,7 +432,15 @@ export default function ConnectorsPage() {
     }
   }
 
-  const categories = [...new Set(CONNECTORS.map(c => c.category))]
+  const [visibleConnectors, setVisibleConnectors] = useState(CONNECTORS)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+      setVisibleConnectors([...CONNECTORS, ...LOCAL_CONNECTORS])
+    }
+  }, [])
+
+  const categories = [...new Set(visibleConnectors.map(c => c.category))]
 
   return (
     <div className="animate-in">
@@ -469,7 +478,7 @@ export default function ConnectorsPage() {
             <h2 style={{ fontSize: 14, fontWeight: 700, marginBottom: 16 }}>Configured Connections</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {activeConnections.map(conn => {
-                const def = CONNECTORS.find(c => c.id === conn.tool_id)
+                const def = [...CONNECTORS, ...LOCAL_CONNECTORS].find(c => c.id === conn.tool_id)
                 const statusColor =
                   conn.status === 'ACTIVE'  ? { bg: '#d1fae5', fg: '#065f46', label: '● Active'  } :
                   conn.status === 'ERROR'   ? { bg: '#fecaca', fg: '#991b1b', label: '● Error'   } :
@@ -521,7 +530,7 @@ export default function ConnectorsPage() {
               {category}
             </h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
-              {CONNECTORS.filter(c => c.category === category).map(connector => {
+              {visibleConnectors.filter(c => c.category === category).map(connector => {
                 const connected = isConnected(connector.id)
                 return (
                   <div key={connector.id} className="card card-hover" style={{ padding: 20 }}>

@@ -96,16 +96,16 @@ function msUntilNextFire(fields, now = new Date()) {
 
   while (candidate < limit) {
     const mo = candidate.getMonth() + 1   // 1-12
-    const d  = candidate.getDate()         // 1-31
+    const d = candidate.getDate()         // 1-31
     const wd = candidate.getDay()          // 0-6 Sun=0
-    const h  = candidate.getHours()
-    const m  = candidate.getMinutes()
+    const h = candidate.getHours()
+    const m = candidate.getMinutes()
 
     const monthOk = !fields.month || fields.month.has(mo)
-    const domOk   = !fields.dom   || fields.dom.has(d)
-    const dowOk   = !fields.dow   || fields.dow.has(wd)
-    const hourOk  = !fields.hour  || fields.hour.has(h)
-    const minOk   = !fields.minute || fields.minute.has(m)
+    const domOk = !fields.dom || fields.dom.has(d)
+    const dowOk = !fields.dow || fields.dow.has(wd)
+    const hourOk = !fields.hour || fields.hour.has(h)
+    const minOk = !fields.minute || fields.minute.has(m)
 
     if (monthOk && domOk && dowOk && hourOk && minOk) {
       return candidate.getTime() - now.getTime()

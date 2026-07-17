@@ -126,7 +126,14 @@ export default async function settingsRoutes(fastify) {
   // POST /tenants/:tenantId/settings/llm/test — test a provider connection
   fastify.post('/tenants/:tenantId/settings/llm/test', ownerAdmin, async (req, reply) => {
     try {
-      const { provider, apiKey, model } = req.body
+      let { provider, apiKey, model } = req.body
+      
+      if (!apiKey || apiKey === '(saved)') {
+        const { rows: [tenant] } = await query('SELECT llm_config FROM tenants WHERE id = $1', [req.params.tenantId])
+        if (tenant?.llm_config?.providers?.[provider]?.apiKey) {
+          apiKey = decrypt(tenant.llm_config.providers[provider].apiKey)
+        }
+      }
 
       let testResult = { success: false, message: '', latency: 0 }
       const start = Date.now()
@@ -135,11 +142,18 @@ export default async function settingsRoutes(fastify) {
         const baseUrl = req.body.baseUrl || getDefaultBaseUrl(provider)
         const testModel = model || getDefaultModel(provider)
         try {
+          let fetchedModels = []
+          try {
+            const modelsRes = await fetch(`${baseUrl}/models`, { headers: { 'Authorization': `Bearer ${apiKey || 'not-required'}` } })
+            if (modelsRes.ok) {
+              const modelsData = await modelsRes.json()
+              if (modelsData?.data && Array.isArray(modelsData.data)) fetchedModels = modelsData.data.map(m => m.id)
+            }
+          } catch (e) {}
+
           const res = await fetch(`${baseUrl}/chat/completions`, {
             method: 'POST',
             headers: {
-              // Local servers usually don't require an Authorization header, but sending
-              // a dummy bearer is harmless and matches LM Studio / LocalAI conventions.
               'Authorization': `Bearer ${apiKey || 'not-required'}`,
               'Content-Type': 'application/json',
               ...(provider === 'openrouter' ? { 'HTTP-Referer': 'https://kuvalam.ai', 'X-Title': 'Kuvalam' } : {})
@@ -152,9 +166,10 @@ export default async function settingsRoutes(fastify) {
           })
           const data = await res.json()
           if (res.ok && data.choices?.[0]) {
-            testResult = { success: true, message: `Connected! Model: ${testModel}`, latency: Date.now() - start }
+            testResult = { success: true, message: `Connected! Model: ${testModel}`, latency: Date.now() - start, models: fetchedModels }
           } else {
-            testResult = { success: false, message: data.error?.message || `HTTP ${res.status}`, latency: Date.now() - start }
+            const errorMsg = typeof data.error === 'string' ? data.error : data.error?.message || `HTTP ${res.status}`
+            testResult = { success: false, message: errorMsg, latency: Date.now() - start, models: fetchedModels }
           }
         } catch (err) {
           testResult = { success: false, message: err.message, latency: Date.now() - start }
@@ -236,7 +251,7 @@ function getDefaultModel(provider) {
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-large-latest',
     ollama: 'llama3.2',
-    opencode: 'opencode/zen-coder',
+    opencode: 'deepseek-v4-pro',
     lmstudio: 'local-model',
     localai: 'gpt-3.5-turbo',
     custom: 'local-model'
@@ -251,7 +266,7 @@ function getDefaultBaseUrl(provider) {
     groq: 'https://api.groq.com/openai/v1',
     mistral: 'https://api.mistral.ai/v1',
     ollama: 'http://localhost:11434/v1',
-    opencode: 'https://api.opencode.ai/v1',
+    opencode: 'https://opencode.ai/zen/go/v1',
     lmstudio: 'http://localhost:1234/v1',
     localai: 'http://localhost:8080/v1',
     custom: null

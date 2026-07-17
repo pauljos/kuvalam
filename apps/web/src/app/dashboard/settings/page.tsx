@@ -20,7 +20,7 @@ const PROVIDERS: Array<{
   { id: 'openai', name: 'OpenAI', icon: '🤖', color: '#10a37f', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.openai.com/v1' },
   { id: 'anthropic', name: 'Anthropic', icon: '🧠', color: '#c07000', models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'], keyLabel: 'API Key', keyPlaceholder: 'sk-ant-...', baseUrl: null },
   { id: 'openrouter', name: 'OpenRouter', icon: '🔀', color: '#6366f1', models: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct', 'mistralai/mistral-large'], keyLabel: 'API Key', keyPlaceholder: 'sk-or-v1-...', baseUrl: 'https://openrouter.ai/api/v1' },
-  { id: 'opencode', name: 'OpenCode', icon: '💻', color: '#10b981', models: ['opencode/zen-coder', 'opencode/go-coder-33b', 'deepseek/deepseek-coder', 'qwen/qwen2.5-coder'], keyLabel: 'API Key', keyPlaceholder: 'oc-...', baseUrl: 'https://console.opencode.ai/inference/openai/v1' },
+  { id: 'opencode', name: 'OpenCode', icon: '💻', color: '#10b981', models: ['deepseek-v4-pro', 'minimax-m3', 'qwen3.7-max', 'mimo-v2-pro'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://opencode.ai/zen/go/v1' },
   { id: 'groq', name: 'Groq (Fast)', icon: '⚡', color: '#f59e0b', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'], keyLabel: 'API Key', keyPlaceholder: 'gsk_...', baseUrl: 'https://api.groq.com/openai/v1' },
   { id: 'mistral', name: 'Mistral AI', icon: '🌊', color: '#3b82f6', models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest'], keyLabel: 'API Key', keyPlaceholder: 'your-mistral-key', baseUrl: 'https://api.mistral.ai/v1' },
   // ── Local / self-hosted OpenAI-compatible servers ──────────────────────────
@@ -42,6 +42,7 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<any>(null)
+  const [dynamicModels, setDynamicModels] = useState<string[]>([])
   const [removing, setRemoving] = useState(false)
 
   const isConfigured = !!config
@@ -80,6 +81,12 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
       }
       const result = await api.testLLMProvider(tenantId, body)
       setTestResult(result)
+      if (result.models?.length > 0) {
+        setDynamicModels(result.models)
+        if (!result.models.includes(form.model)) {
+          setForm(f => ({ ...f, model: result.models[0] }))
+        }
+      }
     } catch (err: any) { setTestResult({ success: false, message: err.message }) } finally { setTesting(false) }
   }
 
@@ -128,13 +135,13 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
             )}
 
             {/* Base URL — always shown for local providers, optional for cloud */}
-            {isLocal && (
+            {provider.baseUrl !== null && (
               <div>
                 <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
                   Base URL
                 </label>
                 <input className="input" type="url" placeholder={provider.keyPlaceholder} value={form.baseUrl} onChange={set('baseUrl')} required={!isConfigured} />
-                <p className="form-hint">Your OpenAI-compatible endpoint. Must end with <code>/v1</code>.</p>
+                <p className="form-hint">The API endpoint to use. Leave as default unless using a proxy.</p>
               </div>
             )}
 
@@ -184,7 +191,7 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
               ) : (
                 <>
                   <select className="input" value={form.model} onChange={set('model')}>
-                    {provider.models.map((m: string) => <option key={m} value={m}>{m}</option>)}
+                    {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m}>{m}</option>)}
                   </select>
                   <p className="form-hint">Choose the model for your agents. Start with smaller/faster options for testing to save cost.</p>
                 </>

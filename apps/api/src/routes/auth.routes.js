@@ -135,13 +135,13 @@ export default async function authRoutes(fastify) {
       })
 
       // Return accessToken in body for cross-origin requests
-      return reply.send({ 
-        success: true, 
-        data: { 
+      return reply.send({
+        success: true,
+        data: {
           accessToken,
-          expiresAt: result.expiresAt 
-        }, 
-        meta: ts(request) 
+          expiresAt: result.expiresAt
+        },
+        meta: ts(request)
       })
     } catch (err) {
       return errorResponse(reply, err)

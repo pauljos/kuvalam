@@ -31,13 +31,13 @@ const BRAND = {
 export default function LoginPage() {
   const router = useRouter()
   const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [form, setForm] = useState({ 
-    email: '', 
-    password: '', 
-    name: '', 
+  const [form, setForm] = useState({
+    email: '',
+    password: '',
+    name: '',
     tenantSlug: '',
     tenantName: '',
-    orgSlug: '' 
+    orgSlug: ''
   })
   const [loading, setLoading] = useState(false)
   const [msg, setMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null)
@@ -54,20 +54,20 @@ export default function LoginPage() {
           tenantName: form.tenantName,
           tenantSlug: form.orgSlug
         })
-        setMsg({ 
-          type: 'success', 
-          text: result.approvalStatus === 'PENDING' 
+        setMsg({
+          type: 'success',
+          text: result.approvalStatus === 'PENDING'
             ? 'Registration successful! Your organization is pending approval. You\'ll receive an email once approved.'
-            : 'Account created! Sign in below.' 
+            : 'Account created! Sign in below.'
         })
         setMode('login')
       } else {
-        const data = await api.login({ 
-          email: form.email, 
+        const data = await api.login({
+          email: form.email,
           password: form.password,
-          tenantSlug: form.tenantSlug 
+          tenantSlug: form.tenantSlug
         })
-        
+
         // Store tokens for Authorization header (needed for cross-origin)
         if (data.accessToken) {
           localStorage.setItem('kuvalam_access_token', data.accessToken)
@@ -75,10 +75,10 @@ export default function LoginPage() {
         if (data.refreshToken) {
           localStorage.setItem('kuvalam_refresh_token', data.refreshToken)
         }
-        
+
         // Store user data
         localStorage.setItem('kuvalam_user', JSON.stringify(data.user))
-        
+
         if (data.tenant) {
           // Store tenant as both singular and in array format for compatibility
           localStorage.setItem('kuvalam_tenant', JSON.stringify(data.tenant))
@@ -99,10 +99,10 @@ export default function LoginPage() {
   }
 
   const features = [
-    { icon: Workflow,     text: 'Multi-tenant, multi-agent orchestration' },
+    { icon: Workflow, text: 'Multi-tenant, multi-agent orchestration' },
     { icon: BookOpenText, text: 'Knowledge-augmented reasoning' },
-    { icon: ShieldCheck,  text: 'Human-in-the-loop oversight' },
-    { icon: PlugZap,      text: 'Connect any tool, API, or database' },
+    { icon: ShieldCheck, text: 'Human-in-the-loop oversight' },
+    { icon: PlugZap, text: 'Connect any tool, API, or database' },
   ]
 
   return (
@@ -272,14 +272,14 @@ export default function LoginPage() {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Organization slug</label>
-                  <input 
-                    className="input" 
-                    placeholder="acme" 
-                    value={form.orgSlug} 
-                    onChange={set('orgSlug')} 
+                  <input
+                    className="input"
+                    placeholder="acme"
+                    value={form.orgSlug}
+                    onChange={set('orgSlug')}
                     pattern="[a-z0-9-]+"
                     title="Lowercase letters, numbers, and hyphens only"
-                    required 
+                    required
                   />
                   <p style={{ fontSize: 11, color: BRAND.textMuted, marginTop: 4 }}>
                     Used in your login URL (lowercase, no spaces)
@@ -361,7 +361,8 @@ export default function LoginPage() {
       </div>
 
       {/* Scoped keyframes + spinner + hover polish (no global side-effects) */}
-      <style dangerouslySetInnerHTML={{ __html: `
+      <style dangerouslySetInnerHTML={{
+        __html: `
         @keyframes kv-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .kv-landing .kv-cta:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
         .kv-landing .kv-cta:active:not(:disabled) { transform: translateY(0); filter: brightness(0.98); }

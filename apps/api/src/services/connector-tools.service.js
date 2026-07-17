@@ -13,7 +13,13 @@
 // Currently wired providers (all others fall back to Test = present-only):
 //   slack, jira, github, gmail, webhook, rest (generic HTTP with user-defined ops)
 
+import fs from 'fs/promises'
+import path from 'path'
+import { exec } from 'child_process'
+import { promisify } from 'util'
 import { createHmac } from 'crypto'
+
+const execAsync = promisify(exec)
 import { query } from '../db/pool.js'
 import { decryptCredentials } from './crypto.service.js'
 import { getValidAccessToken } from './oauth.service.js'
@@ -99,6 +105,10 @@ export async function verifyConnector(conn) {
     return { success: true, message: 'MCP connector — use MCP-specific verification' }
   }
 
+  if (conn.tool_id === 'local-shell' || conn.tool_id === 'local-applescript') {
+    return { success: true, message: 'Local capability verified automatically.' }
+  }
+
   return { success: false, message: `Cannot verify connector of type "${conn.auth_type}" for "${conn.tool_id}"` }
 }
 
@@ -110,8 +120,8 @@ function requiredFieldsFor(toolId) {
     case 'linear':  return ['apiKey']
     case 'webhook': return ['url']
     // Slack normally uses OAuth, but users can also paste a bot token
-    // (xoxb-*) directly — that path is API_KEY with a single `token` field.
     case 'slack':   return ['token']
+    case 'local-dir': return ['path']
     default:        return []
   }
 }
@@ -150,6 +160,15 @@ async function providerPing(toolId, { token, config }) {
   }
   try {
     switch (toolId) {
+      case 'local-dir': {
+        try {
+          const stats = await fs.stat(config.path)
+          if (!stats.isDirectory()) return { success: false, message: 'Path exists but is not a directory' }
+          return { success: true, message: `Local directory verified: ${config.path}` }
+        } catch (err) {
+          return { success: false, message: `Could not access directory: ${err.message}` }
+        }
+      }
       case 'slack': {
         // Slack accepts either an OAuth bearer token OR a directly-pasted
         // bot token (xoxb-\u2026) stored under config.token. verifyConnector
@@ -576,6 +595,33 @@ function databaseToolDefs(conn) {
 
 function toolDefsForProvider(conn) {
   switch (conn.tool_id) {
+    case 'local-shell': return [{
+      name: 'local_shell__execute',
+      description: `[Local Shell: ${conn.name}] Execute a bash/zsh command locally on the host machine.`,
+      inputSchema: {
+        type: 'object', required: ['command'], properties: { command: { type: 'string', description: 'The shell command to run' } }
+      }
+    }]
+    case 'local-applescript': return [{
+      name: 'local_applescript__execute',
+      description: `[Local Mac Automation: ${conn.name}] Execute an AppleScript snippet to automate macOS desktop applications.`,
+      inputSchema: {
+        type: 'object', required: ['script'], properties: { script: { type: 'string', description: 'The AppleScript code to run' } }
+      }
+    }]
+    case 'local-dir': return [{
+      name: 'local_dir__list',
+      description: `[Local Directory: ${conn.name}] List files and folders in the configured local directory.`,
+      inputSchema: {
+        type: 'object', properties: { sub_path: { type: 'string', description: 'Optional sub-directory to list' } }
+      }
+    }, {
+      name: 'local_dir__read',
+      description: `[Local Directory: ${conn.name}] Read the text contents of a file in the local directory.`,
+      inputSchema: {
+        type: 'object', required: ['file_path'], properties: { file_path: { type: 'string', description: 'Relative path of the file' } }
+      }
+    }]
     case 'slack': return [{
       name: 'slack__post_message',
       description: `[Slack: ${conn.name}] Post a message to a Slack channel or DM.`,
@@ -907,6 +953,8 @@ export async function executeConnectorTool(toolName, input, tenantId) {
   // Generic REST tools likewise namespace on the connector id.
   if (provider === 'rest') return executeRestTool(toolName, input, tenantId)
 
+  const toolIdQuery = ['local_dir', 'local_shell', 'local_applescript'].includes(provider) ? provider.replace('_', '-') : provider
+
   // Fetch the single ACTIVE connector for this provider on this tenant.
   // If a tenant has multiple (e.g. two Slack workspaces) we currently pick the newest.
   const { rows: [conn] } = await query(
@@ -914,7 +962,7 @@ export async function executeConnectorTool(toolName, input, tenantId) {
      FROM tool_connections
      WHERE tenant_id = $1 AND tool_id = $2 AND status = 'ACTIVE'
      ORDER BY created_at DESC LIMIT 1`,
-    [tenantId, provider]
+    [tenantId, toolIdQuery]
   )
   if (!conn) return { success: false, error: `No active ${provider} connector configured for this tenant.` }
 
@@ -922,6 +970,12 @@ export async function executeConnectorTool(toolName, input, tenantId) {
 
   try {
     switch (toolName) {
+      case 'local_shell__execute':       return await localShellExecute(config, input)
+      case 'local_applescript__execute': return await localApplescriptExecute(config, input)
+      
+      case 'local_dir__list':       return await localDirList(config, input)
+      case 'local_dir__read':       return await localDirRead(config, input)
+
       case 'slack__post_message':   return await slackPostMessage(conn, input)
       case 'slack__update_message': return await slackUpdateMessage(conn, input)
       case 'slack__list_channels':  return await slackListChannels(conn, input)
@@ -1653,10 +1707,54 @@ async function salesforceUpdateRecord(conn, config, { sobject, id, fields }) {
   return { success: true, id }
 }
 
+async function localDirList(config, { sub_path }) {
+  if (!config.path) return { success: false, error: 'Local directory path not configured' }
+  try {
+    const targetPath = sub_path ? path.join(config.path, sub_path) : config.path
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
+    const entries = await fs.readdir(targetPath, { withFileTypes: true })
+    const files = entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' }))
+    return { success: true, path: targetPath, files }
+  } catch (err) {
+    return { success: false, error: `Failed to list directory: ${err.message}` }
+  }
+}
+
+async function localDirRead(config, { file_path }) {
+  if (!config.path) return { success: false, error: 'Local directory path not configured' }
+  if (!file_path) return { success: false, error: 'file_path is required' }
+  try {
+    const targetPath = path.join(config.path, file_path)
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
+    const content = await fs.readFile(targetPath, 'utf8')
+    return { success: true, path: targetPath, content }
+  } catch (err) {
+    return { success: false, error: `Failed to read file: ${err.message}` }
+  }
+}
+
+async function localShellExecute(config, { command }) {
+  try {
+    const { stdout, stderr } = await execAsync(command, { timeout: 30000 })
+    return { success: true, stdout, stderr }
+  } catch (err) {
+    return { success: false, error: err.message, stdout: err.stdout, stderr: err.stderr }
+  }
+}
+
+async function localApplescriptExecute(config, { script }) {
+  try {
+    const { stdout, stderr } = await execAsync(`osascript -e ${JSON.stringify(script)}`, { timeout: 30000 })
+    return { success: true, stdout, stderr }
+  } catch (err) {
+    return { success: false, error: err.message }
+  }
+}
+
 // Provider prefixes we know how to dispatch. task.service.js uses this to
 // decide whether a tool name belongs to a connector vs a built-in.
 export const CONNECTOR_TOOL_PREFIXES = [
-  'slack__', 'jira__', 'github__', 'gmail__',
+  'local_dir__', 'local_shell__', 'local_applescript__', 'slack__', 'jira__', 'github__', 'gmail__',
   'notion__', 'linear__', 'salesforce__',
   'webhook__', 'db__', 'rest__',
 ]
