@@ -236,6 +236,13 @@ export default function SettingsPage() {
   const [inviting, setInviting] = useState(false)
   const [generalForm, setGeneralForm] = useState({ name: '' })
   const [savingGeneral, setSavingGeneral] = useState(false)
+  const [isLocalEnv, setIsLocalEnv] = useState(false)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setIsLocalEnv(window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    }
+  }, [])
 
   const load = useCallback(async (tid: string) => {
     // Load settings first (usually faster and needed for all tabs)
@@ -355,7 +362,7 @@ export default function SettingsPage() {
             )}
 
             {/* Provider cards */}
-            {PROVIDERS.map(p => (
+            {PROVIDERS.filter(p => p.kind !== 'local' || isLocalEnv).map(p => (
               <div key={p.id}>
                 <ProviderCard provider={p} config={providers[p.id]} tenantId={tenantId} onSaved={() => load(tenantId)} toast={toast} />
                 {providers[p.id] && defaultProvider !== p.id && (

@@ -127,12 +127,12 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
             </div>
             <button
               onClick={logout}
-              className="header-icon-btn"
-              aria-label="Sign out"
+              className="btn btn-secondary btn-sm"
+              style={{ padding: '6px 10px', fontSize: 11, height: 28, display: 'flex', alignItems: 'center', gap: 4 }}
               title="Sign out"
-              style={{ width: 32, height: 32 }}
             >
-              <LogOut size={15} />
+              <LogOut size={12} />
+              <span>Sign out</span>
             </button>
           </div>
         </div>
@@ -219,7 +219,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
       <a href="#main-content" className="skip-link">Skip to main content</a>
 
       {/* Desktop sidebar */}
-      <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh', overflowY: 'auto' }}>
+      <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh', overflowY: 'hidden' }}>
         <SidebarContent />
       </aside>
 

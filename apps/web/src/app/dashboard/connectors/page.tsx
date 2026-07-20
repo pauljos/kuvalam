@@ -219,17 +219,12 @@ export default function ConnectorsPage() {
     setLoadingOauth(true)
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
-      // Clean up any stale PENDING OAuth connector for this provider so we don't accumulate orphan rows
-      const stale = activeConnections.find(c => c.tool_id === providerId && c.status === 'PENDING' && c.auth_type === 'OAUTH2')
-      if (stale) {
-        await fetch(`${API_BASE}/tenants/${tenantId}/connectors/${stale.id}`, {
-          method: 'DELETE', credentials: 'include'
-        }).catch(() => {})
-      }
+      const existing = activeConnections.find(c => c.tool_id === providerId && c.auth_type === 'OAUTH2')
+      const connectorId = existing?.id || null
       try {
         const data = await api.request(`/tenants/${tenantId}/connectors/oauth/initiate`, {
           method: 'POST',
-          body: JSON.stringify({ provider: providerId, service: 'default' })
+          body: JSON.stringify({ provider: providerId, service: 'default', connectorId })
         })
         const authUrl = data?.authorizationUrl
         if (authUrl) { window.location.href = authUrl }
@@ -297,9 +292,12 @@ export default function ConnectorsPage() {
     setModalTestState('idle')
     setModalTestError(null)
     setOauthAppForm(null)
+    setExistingOauthApp(null)
     try {
       const data = await api.request(`/tenants/${tenantId}/oauth/apps/${connector.id}`)
-      if (!data?.configured) {
+      if (data?.configured) {
+        setExistingOauthApp(data)
+      } else {
         // Credentials not yet set up — show the registration form immediately
         setOauthAppForm({
           show: true,
@@ -686,6 +684,25 @@ export default function ConnectorsPage() {
                         style={{ width: '100%', justifyContent: 'center' }}
                       >
                         {loadingOauth ? 'Initiating...' : `Authorise with ${configuring.name} →`}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={async () => {
+                          console.log('DEBUG: Update button clicked!', { configuring, existingOauthApp })
+                          const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1'
+                          setOauthAppForm({
+                            show: true,
+                            provider: configuring.id,
+                            redirectUri: existingOauthApp?.redirectUri || `${API_BASE.replace(/\/api\/v1$/, '')}/api/v1/oauth/callback`,
+                            clientId: existingOauthApp?.clientId || '',
+                            clientSecret: existingOauthApp ? '••••••••' : '',
+                            saving: false
+                          })
+                        }}
+                        style={{ width: '100%', justifyContent: 'center', marginTop: 10 }}
+                      >
+                        ⚙️ Update Client ID & Secret
                       </button>
                       {configuring.docsUrl && (
                         <div style={{ textAlign: 'center', marginTop: 10 }}>

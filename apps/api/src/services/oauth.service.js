@@ -170,6 +170,18 @@ export async function saveTenantOAuthApp({ tenantId, provider, clientId, clientS
   const backendProvider = resolveOAuthTarget(provider).provider
   if (!OAUTH_PROVIDERS[backendProvider]) throw new Error(`Unknown OAuth provider: ${provider}`)
 
+  let secretEnc
+  if (clientSecret === '••••••••') {
+    const { rows: [row] } = await query(
+      `SELECT client_secret_enc FROM tenant_oauth_apps WHERE tenant_id = $1 AND provider = $2`,
+      [tenantId, backendProvider]
+    )
+    if (!row) throw new Error('No existing credentials to update')
+    secretEnc = row.client_secret_enc
+  } else {
+    secretEnc = encrypt(clientSecret)
+  }
+
   await query(
     `INSERT INTO tenant_oauth_apps (tenant_id, provider, client_id, client_secret_enc, redirect_uri, created_by, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -178,7 +190,7 @@ export async function saveTenantOAuthApp({ tenantId, provider, clientId, clientS
            client_secret_enc = EXCLUDED.client_secret_enc,
            redirect_uri = EXCLUDED.redirect_uri,
            updated_at = NOW()`,
-    [tenantId, backendProvider, clientId, encrypt(clientSecret), redirectUri || null, userId || null]
+    [tenantId, backendProvider, clientId, secretEnc, redirectUri || null, userId || null]
   )
 
   await auditLog({
@@ -397,19 +409,41 @@ export async function saveOAuthTokens({ tenantId, connectorId, provider, tokens,
     ...(Object.keys(extra).length ? { raw: extra } : {})
   }
 
-  await query(
-    `UPDATE tool_connections
-     SET auth_type = 'OAUTH2',
-         config = jsonb_set(
-           COALESCE(config, '{}'::jsonb),
-           '{oauth}',
-           $1::jsonb
-         ),
-         status = 'ACTIVE',
-         updated_at = NOW()
-     WHERE id = $2 AND tenant_id = $3`,
-    [JSON.stringify(oauthPayload), connectorId, tenantId]
-  )
+  const payloadStr = JSON.stringify(oauthPayload)
+  let finalId = connectorId
+
+  if (connectorId === 'new' || !connectorId) {
+    const { rows: [conn] } = await query(
+      `INSERT INTO tool_connections (tenant_id, tool_id, name, auth_type, config, status)
+       VALUES ($1, $2, $3, 'OAUTH2', jsonb_build_object('oauth', $4::jsonb), 'ACTIVE')
+       RETURNING id`,
+      [tenantId, provider, `${provider} (OAuth)`, payloadStr]
+    )
+    finalId = conn.id
+  } else {
+    const { rowCount } = await query(
+      `UPDATE tool_connections
+       SET auth_type = 'OAUTH2',
+           config = jsonb_set(
+             COALESCE(config, '{}'::jsonb),
+             '{oauth}',
+             $1::jsonb
+           ),
+           status = 'ACTIVE',
+           updated_at = NOW()
+       WHERE id = $2 AND tenant_id = $3`,
+      [payloadStr, connectorId, tenantId]
+    )
+    if (rowCount === 0) {
+      const { rows: [conn] } = await query(
+        `INSERT INTO tool_connections (tenant_id, tool_id, name, auth_type, config, status)
+         VALUES ($1, $2, $3, 'OAUTH2', jsonb_build_object('oauth', $4::jsonb), 'ACTIVE')
+         RETURNING id`,
+        [tenantId, provider, `${provider} (OAuth)`, payloadStr]
+      )
+      finalId = conn.id
+    }
+  }
 
   await auditLog({
     tenantId,
@@ -417,7 +451,7 @@ export async function saveOAuthTokens({ tenantId, connectorId, provider, tokens,
     actorId: userId || 'system',
     actorType: 'USER',
     resourceType: 'ToolConnection',
-    resourceId: connectorId,
+    resourceId: finalId,
     action: 'OAUTH_CONNECT',
     metadata: { provider }
   })

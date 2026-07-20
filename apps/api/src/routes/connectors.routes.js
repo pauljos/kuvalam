@@ -30,31 +30,10 @@ export default async function connectorsRoutes(fastify) {
     }
 
     try {
-      // Validate credentials BEFORE creating a connector row.
-      // This prevents stale PENDING rows from accumulating every time the user
-      // clicks "Authorise" without having registered an OAuth app for the tenant.
-      const url = await getAuthorizationUrl({ provider, service, tenantId, connectorId: connectorId || 'preflight' })
-
-      // Credentials exist and URL is valid — now upsert the connector row.
-      let id = connectorId
-      if (!id) {
-        // Delete any pre-existing PENDING connector for this provider so we
-        // don't accumulate orphan rows if the user retries.
-        await query(
-          `DELETE FROM tool_connections WHERE tenant_id = $1 AND tool_id = $2 AND status = 'PENDING' AND auth_type = 'OAUTH2'`,
-          [tenantId, provider]
-        )
-        const { rows: [conn] } = await query(
-          `INSERT INTO tool_connections (tenant_id, tool_id, name, auth_type, config, status)
-           VALUES ($1, $2, $3, 'OAUTH2', '{}', 'PENDING') RETURNING id`,
-          [tenantId, provider, `${provider} (OAuth)`]
-        )
-        id = conn.id
-      }
-
-      // Re-sign the state with the real connectorId now that we have it
-      const finalUrl = await getAuthorizationUrl({ provider, service, tenantId, connectorId: id })
-      return { data: { authorizationUrl: finalUrl, connectorId: id } }
+      // Validate credentials and return the authorization URL directly.
+      // This prevents stale PENDING rows from accumulating in the database.
+      const finalUrl = await getAuthorizationUrl({ provider, service, tenantId, connectorId: connectorId || 'new' })
+      return { data: { authorizationUrl: finalUrl, connectorId: connectorId || 'new' } }
     } catch (err) {
       // If the tenant hasn't registered an OAuth app yet, tell the UI which
       // provider needs credentials so it can render the "paste Client ID /
