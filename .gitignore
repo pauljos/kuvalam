@@ -52,6 +52,8 @@ uploads/
 tmp/
 temp/
 *.tmp
+*.png
+scratch/
 
 # Database
 *.db

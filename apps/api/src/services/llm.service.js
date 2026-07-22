@@ -222,6 +222,7 @@ export async function completeStream({ tenantId, agentId, messages, tools = [], 
 
     return { content, toolCalls, usage, finishReason }
   } catch (err) {
+    console.error('[LLM Error]', err)
     if (err.status === 429) throw new Error('LLM_RATE_LIMITED')
     if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
     throw err

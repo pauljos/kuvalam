@@ -621,6 +621,16 @@ function toolDefsForProvider(conn) {
       inputSchema: {
         type: 'object', required: ['file_path'], properties: { file_path: { type: 'string', description: 'Relative path of the file' } }
       }
+    }, {
+      name: 'local_dir__write',
+      description: `[Local Directory: ${conn.name}] Write text content to a file in the local directory (overwrites existing).`,
+      inputSchema: {
+        type: 'object', required: ['file_path', 'content'], 
+        properties: { 
+          file_path: { type: 'string', description: 'Relative path of the file to write to' },
+          content: { type: 'string', description: 'The text content to write to the file' }
+        }
+      }
     }]
     case 'slack': return [{
       name: 'slack__post_message',
@@ -975,6 +985,7 @@ export async function executeConnectorTool(toolName, input, tenantId) {
       
       case 'local_dir__list':       return await localDirList(config, input)
       case 'local_dir__read':       return await localDirRead(config, input)
+      case 'local_dir__write':      return await localDirWrite(config, input)
 
       case 'slack__post_message':   return await slackPostMessage(conn, input)
       case 'slack__update_message': return await slackUpdateMessage(conn, input)
@@ -1730,6 +1741,20 @@ async function localDirRead(config, { file_path }) {
     return { success: true, path: targetPath, content }
   } catch (err) {
     return { success: false, error: `Failed to read file: ${err.message}` }
+  }
+}
+
+async function localDirWrite(config, { file_path, content }) {
+  if (!config.path) return { success: false, error: 'Local directory path not configured' }
+  if (!file_path || content === undefined) return { success: false, error: 'file_path and content are required' }
+  try {
+    const targetPath = path.join(config.path, file_path)
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
+    await fs.mkdir(path.dirname(targetPath), { recursive: true })
+    await fs.writeFile(targetPath, content, 'utf8')
+    return { success: true, path: targetPath, bytes: Buffer.byteLength(content, 'utf8') }
+  } catch (err) {
+    return { success: false, error: `Failed to write file: ${err.message}` }
   }
 }
 

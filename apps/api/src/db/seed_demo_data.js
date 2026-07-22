@@ -1,6 +1,11 @@
 // apps/api/src/db/seed_demo_data.js
 import dotenv from 'dotenv'
-dotenv.config({ path: 'apps/api/.env' })
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const envPath = join(__dirname, '../../.env')
+dotenv.config({ path: envPath })
 
 if (process.env.NODE_ENV === 'production') {
   console.error('ERROR: seed_demo_data must not be run in production.')
@@ -16,6 +21,13 @@ async function seed() {
 
   try {
     // 1. Ensure we have some agents
+    // Clear dependent tables first to avoid foreign key violations
+    await query('DELETE FROM audit_log WHERE tenant_id = $1', [TENANT_ID])
+    await query('DELETE FROM human_feedback WHERE tenant_id = $1', [TENANT_ID])
+    await query('DELETE FROM approval_requests WHERE tenant_id = $1', [TENANT_ID])
+    await query('DELETE FROM step_executions WHERE tenant_id = $1', [TENANT_ID])
+    await query('DELETE FROM workflow_executions WHERE tenant_id = $1', [TENANT_ID])
+    await query('DELETE FROM agent_episodic_memory WHERE tenant_id = $1', [TENANT_ID])
     await query('DELETE FROM agent_tasks WHERE tenant_id = $1', [TENANT_ID])
     await query('DELETE FROM agent_skills WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)', [TENANT_ID])
     await query('DELETE FROM agent_rules WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)', [TENANT_ID])
@@ -63,13 +75,7 @@ async function seed() {
       workflowId = existingWorkflows[0].id
     }
 
-    // 3. Clear old mock tasks and logs to avoid duplication if running seed multiple times
-    await query('DELETE FROM audit_log WHERE tenant_id = $1 AND actor_type = $2', [TENANT_ID, 'DEMO_SEEDER'])
-    await query('DELETE FROM human_feedback WHERE tenant_id = $1', [TENANT_ID])
-    await query('DELETE FROM approval_requests WHERE tenant_id = $1 AND requested_by = $2', [TENANT_ID, 'DEMO_SEEDER'])
-    await query('DELETE FROM step_executions WHERE tenant_id = $1', [TENANT_ID])
-    await query('DELETE FROM workflow_executions WHERE tenant_id = $1', [TENANT_ID])
-    await query('DELETE FROM agent_tasks WHERE tenant_id = $1 AND context->>\'demo\' = \'true\'', [TENANT_ID])
+    // 3. Clear old mock tasks and logs (already handled in step 1 cleanup above)
 
     // 4. Create tasks spread across the last 14 days
     console.log('Creating mock agent tasks...')

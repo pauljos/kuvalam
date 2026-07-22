@@ -129,6 +129,11 @@ export const api = {
   getMembers: (tenantId: string) => request(`/tenants/${tenantId}/members`),
   inviteMember: (tenantId: string, body: any) => request(`/tenants/${tenantId}/members/invite`, { method: 'POST', body: JSON.stringify(body) }),
 
+  // Custom Models (Fine-Tuning)
+  getCustomModels: (tenantId: string) => request(`/tenants/${tenantId}/custom-models`),
+  trainCustomModel: (tenantId: string, body: any) => request(`/tenants/${tenantId}/custom-models`, { method: 'POST', body: JSON.stringify(body) }),
+  testDbConnection: (tenantId: string, body: any) => request(`/tenants/${tenantId}/custom-models/test-db-connection`, { method: 'POST', body: JSON.stringify(body) }),
+
   // Agents
   createAgent: (tenantId: string, body: any) => request(`/tenants/${tenantId}/agents`, { method: 'POST', body: JSON.stringify(body) }),
   listAgents: (tenantId: string) => request(`/tenants/${tenantId}/agents`),

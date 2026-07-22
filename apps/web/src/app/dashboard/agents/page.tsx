@@ -7,6 +7,13 @@ import { useConfirm } from '@/components/ConfirmModal'
 
 const ARCHETYPES = ['Planner', 'Research', 'Compliance', 'Document', 'Communication', 'Analytics', 'Coordinator']
 
+const PROMPT_TEMPLATES = [
+  { label: 'Data Analyst', prompt: 'You are an expert Data Analyst agent. Your goal is to analyze provided datasets, compute key metrics, identify trends, and generate comprehensive summary reports.\n\nRULES:\n1. Always verify data formatting before processing.\n2. Summarize key findings in clear markdown tables.\n3. Do not hallucinate data.' },
+  { label: 'Software Engineer', prompt: 'You are an autonomous Software Engineering agent. Your role is to write clean, maintainable, and efficient code.\n\nRULES:\n1. Plan your architecture before writing code.\n2. Always include basic test coverage for logic.\n3. Ensure code conforms to modern linting standards.' },
+  { label: 'Research Assistant', prompt: 'You are a meticulous Research Assistant. Your role is to gather information, synthesize long documents, and provide accurate, cited summaries.\n\nRULES:\n1. Extract key facts and list them as bullet points.\n2. Do not invent information.\n3. When asked to summarize, maintain the original tone.' },
+  { label: 'Customer Support', prompt: 'You are a polite and empathetic Customer Support agent. Your role is to resolve user issues efficiently while maintaining a professional tone.\n\nRULES:\n1. Always start by acknowledging the user\'s frustration or issue.\n2. Provide step-by-step solutions.\n3. Escalate to a human if the issue cannot be resolved.' }
+];
+
 // Providers whose model catalogue is user-defined (Ollama pulls, LM Studio loads, etc.)
 const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio', 'localai', 'custom'])
 
@@ -263,8 +270,23 @@ export default function AgentsPage() {
                   </p>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">System Instructions / Prompt</label>
-                  <textarea className="input" rows={4} placeholder="Describe rules, behaviors, and standard operating procedures for the agent..." value={form.systemPrompt} onChange={set('systemPrompt')} style={{ resize: 'vertical' }} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4 }}>
+                    <label className="form-label" style={{ marginBottom: 0 }}>System Instructions / Prompt</label>
+                    <select 
+                      className="select" 
+                      style={{ width: 'auto', padding: '2px 8px', fontSize: 11, height: 24, minHeight: 24, borderRadius: 4 }}
+                      onChange={(e) => {
+                        if (e.target.value) setForm(f => ({ ...f, systemPrompt: e.target.value }));
+                        e.target.value = "";
+                      }}
+                    >
+                      <option value="">Load template...</option>
+                      {PROMPT_TEMPLATES.map(t => (
+                        <option key={t.label} value={t.prompt}>{t.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <textarea className="input" rows={6} placeholder="Describe rules, behaviors, and standard operating procedures for the agent..." value={form.systemPrompt} onChange={set('systemPrompt')} style={{ resize: 'vertical' }} />
                 </div>
                 {error && <div className="alert alert-error">{error}</div>}
               </div>

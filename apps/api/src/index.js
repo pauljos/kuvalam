@@ -26,6 +26,7 @@ import a2aRoutes from './routes/a2a.routes.js'
 import mcpRoutes from './routes/mcp.routes.js'
 import feedbackRoutes from './routes/feedback.routes.js'
 import profileRoutes from './routes/profile.routes.js'
+import customModelsRoutes from './routes/custom-models.routes.js'
 import { initQueues, getQueueStats, shutdownQueues } from './services/queue.service.js'
 import { startScheduler, stopScheduler, getSchedulerStatus } from './services/scheduler.service.js'
 import { initTelemetry } from './services/telemetry.service.js'
@@ -234,6 +235,7 @@ await fastify.register(a2aRoutes, { prefix: '/api/v1' })
 await fastify.register(mcpRoutes, { prefix: '/api/v1' })
 await fastify.register(feedbackRoutes, { prefix: '/api/v1' })
 await fastify.register(profileRoutes, { prefix: '/api/v1' })
+await fastify.register(customModelsRoutes, { prefix: '/api/v1' })
 
 // ─── Global error handler ──────────────────────────────────────────────────
 fastify.setErrorHandler(async (error, request, reply) => {

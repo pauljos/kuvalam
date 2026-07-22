@@ -438,7 +438,29 @@ export default function AgentDetailPage() {
                 placeholder="e.g. Audit the Acme lease agreement PDF and flag any non-standard termination clauses."
                 value={goal} onChange={e => setGoal(e.target.value)} required
                 disabled={agent.status !== 'ACTIVE' || running} />
-              <div style={{ display: 'flex', gap: 12 }}>
+              
+              {/* Suggested Tasks */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>Suggestions:</span>
+                {agent.name.toLowerCase().includes('malayalam') && (
+                  <button type="button" className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => setGoal("Generate a Malayalam technology newsletter with 3 recent news stories.")}>
+                    Generate Newsletter
+                  </button>
+                )}
+                {agent.name.toLowerCase().includes('kaggle') && (
+                  <button type="button" className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => setGoal("Download the Titanic dataset, train a Random Forest model, and prepare the submission.csv file.")}>
+                    Solve Titanic Competition
+                  </button>
+                )}
+                <button type="button" className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }}
+                  onClick={() => setGoal(`Execute standard workflow for ${agent.name}`)}>
+                  Standard Workflow
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
                 <button className="btn btn-primary" type="submit" disabled={agent.status !== 'ACTIVE' || running} style={{ flex: 1 }}>
                   {running ? (
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>

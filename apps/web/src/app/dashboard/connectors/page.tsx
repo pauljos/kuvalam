@@ -177,6 +177,7 @@ export default function ConnectorsPage() {
   const [modalTestError, setModalTestError] = useState<string | null>(null)
 
   const [loadingOauth, setLoadingOauth] = useState(false)
+  const [existingOauthApp, setExistingOauthApp] = useState<any>(null)
 
   // BYOC — per-tenant OAuth app credentials the user pastes in the popup.
   // When the API returns OAUTH_APP_NOT_CONFIGURED, we surface a form asking

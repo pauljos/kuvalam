@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    turbopack: {
+      root: '/Users/PaulJoseph/pgent'
+    }
+  },
   devIndicators: {
     appIsrStatus: false,
     buildActivityPosition: 'top-right',

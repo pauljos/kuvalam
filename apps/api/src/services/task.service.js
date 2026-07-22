@@ -19,6 +19,110 @@ import {
 } from './connector-tools.service.js'
 import { executeCustomSkill } from './skill-executor.service.js'
 
+function safeParseJSON(str) {
+  if (!str) return {}
+  try {
+    return JSON.parse(str)
+  } catch (err) {
+    console.error('[JSON Parse Error] Raw string:', JSON.stringify(str))
+    console.error('[JSON Parse Error] Message:', err.message)
+
+    let repaired = str.trim()
+
+    // 1. Try to extract JSON from markdown code blocks
+    const jsonBlockMatch = repaired.match(/```json\s*([\s\S]*?)\s*```/)
+    if (jsonBlockMatch) {
+      try {
+        return JSON.parse(jsonBlockMatch[1].trim())
+      } catch (e) {}
+    }
+
+    // 2. Escape literal newlines within string values
+    let inString = false
+    let escapeActive = false
+    let chars = []
+    for (let i = 0; i < repaired.length; i++) {
+      const char = repaired[i]
+      if (char === '"' && !escapeActive) {
+        inString = !inString
+        chars.push(char)
+      } else if (inString) {
+        if (char === '\\') {
+          escapeActive = !escapeActive
+          chars.push(char)
+        } else {
+          escapeActive = false
+          if (char === '\n') {
+            chars.push('\\', 'n')
+          } else if (char === '\r') {
+            chars.push('\\', 'r')
+          } else {
+            chars.push(char)
+          }
+        }
+      } else {
+        chars.push(char)
+      }
+    }
+    repaired = chars.join('')
+
+    try {
+      return JSON.parse(repaired)
+    } catch (e) {
+      // 3. Close open brackets/quotes if truncated
+      try {
+        let openBraces = 0
+        let openBrackets = 0
+        let inStr = false
+        let esc = false
+        for (let i = 0; i < repaired.length; i++) {
+          const c = repaired[i]
+          if (c === '"' && !esc) {
+            inStr = !inStr
+          } else if (inStr) {
+            if (c === '\\') esc = !esc
+            else esc = false
+          } else {
+            if (c === '{') openBraces++
+            if (c === '}') openBraces--
+            if (c === '[') openBrackets++
+            if (c === ']') openBrackets--
+          }
+        }
+
+        let suffix = ''
+        if (inStr) suffix += '"'
+        while (openBraces > 0) {
+          suffix += '}'
+          openBraces--
+        }
+        while (openBrackets > 0) {
+          suffix += ']'
+          openBrackets--
+        }
+
+        if (suffix) {
+          try {
+            return JSON.parse(repaired + suffix)
+          } catch (e2) {}
+        }
+      } catch (e_trunc) {}
+    }
+
+    // 4. Try regex extraction for single string arguments (e.g. command or script)
+    const commandMatch = str.match(/^\{\s*"command"\s*:\s*"([\s\S]*)"\s*\}$/)
+    if (commandMatch) {
+      return { command: commandMatch[1] }
+    }
+    const commandExtract = str.match(/"command"\s*:\s*"([\s\S]*?)"(?=\s*\}|\s*,)/)
+    if (commandExtract) {
+      return { command: commandExtract[1] }
+    }
+
+    throw err
+  }
+}
+
 /**
  * Sign a short-lived scoped bearer token for outbound A2A delegation calls.
  * The token is a compact HMAC-signed JSON (NOT the master JWT_SECRET). External
@@ -327,6 +431,10 @@ export async function executeTask(task, agent) {
     let taskSatisfied = false
     let reflectionLoops = 0
     const MAX_REFLECTION_LOOPS = 3
+    // Track last tool+input fingerprint to detect infinite loops in small models
+    let lastToolFingerprint = null
+    let duplicateToolCount = 0
+    const MAX_DUPLICATE_TOOL_CALLS = 2
 
     // Expose current task ID to the agent object for tools like a2a_call and delegate_task
     agent._currentTaskId = task.id
@@ -364,7 +472,25 @@ export async function executeTask(task, agent) {
 
         for (const toolCall of response.toolCalls) {
           actionCount++
-          const toolInput = JSON.parse(toolCall.function.arguments || '{}')
+          const toolInput = safeParseJSON(toolCall.function.arguments || '{}')
+
+          // ── Duplicate tool-call detection (protects against 7B model loops) ──
+          const fingerprint = `${toolCall.function.name}::${JSON.stringify(toolInput)}`
+          if (fingerprint === lastToolFingerprint) {
+            duplicateToolCount++
+            if (duplicateToolCount >= MAX_DUPLICATE_TOOL_CALLS) {
+              // Skip execution and inject a "move on" hint
+              const skipMsg = `You already called ${toolCall.function.name} with the same arguments and it succeeded. Do NOT repeat it. Move on to the next step in the plan.`
+              execMessages.push({ role: 'user', content: skipMsg })
+              duplicateToolCount = 0
+              lastToolFingerprint = null
+              continueToolLoop = false
+              break
+            }
+          } else {
+            duplicateToolCount = 0
+            lastToolFingerprint = fingerprint
+          }
 
           broadcastTelemetry(tenantId, 'agent.tool_call', {
             taskId: task.id,
