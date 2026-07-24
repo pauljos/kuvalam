@@ -8,6 +8,8 @@ import { auditLog } from '../utils/audit.js'
 import { AppError } from '../utils/errors.js'
 import { enqueueTask } from './queue.service.js'
 import { decryptCredentials } from './crypto.service.js'
+import { listTables, describeTable, runQuery } from './database-connector.service.js'
+import { saveReport } from './reports.service.js'
 import { getTenantMcpServers, listMcpTools, callMcpTool } from './mcp.service.js'
 import { getValidAccessToken } from './oauth.service.js'
 import { broadcastTelemetry } from './telemetry.service.js'
@@ -272,7 +274,7 @@ export async function executeTask(task, agent) {
     const longTermMemory = await retrieveMemory(agent.id, task.goal)
 
     // 4. Build system prompt
-    const systemPrompt = buildSystemPrompt(agent, skills)
+    const systemPrompt = buildSystemPrompt(agent, skills, task.goal)
 
     // 5. Build initial messages
     // 5. Build initial messages — support multimodal (image) attachments
@@ -318,11 +320,15 @@ export async function executeTask(task, agent) {
     broadcastTelemetry(tenantId, 'agent.plan_ready', { taskId: task.id, plan: plan.content })
 
     // 7. Execution phase — tool-use loop with streaming
+    const isReportGoal = /report|analytics|dashboard|breakdown|chart|kpi|metrics|performance|summary/i.test(task.goal)
+    const reportPrimingExtra = isReportGoal
+      ? `\n\nIMPORTANT: This task requires a REPORT. You MUST call the publish_dashboard_report tool with these EXACT parameters:\n- "title": the report title\n- "html_content": the full HTML of the report with inline CSS\nDo NOT use "df", "chart_type", or "chart_config" — those are invalid. Send rendered HTML as "html_content". Include:\n- KPI metric cards (styled divs with large numbers, labels, and colour indicators)\n- A data table (HTML table, styled with borders/alternating rows)\n- At least one chart using Chart.js from CDN (https://cdn.jsdelivr.net/npm/chart.js) — choose bar, pie, or line chart dynamically based on the data\n- Professional styling (font-family, colours, card borders/shadows)\nNever publish plain text — always produce full HTML with inline CSS. Do NOT skip this tool call.`
+      : ''
     const execMessages = [
       ...messages,
       { role: 'assistant', content: `My plan: ${plan.content}\n\nNow I will execute this plan step by step.` },
       // Priming turn: explicitly instruct local models to call tools rather than hallucinating
-      { role: 'user', content: 'Now execute your plan. You MUST use the available tools to gather real data — do NOT invent or guess any values. Call the appropriate tool(s) now.' }
+      { role: 'user', content: `Now execute your plan. You MUST use the available tools to gather real data — do NOT invent or guess any values. Call the appropriate tool(s) now.${reportPrimingExtra}` }
     ]
 
     const toolDefinitions = skills.map(s => ({
@@ -425,6 +431,19 @@ export async function executeTask(task, agent) {
         }
       }
     })
+      // Global system native tools
+    toolDefinitions.push({
+      name: 'publish_dashboard_report',
+      description: 'Publishes a dynamic HTML report to the Kuvalam dashboard. PARAMETERS: title (string, required) = report title, html_content (string, required) = full HTML with inline CSS. You MUST provide both "title" and "html_content". Do NOT use "df" or "chart_type" — send rendered HTML instead.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'The title of the report.' },
+          html_content: { type: 'string', description: 'The complete HTML content of the report. Use inline CSS for styling. You can include Chart.js charts via CDN. This is the ONLY way to pass content — do NOT use "df" or "chart_type" keys.' }
+        },
+        required: ['title', 'html_content']
+      }
+    })
 
     let actionCount = 0
     const maxActions = agent.max_actions_per_run || 20
@@ -445,6 +464,13 @@ export async function executeTask(task, agent) {
 
       // Tool execution sub-loop
       while (continueToolLoop && actionCount < maxActions) {
+        // Check if task was cancelled by user
+        const { rows: [currStatus] } = await query('SELECT status FROM agent_tasks WHERE id = $1', [task.id])
+        if (currStatus?.status === 'CANCELLED') {
+          broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'cancelled', label: 'Execution stopped by user' })
+          return { success: false, status: 'CANCELLED', error: 'Task stopped by user' }
+        }
+
         broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'thinking', label: 'Thinking...' })
 
         const response = await completeStream({
@@ -589,6 +615,33 @@ If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing an
       summary: synthesis.content
     }
 
+    // Automatically publish to dashboard reports if the goal or output implies a report/analytics summary
+    // Skip if the agent already called publish_dashboard_report (detected via actions array)
+    try {
+      const alreadyPublished = actions.some(a => a.skill === 'publish_dashboard_report' && a.output?.success)
+      const isReportGoal = /report|analytics|dashboard|breakdown|summary|chart|metrics|kpi/i.test(task.goal)
+      if (!alreadyPublished && isReportGoal && synthesis.content) {
+        // Strip JSON code blocks from the synthesis content for a cleaner auto-report
+        const cleanContent = synthesis.content.replace(/```json[\s\S]*?```/g, '').replace(/```[\s\S]*?```/g, '').trim()
+        const reportTitle = `${task.goal.slice(0, 60)}`
+        const htmlContent = `
+          <div style="font-family: system-ui, sans-serif; padding: 20px; background: #ffffff; border-radius: 12px; color: #1e293b; border: 1px solid #e2e8f0;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px;">
+              <div>
+                <h2 style="font-size: 18px; font-weight: 700; color: #0f172a; margin: 0;">${reportTitle}</h2>
+                <p style="font-size: 12px; color: #64748b; margin: 4px 0 0 0;">Generated by ${agent.name} • ${new Date().toLocaleDateString()}</p>
+              </div>
+              <span style="background: #e0f2fe; color: #0369a1; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600;">Live Report</span>
+            </div>
+            <div style="white-space: pre-wrap; font-size: 14px; line-height: 1.6; color: #334155;">${cleanContent || synthesis.content}</div>
+          </div>
+        `
+        await saveReport(agent.tenant_id, agent.id, reportTitle, htmlContent)
+      }
+    } catch (reportErr) {
+      console.warn('Auto-report generation warning:', reportErr.message)
+    }
+
     // 9. Save episodic memory
     await saveEpisodicMemory(agent, task, result, actions)
 
@@ -705,11 +758,17 @@ function extractConfidence(text) {
   return Math.min(0.99, Math.max(0.1, 0.75 + highCount * 0.03 - lowCount * 0.08))
 }
 
-function buildSystemPrompt(agent, skills) {
+function buildSystemPrompt(agent, skills, goal = '') {
   const base = agent.system_prompt || `You are ${agent.name}, an AI agent. ${agent.description || ''}`
   const skillList = skills.length > 0
     ? `\n\nYour available skills:\n${skills.map(s => `- ${s.name}: ${s.description}`).join('\n')}`
     : ''
+
+  const isReportGoal = /report|analytics|dashboard|breakdown|chart|kpi|metrics|performance|summary/i.test(goal)
+  const reportRule = isReportGoal
+    ? `\n\nREPORTING RULE: This task requires generating a dashboard report. You MUST call publish_dashboard_report with { "title": "...", "html_content": "..." } — a fully styled HTML report that includes KPI metric cards, a data table, and a Chart.js chart (loaded via CDN). Use inline CSS. Do NOT use "df" or "chart_type" keys — send rendered HTML only. Never respond with plain text.`
+    : ''
+
   const rules = `\n\nCore rules:
 - You MUST call the provided tools to retrieve real data. Never invent, guess, or fabricate results.
 - If a tool is available that can answer the question, CALL IT — do not reason from memory.
@@ -718,10 +777,63 @@ function buildSystemPrompt(agent, skills) {
 - Take the minimum necessary actions to complete the task.
 - Prioritise accuracy over speed.`
 
-  return base + skillList + rules
+  return base + skillList + reportRule + rules
 }
 
 async function executeTool(toolName, input, agent, skills) {
+  if (toolName === 'publish_dashboard_report') {
+    try {
+      let title = input.title || 'Report'
+      let htmlContent = input.html_content
+
+      // Fallback: if the agent used legacy param names (df, chart_type, chart_config),
+      // convert the data into a proper HTML report automatically
+      if (!htmlContent && input.df) {
+        let parsedDf
+        try {
+          parsedDf = typeof input.df === 'string' ? JSON.parse(input.df) : input.df
+        } catch { parsedDf = input.df }
+        const rows = Array.isArray(parsedDf) ? parsedDf
+          : parsedDf && typeof parsedDf === 'object' ? Object.values(parsedDf)[0] || []
+          : []
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : []
+        const tableRows = rows.map((r, i) =>
+          `<tr${i % 2 === 1 ? ' style="background:#f8fafc"' : ''}>${columns.map(c => `<td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:13px">${r[c] ?? ''}</td>`).join('')}</tr>`
+        ).join('')
+        const chartLabels = rows.map(r => r[input.chart_config?.x_axis || columns[0]])
+        const chartValues = rows.map(r => Number(r[input.chart_config?.y_axis || columns[1]]) || 0)
+        const chartType = input.chart_type === 'pie_chart' ? 'pie' : 'bar'
+
+        title = input.title || title
+        htmlContent = `
+          <div style="font-family:system-ui,sans-serif;padding:24px;background:#ffffff;border-radius:12px;color:#1e293b;border:1px solid #e2e8f0;max-width:960px;margin:0 auto">
+            <h2 style="font-size:20px;font-weight:700;color:#0f172a;margin:0 0 4px">${title}</h2>
+            <p style="font-size:13px;color:#64748b;margin:0 0 20px">Generated automatically</p>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:24px">${tableRows}</table>
+            <canvas id="chart-${Date.now()}" style="max-height:400px;margin-top:12px"></canvas>
+            <script>
+              new Chart(document.getElementById('chart-${Date.now()}'), {
+                type: '${chartType}',
+                data: {
+                  labels: ${JSON.stringify(chartLabels)},
+                  datasets: [{ label: '${input.chart_config?.y_axis || 'Value'}', data: ${JSON.stringify(chartValues)}, backgroundColor: '#3b82f6' }]
+                }
+              })
+            </script>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+          </div>`
+      }
+
+      if (!htmlContent) {
+        return { success: false, error: 'htmlContent is required. Call publish_dashboard_report with { title, html_content } containing your full HTML report.' }
+      }
+      const report = await saveReport(agent.tenant_id, agent.id, title, htmlContent)
+      return { success: true, message: 'Report published to the dashboard successfully', report_id: report.id }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  }
+
   // Configured connector tool (Slack, Jira, GitHub, Gmail, Webhook, …)
   // Dispatched here so the LLM can call e.g. slack__post_message directly.
   if (CONNECTOR_TOOL_PREFIXES.some(p => toolName.startsWith(p))) {
@@ -880,6 +992,21 @@ async function executeTool(toolName, input, agent, skills) {
   // HTTP request tool — built in
   if (toolName === 'http_request') {
     try {
+      if (!input.url || typeof input.url !== 'string') {
+        return { success: false, error: 'url is required' }
+      }
+      // SSRF guard — only allow http(s) and block private/loopback in production
+      const parsedUrl = (() => { try { return new URL(input.url) } catch { return null } })()
+      if (!parsedUrl || !['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return { success: false, error: 'url must be a valid http(s) URL' }
+      }
+      if (process.env.NODE_ENV === 'production') {
+        const host = parsedUrl.hostname
+        if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|::1|fc00:|fe80:)/i.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+          return { success: false, error: 'url must not target private/internal addresses' }
+        }
+      }
       const response = await fetch(input.url, {
         method: input.method || 'GET',
         headers: { 'Content-Type': 'application/json', ...(input.headers || {}) },
@@ -983,4 +1110,16 @@ async function executeTool(toolName, input, agent, skills) {
   }
 
   return { success: false, error: 'Skill not yet implemented' }
+}
+
+export async function cancelTask(tenantId, agentId, taskId, userId) {
+  const { rowCount } = await query(
+    `UPDATE agent_tasks 
+     SET status = 'CANCELLED', updated_at = NOW() 
+     WHERE id = $1 AND agent_id = $2 AND tenant_id = $3 AND status IN ('PENDING', 'RUNNING')`,
+    [taskId, agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Active task not found or already completed', 404)
+  await auditLog({ eventType: 'task.cancelled', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Task', resourceId: taskId, action: 'CANCEL' })
+  return { success: true }
 }

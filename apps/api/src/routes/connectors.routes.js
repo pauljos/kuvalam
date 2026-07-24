@@ -6,6 +6,8 @@ import { encryptCredentials } from '../services/crypto.service.js'
 import { getAuthorizationUrl } from '../services/oauth.service.js'
 import { verifyConnector } from '../services/connector-tools.service.js'
 
+const ts = () => ({ requestId: undefined, timestamp: new Date().toISOString() })
+
 export default async function connectorsRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate)
 
@@ -17,7 +19,7 @@ export default async function connectorsRoutes(fastify) {
        FROM tool_connections WHERE tenant_id = $1 ORDER BY created_at DESC`,
       [tenantId]
     )
-    return { data: { connectors: rows } }
+    return { success: true, data: { connectors: rows }, meta: ts() }
   })
 
   // Initiate OAuth flow — returns a redirect URL to the provider
@@ -33,7 +35,7 @@ export default async function connectorsRoutes(fastify) {
       // Validate credentials and return the authorization URL directly.
       // This prevents stale PENDING rows from accumulating in the database.
       const finalUrl = await getAuthorizationUrl({ provider, service, tenantId, connectorId: connectorId || 'new' })
-      return { data: { authorizationUrl: finalUrl, connectorId: connectorId || 'new' } }
+      return { success: true, data: { authorizationUrl: finalUrl, connectorId: connectorId || 'new' }, meta: ts() }
     } catch (err) {
       // If the tenant hasn't registered an OAuth app yet, tell the UI which
       // provider needs credentials so it can render the "paste Client ID /
@@ -127,7 +129,7 @@ export default async function connectorsRoutes(fastify) {
       afterState: { success: testResult.success }
     })
 
-    return { data: testResult }
+    return { success: true, data: testResult, meta: ts() }
   })
 
   // Delete a connector
@@ -145,7 +147,7 @@ export default async function connectorsRoutes(fastify) {
       resourceType: 'ToolConnection', resourceId: connectorId, action: 'DELETE_CONNECTOR'
     })
 
-    return { data: { deleted: true, id: connectorId } }
+    return { success: true, data: { deleted: true, id: connectorId }, meta: ts() }
   })
 }
 

@@ -23,7 +23,7 @@ connection.on('error', (err) => console.error('[Worker] Redis error:', err.messa
 const taskWorker = new Worker(
   'agent-tasks',
   async (job) => {
-    const { executeTask } = await import('../../api/src/services/task.service.js')
+    const { executeTask } = await import('@kuvalam/api/src/services/task.service.js')
     const { task, agent } = job.data
     console.log(`[Worker:task] Processing ${task.id} for agent ${agent.name}`)
     await executeTask(task, agent)
@@ -44,7 +44,7 @@ taskWorker.on('failed', (job, err) =>
 const workflowWorker = new Worker(
   'workflow-executions',
   async (job) => {
-    const { runWorkflowStep } = await import('../../api/src/services/workflow.service.js')
+    const { runWorkflowStep } = await import('@kuvalam/api/src/services/workflow.service.js')
     const { execId, steps, stepIdx, context } = job.data
     console.log(`[Worker:workflow] Step ${stepIdx} for exec ${execId}`)
     await runWorkflowStep(execId, steps, stepIdx, context)

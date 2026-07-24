@@ -196,7 +196,8 @@ export default async function settingsRoutes(fastify) {
           const res = await fetch(`${baseUrl}/api/tags`)
           if (res.ok) {
             const data = await res.json()
-            testResult = { success: true, message: `Connected! ${data.models?.length || 0} models available`, latency: Date.now() - start }
+            const ollamaModels = (data.models || []).map((m) => m.name)
+            testResult = { success: true, message: `Connected! ${ollamaModels.length} models available`, latency: Date.now() - start, models: ollamaModels }
           } else {
             testResult = { success: false, message: `Ollama not reachable at ${baseUrl}`, latency: Date.now() - start }
           }

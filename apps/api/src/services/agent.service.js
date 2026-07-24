@@ -141,3 +141,58 @@ export async function linkKnowledgeBase(tenantId, agentId, knowledgeBaseId, user
 function toSnakeCase(str) {
   return str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)
 }
+
+export async function deleteAgent(tenantId, agentId, userId) {
+  const { rowCount } = await query(
+    'DELETE FROM agents WHERE id = $1 AND tenant_id = $2',
+    [agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Agent not found', 404)
+  await auditLog({ eventType: 'agent.deleted', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agentId, action: 'DELETE' })
+}
+
+export async function removeSkill(tenantId, agentId, skillId, userId) {
+  // Join with agents table to derive tenant isolation from the agent, not the
+  // skill — this handles the case where a skill was created with an incorrect
+  // tenant_id (e.g. before the RLS transaction fix).
+  const { rowCount } = await query(
+    `DELETE FROM agent_skills s USING agents a
+     WHERE s.id = $1 AND s.agent_id = $2 AND a.id = s.agent_id AND a.tenant_id = $3`,
+    [skillId, agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Skill not found', 404)
+  await auditLog({ eventType: 'agent.skill_removed', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agentId, action: 'REMOVE_SKILL', afterState: { skillId } })
+}
+
+export async function removeRule(tenantId, agentId, ruleId, userId) {
+  const { rowCount } = await query(
+    `DELETE FROM agent_rules r USING agents a
+     WHERE r.id = $1 AND r.agent_id = $2 AND a.id = r.agent_id AND a.tenant_id = $3`,
+    [ruleId, agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Rule not found', 404)
+  await auditLog({ eventType: 'agent.rule_removed', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agentId, action: 'REMOVE_RULE', afterState: { ruleId } })
+}
+
+export async function unlinkKnowledgeBase(tenantId, agentId, kbId, userId) {
+  const { rowCount } = await query(
+    `DELETE FROM agent_knowledge_bases kb USING agents a
+     WHERE kb.knowledge_base_id = $1 AND kb.agent_id = $2 AND a.id = kb.agent_id AND a.tenant_id = $3`,
+    [kbId, agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Knowledge base link not found', 404)
+  await auditLog({ eventType: 'agent.kb_unlinked', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agentId, action: 'UNLINK_KB', afterState: { kbId } })
+}
+
+export async function deleteTask(tenantId, agentId, taskId, userId) {
+  // Clean up related data first to avoid FK violations
+  await query('DELETE FROM agent_episodic_memory WHERE task_id = $1', [taskId])
+  await query('UPDATE approval_requests SET task_id = NULL WHERE task_id = $1', [taskId])
+  const { rowCount } = await query(
+    `DELETE FROM agent_tasks t USING agents a
+     WHERE t.id = $1 AND t.agent_id = $2 AND a.id = t.agent_id AND a.tenant_id = $3`,
+    [taskId, agentId, tenantId]
+  )
+  if (rowCount === 0) throw new AppError('NOT_FOUND', 'Task not found', 404)
+  await auditLog({ eventType: 'agent.task_deleted', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agentId, action: 'DELETE_TASK', afterState: { taskId } })
+}

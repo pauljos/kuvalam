@@ -48,6 +48,30 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
   const isConfigured = !!config
   const set = (k: string) => (e: any) => setForm(f => ({ ...f, [k]: e.target.value }))
 
+  // Auto-fetch models when a local provider card opens
+  useEffect(() => {
+    if (!open || !isLocal || !provider.id) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const baseUrl = form.baseUrl || provider.baseUrl
+        if (!baseUrl) return
+        const token = localStorage.getItem('kuvalam_access_token')
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/settings/llm/test`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: provider.id, baseUrl, model: form.model || provider.models[0] })
+        })
+        const json = await res.json()
+        const result = json.data || json
+        if (!cancelled && result.models?.length > 0) {
+          setDynamicModels(result.models)
+        }
+      } catch {}
+    })()
+    return () => { cancelled = true }
+  }, [open, provider.id])
+
   async function save(e: any) {
     e.preventDefault(); setSaving(true); setTestResult(null)
     try {
@@ -181,9 +205,9 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
                     placeholder="e.g. llama3.2, deepseek-r1:7b, qwen2.5-coder:32b"
                     required
                   />
-                  {provider.models.length > 0 && (
+                  {(dynamicModels.length > 0 ? dynamicModels : provider.models).length > 0 && (
                     <datalist id={`models-${provider.id}`}>
-                      {provider.models.map((m: string) => <option key={m} value={m} />)}
+                      {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m} />)}
                     </datalist>
                   )}
                   <p className="form-hint">Enter the exact model name available on your server (e.g. from <code>ollama list</code>).</p>

@@ -34,17 +34,25 @@ export async function query(text, params) {
   const tenantId = tenantContextStore.getStore()
   
   if (tenantId) {
-    // If tenant context is active, obtain a client to run commands in the same transaction session
+    // BUGFIX: `set_config(..., true)` is transaction-local. Without an explicit
+    // BEGIN/COMMIT the setting was lost before the actual query ran — each
+    // `client.query()` auto-commits as its own transaction. Wrap in a real
+    // transaction so the RLS policy sees the tenant context.
     const client = await pool.connect()
     try {
+      await client.query('BEGIN')
       await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(tenantId)])
       const start = Date.now()
       const res = await client.query(text, params)
+      await client.query('COMMIT')
       const duration = Date.now() - start
       if (process.env.NODE_ENV === 'development' && duration > 100) {
         console.log('Slow tenant query', { text: text.substring(0, 60), duration, rows: res.rowCount, tenantId })
       }
       return res
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
     } finally {
       client.release()
     }

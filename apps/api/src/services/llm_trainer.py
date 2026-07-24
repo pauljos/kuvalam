@@ -179,7 +179,7 @@ def main():
         total_epochs = 5
         for epoch in range(1, total_epochs + 1):
             loss = 2.5 - (epoch * 0.4)
-            print(f"Epoch {epoch}/{total_epochs} - Loss: {loss:.4f} - lr: 2.00e-04")
+            print(f"Epoch {epoch}/{total_epochs} - Loss: {loss:.4f} - lr: 2.00e-04 - cycle time: 1.5s")
             time.sleep(1.5) # Simulate time taken for epoch
             
         print("Training complete. Merging LoRA adapter weights... [Simulated]")

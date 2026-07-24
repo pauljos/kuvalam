@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import Link from 'next/link'
+import { useConfirm } from '@/components/ConfirmModal'
 import { FeedbackModal } from '@/components/FeedbackModal'
 import { Breadcrumbs } from '@/components/Breadcrumbs'
 import Editor from 'react-simple-code-editor'
@@ -19,7 +20,7 @@ type TraceEvent =
   | { type: 'tool_call'; tool: string; input: any; actionIdx: number }
   | { type: 'tool_result'; tool: string; success: boolean; output: any; actionIdx: number }
   | { type: 'plan_ready'; plan: string }
-  | { type: 'completed'; confidence: number; tokensUsed: number }
+  | { type: 'completed'; confidence: number; tokensUsed: number; durationMs?: number }
   | { type: 'failed'; error: string }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -33,12 +34,15 @@ export default function AgentDetailPage() {
   const router = useRouter()
   const agentId = id as string
   const { tenantId, toast } = useApp()
+  const { confirm, ConfirmDialog } = useConfirm()
 
   const [agent, setAgent] = useState<any>(null)
   const [kbs, setKbs] = useState<any[]>([])
   const [selectedKBs, setSelectedKBs] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [llmProviders, setLlmProviders] = useState<Record<string, { model?: string; baseUrl?: string }>>({})
+  const [customModels, setCustomModels] = useState<any[]>([])
+  const [ollamaModels, setOllamaModels] = useState<string[]>([])
 
   // Providers whose model catalogue is user-defined
   const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio', 'localai', 'custom'])
@@ -56,6 +60,8 @@ export default function AgentDetailPage() {
   const [streamBuffers, setStreamBuffers] = useState<Record<string, string>>({})
   const [showFeedback, setShowFeedback] = useState(false)
   const [currentPhase, setCurrentPhase] = useState<string>('')
+  const [pastTasks, setPastTasks] = useState<any[]>([])
+  const [deleteState, setDeleteState] = useState(0)
 
   // Skill Modal State
   const [showSkillModal, setShowSkillModal] = useState(false)
@@ -74,20 +80,33 @@ export default function AgentDetailPage() {
       Promise.all([
         api.getAgent(tenantId, agentId),
         api.listKBs(tenantId).catch(() => ({ knowledgeBases: [] })),
-        api.getSettings(tenantId).catch(() => ({ llm_config: { providers: {} } }))
-      ]).then(([a, k, s]) => {
+        api.getSettings(tenantId).catch(() => ({ llm_config: { providers: {} } })),
+        api.getCustomModels(tenantId).catch(() => ({ customModels: [] }))
+      ]).then(([a, k, s, c]) => {
         setAgent(a)
         setKbs(k.knowledgeBases || [])
         setSelectedKBs(a.knowledge_bases || [])
         setLlmProviders(s?.llm_config?.providers || {})
+        setCustomModels(c?.customModels || [])
         setLoading(false)
       })
+      api.listTasks(tenantId, agentId).then((res: any) => setPastTasks(res.tasks || [])).catch(() => {})
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
       wsRef.current?.close()
     }
   }, [agentId, tenantId])
+
+  // Fetch available Ollama models when the agent's provider is ollama
+  useEffect(() => {
+    if (agent?.llm_provider === 'ollama' && tenantId) {
+      api.getOllamaAvailableModels(tenantId).then((res: any) => {
+        const models = res?.data?.models || res?.models || []
+        setOllamaModels(models.map((m: any) => m.name || m))
+      }).catch(() => {})
+    }
+  }, [agent?.llm_provider, tenantId])
 
   // Auto-scroll trace to bottom
   useEffect(() => {
@@ -136,7 +155,7 @@ export default function AgentDetailPage() {
 
       } else if (eventType === 'agent.task_completed') {
         setTraceEvents(prev => [...prev, {
-          type: 'completed', confidence: payload.confidence, tokensUsed: payload.tokensUsed
+          type: 'completed', confidence: payload.confidence, tokensUsed: payload.tokensUsed, durationMs: payload.durationMs
         }])
         setRunning(false)
         setCurrentPhase('')
@@ -179,18 +198,94 @@ export default function AgentDetailPage() {
     }, 1500)
   }
 
+  // Backfill trace events from task history if we missed the live websocket
+  useEffect(() => {
+    if (task && traceEvents.length === 0) {
+      const reconstructed: TraceEvent[] = []
+      if (task.plan) {
+        reconstructed.push({ type: 'plan_ready', phase: 'planning', plan: task.plan.content } as any)
+      }
+      if (task.actions && Array.isArray(task.actions)) {
+        task.actions.forEach((act: any) => {
+          reconstructed.push({ type: 'tool_call', phase: 'executing', tool: act.skill, input: act.input } as any)
+          reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: act.success, output: act.result || act.error } as any)
+        })
+      }
+      if (reconstructed.length > 0) {
+        setTraceEvents(reconstructed)
+      }
+    }
+  }, [task, traceEvents.length])
+
   async function updateAgent(e: any) {
     e.preventDefault()
     try {
+      // Sync Knowledge Bases
+      const existingKBs = agent.knowledge_bases?.map((kb: any) => kb.id) || []
+      const kbsToAdd = selectedKBs.filter(id => !existingKBs.includes(id))
+      const kbsToRemove = existingKBs.filter((id: string) => !selectedKBs.includes(id))
+
+      await Promise.all([
+        ...kbsToAdd.map(id => api.linkKB(tenantId, agentId, id)),
+        ...kbsToRemove.map((id: string) => api.unlinkKnowledgeBase(tenantId, agentId, id))
+      ])
+
       const updated = await api.updateAgent(tenantId, agentId, {
         name: agent.name, description: agent.description, systemPrompt: agent.system_prompt,
         autonomyLevel: agent.autonomy_level, llmProvider: agent.llm_provider,
-        llmModel: agent.llm_model, confidenceThreshold: agent.confidence_threshold,
-        knowledgeBases: selectedKBs
+        llmModel: agent.llm_model, confidenceThreshold: agent.confidence_threshold
       })
-      setAgent(updated)
+      // Fetch the full agent again to get the updated KB list
+      const freshAgent = await api.getAgent(tenantId, agentId)
+      setAgent(freshAgent.data || freshAgent)
       toast('success', 'Settings saved', 'Agent configuration has been updated.')
     } catch (err: any) { toast('error', 'Save failed', err.message) }
+  }
+
+  async function handleRemoveSkill(e: any, skillId: string) {
+    e.stopPropagation()
+    const ok = await confirm({
+      title: 'Remove Skill',
+      description: 'Are you sure you want to remove this skill?',
+      confirmLabel: 'Remove'
+    })
+    if (!ok) return
+    try {
+      await api.removeSkill(tenantId, agentId, skillId)
+      setAgent((a: any) => ({ ...a, skills: a.skills.filter((s: any) => s.id !== skillId) }))
+      toast('success', 'Skill removed')
+    } catch (err: any) { toast('error', 'Failed to remove skill', err.message) }
+  }
+
+  async function handleDeleteTask(e: any, taskId: string) {
+    e.stopPropagation()
+    const ok = await confirm({
+      title: 'Delete Execution',
+      description: 'Are you sure you want to delete this past execution?',
+      confirmLabel: 'Delete'
+    })
+    if (!ok) return
+    try {
+      await api.deleteTask(tenantId, agentId, taskId)
+      setPastTasks(prev => prev.filter(t => t.id !== taskId))
+      toast('success', 'Execution history deleted')
+    } catch (err: any) { toast('error', 'Failed to delete execution', err.message) }
+  }
+
+  async function handleCancelTask(e: any, taskId: string) {
+    e.stopPropagation()
+    const ok = await confirm({
+      title: 'Stop Execution',
+      description: 'Are you sure you want to stop this running execution?',
+      confirmLabel: 'Stop'
+    })
+    if (!ok) return
+    try {
+      await api.cancelTask(tenantId, agentId, taskId)
+      setPastTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'CANCELLED' } : t))
+      if (task?.id === taskId) setTask({ ...task, status: 'CANCELLED' })
+      toast('success', 'Execution stopped')
+    } catch (err: any) { toast('error', 'Failed to stop execution', err.message) }
   }
 
   async function activate() {
@@ -199,6 +294,22 @@ export default function AgentDetailPage() {
       setAgent((a: any) => ({ ...a, status: updated.status }))
       toast('success', 'Agent activated', 'The agent is now live.')
     } catch (err: any) { toast('error', 'Activation failed', err.message) }
+  }
+
+  async function handleDelete() {
+    if (deleteState === 0) {
+      setDeleteState(1)
+      setTimeout(() => setDeleteState(0), 4000)
+      return
+    }
+    try {
+      await api.deleteAgent(tenantId, agentId)
+      toast('success', 'Agent deleted', 'The agent was successfully removed.')
+      router.push('/dashboard/agents')
+    } catch (err: any) {
+      toast('error', 'Delete failed', err.message)
+      setDeleteState(0)
+    }
   }
 
   async function saveSkill(e: any) {
@@ -287,13 +398,25 @@ export default function AgentDetailPage() {
     }
   }
 
-  function cancelTask() {
+  async function cancelTask() {
     setRunning(false)
     setCurrentPhase('')
     if (wsRef.current) wsRef.current.close()
     if (pollRef.current) clearInterval(pollRef.current)
     setTraceEvents(prev => [...prev, { type: 'failed', error: 'Cancelled by user' }])
-    toast('info', 'Task Cancelled', 'The execution trace was cancelled locally.')
+    
+    // Also cancel it on the backend if we have a task ID
+    if (task?.id || currentTaskId.current) {
+      try {
+        await api.cancelTask(tenantId, agentId, task?.id || currentTaskId.current)
+        if (task) setTask({ ...task, status: 'CANCELLED' })
+        setPastTasks(prev => prev.map(t => t.id === (task?.id || currentTaskId.current) ? { ...t, status: 'CANCELLED' } : t))
+      } catch (err) {
+        console.error('Backend cancel failed', err)
+      }
+    }
+    
+    toast('info', 'Task Cancelled', 'The execution trace was cancelled locally and on the server.')
   }
 
   if (loading) return <div style={{ padding: 40 }}><div className="skeleton" style={{ height: 400 }} /></div>
@@ -317,6 +440,13 @@ export default function AgentDetailPage() {
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span>
           {agent.status === 'DRAFT' && <button className="btn btn-primary btn-sm" onClick={activate}>Activate Agent</button>}
+          <button 
+            className={`btn btn-sm ${deleteState === 1 ? 'btn-primary' : 'btn-secondary'}`} 
+            style={deleteState === 1 ? { backgroundColor: 'var(--red)', borderColor: 'var(--red)' } : { color: 'var(--red)', borderColor: 'var(--border)' }}
+            onClick={handleDelete}
+          >
+            {deleteState === 1 ? '⚠️ Click to confirm delete' : 'Delete Agent'}
+          </button>
         </div>
       </div>
 
@@ -364,13 +494,27 @@ export default function AgentDetailPage() {
                         <option key={pid} value={pid}>{PROVIDER_LABELS[pid] || pid}</option>
                       ))}
                     </select>
-                    <input
-                      className="input"
-                      value={agent.llm_model || ''}
-                      onChange={e => setAgent({ ...agent, llm_model: e.target.value })}
-                      placeholder={LOCAL_PROVIDERS.has(agent.llm_provider) ? 'e.g. llama3.2' : 'Model name'}
-                      required
-                    />
+                    {(() => {
+                      const completedCustom = customModels.filter(cm => cm.status === 'COMPLETED')
+                      const hasOllamaModels = agent.llm_provider === 'ollama' && (ollamaModels.length > 0 || completedCustom.length > 0)
+                      if (hasOllamaModels) {
+                        return (
+                          <select className="input" value={agent.llm_model || ''} onChange={e => setAgent({ ...agent, llm_model: e.target.value })} required>
+                            <option value="" disabled>Select a model...</option>
+                            {ollamaModels.map(m => <option key={m} value={m}>{m}</option>)}
+                            {completedCustom.length > 0 && ollamaModels.length > 0 && <option disabled>── Trained Models ──</option>}
+                            {completedCustom.map(cm => (
+                              <option key={cm.id} value={cm.ollama_tag || cm.model_name}>
+                                {cm.model_name} ✨
+                              </option>
+                            ))}
+                          </select>
+                        )
+                      }
+                      return (
+                        <input className="input" value={agent.llm_model || ''} onChange={e => setAgent({ ...agent, llm_model: e.target.value })} placeholder={LOCAL_PROVIDERS.has(agent.llm_provider) ? 'e.g. llama3.2' : 'Model name'} required />
+                      )
+                    })()}
                   </div>
                 )}
                 <p className="form-hint" style={{ marginTop: 6 }}>
@@ -410,8 +554,15 @@ export default function AgentDetailPage() {
             {agent.skills?.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 300, overflowY: 'auto', paddingRight: 8 }}>
                 {agent.skills.map((s: any) => (
-                  <div key={s.id} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{s.name}</div>
+                  <div key={s.id} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, position: 'relative' }}>
+                    <button 
+                      onClick={(e) => handleRemoveSkill(e, s.id)}
+                      style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', opacity: 0.6 }}
+                      title="Remove skill"
+                      onMouseOver={e => e.currentTarget.style.opacity = '1'}
+                      onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
+                    >🗑</button>
+                    <div style={{ fontWeight: 600, fontSize: 14, paddingRight: 24 }}>{s.name}</div>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{s.description}</div>
                     {s.action_id === 'nl_instruction' && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#a855f7', display: 'inline-block' }}>Natural Language</div>}
                     {s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--green-dark)', display: 'inline-block' }}>JS Script</div>}
@@ -481,8 +632,8 @@ export default function AgentDetailPage() {
               <div className="alert alert-warning">⚠ You must Activate this Agent before sending it goals.</div>
             )}
 
-            {/* Live streaming trace */}
-            {(traceEvents.length > 0 || running) && (
+            {/* Live streaming trace or past result */}
+            {(traceEvents.length > 0 || running || task?.result) && (
               <div style={{ marginTop: 8 }} className="animate-in">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <span style={{ fontWeight: 700, fontSize: 13 }}>Live Execution Trace</span>
@@ -529,7 +680,7 @@ export default function AgentDetailPage() {
                     )
                     if (ev.type === 'completed') return (
                       <div key={i} style={{ borderTop: '1px solid #1e293b', paddingTop: 10, color: '#22c55e', fontWeight: 700 }}>
-                        ✓ Task completed · confidence {Math.round((ev.confidence || 0) * 100)}% · {ev.tokensUsed?.toLocaleString()} tokens
+                        ✓ Task completed · confidence {Math.round((ev.confidence || 0) * 100)}% · {ev.tokensUsed?.toLocaleString()} tokens{ev.durationMs ? ` · cycle time ${(ev.durationMs / 1000).toFixed(1)}s` : ''}
                       </div>
                     )
                     if (ev.type === 'failed') return (
@@ -564,6 +715,48 @@ export default function AgentDetailPage() {
               </div>
             )}
           </div>
+
+
+
+          {/* Past Executions */}
+          {pastTasks.length > 0 && (
+            <div className="card" style={{ padding: 24 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Past Executions</h2>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 400, overflowY: 'auto' }}>
+                {pastTasks.map(t => (
+                  <div 
+                    key={t.id} 
+                    style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', transition: 'border-color 0.2s', position: 'relative' }} 
+                    onClick={() => { setTask(t); setGoal(t.goal); setTraceEvents([]); }}
+                    onMouseOver={e => e.currentTarget.style.borderColor = 'var(--green-dark)'}
+                    onMouseOut={e => e.currentTarget.style.borderColor = 'var(--border)'}
+                  >
+                    <button 
+                      onClick={(e) => handleDeleteTask(e, t.id)}
+                      style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', opacity: 0.6 }}
+                      title="Delete execution"
+                      onMouseOver={e => e.currentTarget.style.opacity = '1'}
+                      onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
+                    >🗑</button>
+                    {(t.status === 'RUNNING' || t.status === 'PENDING') && (
+                      <button 
+                        onClick={(e) => handleCancelTask(e, t.id)}
+                        style={{ position: 'absolute', top: 13, right: 36, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--yellow)', opacity: 0.8, fontSize: 11, fontWeight: 'bold' }}
+                        title="Stop execution"
+                        onMouseOver={e => e.currentTarget.style.opacity = '1'}
+                        onMouseOut={e => e.currentTarget.style.opacity = '0.8'}
+                      >STOP</button>
+                    )}
+                     <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{t.goal}</div>
+                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                       <span className={`badge badge-${t.status.toLowerCase()}`}>{t.status}</span>
+                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{new Date(t.created_at).toLocaleString()}</span>
+                     </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -737,6 +930,7 @@ export default function AgentDetailPage() {
           </div>
         </div>
       )}
+      {ConfirmDialog}
     </div>
   )
 }

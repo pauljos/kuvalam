@@ -7,7 +7,7 @@ import { del as cacheDel } from './cache.service.js'
 
 export async function listCustomModels(tenantId) {
   const { rows } = await query(
-    `SELECT id, model_name, base_model_path, data_source, dataset_path, db_query, web_url,
+    `SELECT id, model_name, base_model_path, data_source, dataset_path, db_query, web_url, db_connection_string,
             status, error_message, train_log, ollama_tag, version, created_at, updated_at
      FROM custom_models
      WHERE tenant_id = $1
@@ -385,14 +385,24 @@ async function _extractDatabaseSchema(connectionString, log) {
   const client = new pg.Client(connectionString)
   try {
     await client.connect()
-    const { rows: tables } = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`)
+    const { rows: tables } = await client.query(
+      `SELECT table_schema, table_name 
+       FROM information_schema.tables 
+       WHERE table_schema NOT IN ('pg_catalog', 'information_schema')`
+    )
     let schemaText = ""
-    for (const { table_name } of tables) {
-      log(`📊 Scanning table: ${table_name}...`)
-      const { rows: cols } = await client.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1`, [table_name])
-      schemaText += `Table ${table_name}: ` + cols.map(c => `${c.column_name} (${c.data_type})`).join(', ') + '\n'
+    for (const { table_schema, table_name } of tables) {
+      const fullTable = table_schema === 'public' ? `"${table_name}"` : `"${table_schema}"."${table_name}"`
+      log(`📊 Scanning table: ${table_schema}.${table_name}...`)
+      const { rows: cols } = await client.query(
+        `SELECT column_name, data_type 
+         FROM information_schema.columns 
+         WHERE table_schema = $1 AND table_name = $2`,
+        [table_schema, table_name]
+      )
+      schemaText += `Table ${table_schema}.${table_name}: ` + cols.map(c => `${c.column_name} (${c.data_type})`).join(', ') + '\n'
       try {
-        const { rows: data } = await client.query(`SELECT * FROM "${table_name}" LIMIT 3`)
+        const { rows: data } = await client.query(`SELECT * FROM ${fullTable} LIMIT 5`)
         if (data.length) schemaText += `Sample: ${JSON.stringify(data)}\n`
       } catch (e) { /* ignore sample read errors */ }
       schemaText += '\n'

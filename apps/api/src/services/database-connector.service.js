@@ -42,6 +42,7 @@ const { Pool } = pg
 const MAX_ROWS = 200                     // hard cap returned to the LLM
 const DEFAULT_STATEMENT_TIMEOUT = 15_000 // ms
 const IDLE_POOL_TIMEOUT_MS = 10 * 60 * 1000
+const POOL_CACHE_MAX = 500               // absolute cap to prevent unbounded growth
 
 // ─── Pool cache keyed by connector id ─────────────────────────────────────
 const poolCache = new Map() // id -> { flavor, pool, timer, lastUsed }
@@ -60,6 +61,15 @@ function armEviction(id) {
   if (!entry) return
   clearTimeout(entry.timer)
   entry.timer = setTimeout(() => evictPool(id), IDLE_POOL_TIMEOUT_MS)
+}
+
+// LRU eviction when pool cache exceeds the absolute cap
+function trimPoolCache() {
+  while (poolCache.size >= POOL_CACHE_MAX) {
+    const oldest = poolCache.keys().next().value
+    if (oldest === undefined) break
+    evictPool(oldest)
+  }
 }
 
 // ─── Shared safety helpers ────────────────────────────────────────────────
@@ -122,6 +132,7 @@ function enforceRowLimit(sql, limit) {
 // ─── Postgres driver ──────────────────────────────────────────────────────
 const postgresDriver = {
   buildConfig(cfg) {
+    const allowPrivate = cfg.allow_private_host === true // default false
     const host = String(cfg.host || '').trim()
     const port = parseInt(cfg.port || '5432', 10)
     const database = String(cfg.database || '').trim()
@@ -134,7 +145,7 @@ const postgresDriver = {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
       throw new Error('port must be a valid TCP port number')
     }
-    if (!cfg.allow_private_host) assertSafeHost(host)
+    if (!allowPrivate) assertSafeHost(host)
 
     let ssl
     if (cfg.ssl === 'disable' || cfg.ssl === false) ssl = false
@@ -261,6 +272,7 @@ const postgresDriver = {
 // ─── MySQL / MariaDB driver ───────────────────────────────────────────────
 const mysqlDriver = {
   buildConfig(cfg) {
+    const allowPrivate = cfg.allow_private_host === true // default false
     const host = String(cfg.host || '').trim()
     const port = parseInt(cfg.port || '3306', 10)
     const database = String(cfg.database || '').trim()
@@ -273,7 +285,7 @@ const mysqlDriver = {
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
       throw new Error('port must be a valid TCP port number')
     }
-    if (!cfg.allow_private_host) assertSafeHost(host)
+    if (!allowPrivate) assertSafeHost(host)
 
     let ssl
     if (cfg.ssl === 'disable' || cfg.ssl === false) ssl = undefined
@@ -425,6 +437,7 @@ function getOrCreatePool(conn) {
   const driver = resolveDriver(flavor)
   const cfg = decryptCredentials(conn.config || {})
   const pool = driver.createPool(cfg)
+  trimPoolCache() // evict oldest entries if we're at the cap
   poolCache.set(conn.id, { flavor, pool, lastUsed: Date.now(), timer: null })
   armEviction(conn.id)
   return { pool, driver }

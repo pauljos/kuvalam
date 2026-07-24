@@ -170,6 +170,15 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     [user.id, tokenHash, expiresAt]
   )
 
+  // Clean up expired tokens to prevent unbounded table growth
+  // Limit: delete up to 50 expired rows per login to avoid long-running queries
+  await query(
+    `DELETE FROM refresh_tokens WHERE id IN (
+      SELECT id FROM refresh_tokens WHERE user_id = $1 AND expires_at < NOW() LIMIT 50
+    )`,
+    [user.id]
+  )
+
   // Update last login
   await query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id])
   await auditLog({ 

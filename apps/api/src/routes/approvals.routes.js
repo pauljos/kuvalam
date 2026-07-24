@@ -3,6 +3,8 @@ import { query } from '../db/pool.js'
 import { AppError, errorResponse } from '../utils/errors.js'
 import { auditLog } from '../utils/audit.js'
 
+const ts = () => ({ requestId: undefined, timestamp: new Date().toISOString() })
+
 export default async function approvalsRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate)
 
@@ -28,7 +30,7 @@ export default async function approvalsRoutes(fastify) {
       status ? [tenantId, status] : [tenantId]
     )
 
-    return { data: { approvals: rows, total: parseInt(count), limit, offset } }
+    return { success: true, data: { approvals: rows, total: parseInt(count), limit, offset }, meta: ts() }
   })
 
   // Get single approval request
@@ -39,7 +41,7 @@ export default async function approvalsRoutes(fastify) {
       [approvalId, tenantId]
     )
     if (!approval) throw new AppError('APPROVAL_NOT_FOUND', 'Approval request not found', 404)
-    return { data: approval }
+    return { success: true, data: approval, meta: ts() }
   })
 
   // Decide on approval request (APPROVED or REJECTED)
@@ -85,6 +87,6 @@ export default async function approvalsRoutes(fastify) {
       action: `APPROVAL_${decision}`
     })
 
-    return { data: updated }
+    return { success: true, data: updated, meta: ts() }
   })
 }

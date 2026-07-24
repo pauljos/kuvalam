@@ -1,67 +1,75 @@
 // apps/api/src/services/skill-executor.service.js
-import vm from 'vm'
+import { fork } from 'child_process'
+import { fileURLToPath } from 'url'
+import path from 'path'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const RUNNER_SCRIPT = path.join(__dirname, 'skill-runner.mjs')
 
 /**
- * Executes a custom JavaScript code snippet securely in a Node.js VM sandbox.
- * This is the foundation of Kuvalam NextGen Custom Code Skills.
- * 
+ * Executes a custom JavaScript code snippet in an isolated child process.
+ * Uses process-level isolation (child_process.fork) instead of Node's vm module,
+ * because vm.createContext is explicitly documented as NOT a security sandbox.
+ *
+ * The child process has no access to the parent's modules, database pool,
+ * crypto keys, or any Kuvalam internals — only the code, input, and env
+ * explicitly passed via stdin.
+ *
  * @param {string} code - The custom JavaScript code to execute.
  * @param {Object} input - The input parameters provided by the LLM agent.
  * @param {Object} env - Any decrypted environment variables/secrets configured for the skill.
  * @returns {Promise<any>} The result of the code execution.
  */
 export async function executeCustomSkill(code, input = {}, env = {}) {
-  return new Promise(async (resolve, reject) => {
-    // 1. Create a secure context
-    // We explicitly provide standard utilities like fetch, so custom skills 
-    // can make external API calls without having full Node.js fs/child_process access.
-    const sandbox = {
-      input,
-      env,
-      fetch,
-      URL,
-      URLSearchParams,
-      Headers,
-      console: {
-        log: () => {},
-        error: () => {},
-        warn: () => {},
-      },
-      // We expose a resolve/reject to the sandbox to handle async completion natively
-      __resolve: resolve,
-      __reject: reject
-    }
+  return new Promise((resolve, reject) => {
+    const child = fork(RUNNER_SCRIPT, [], {
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      execArgv: [], // Explicitly no flags — inherits from parent
+      timeout: 10_000, // Kill after 10s if something goes wrong
+    })
 
-    vm.createContext(sandbox)
+    let output = ''
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('Skill execution timed out after 10s'))
+    }, 10_000)
 
-    // 2. Wrap the user code in an async IIFE
-    // Users are expected to return their final output.
-    const wrappedCode = `
-      (async function() {
-        try {
-          // Provide a helper 'return' mechanic
-          const result = await (async () => {
-            ${code}
-          })();
-          __resolve(result);
-        } catch (err) {
-          __reject(err);
-        }
-      })();
-    `
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString()
+    })
 
-    // 3. Execute with strict limits
-    try {
-      const script = new vm.Script(wrappedCode, {
-        filename: 'custom_skill.js'
-      })
-
-      script.runInContext(sandbox, {
-        timeout: 5000, // Hard 5-second timeout to prevent infinite loops
-        displayErrors: true
-      })
-    } catch (err) {
+    child.on('error', (err) => {
+      clearTimeout(timer)
       reject(err)
-    }
+    })
+
+    child.on('exit', (code_, signal) => {
+      clearTimeout(timer)
+      if (signal) {
+        reject(new Error(`Skill process terminated by signal ${signal}`))
+        return
+      }
+      try {
+        // Take the last JSON line from stdout (in case of stray console output)
+        const lines = output.trim().split('\n').filter(Boolean)
+        const last = lines[lines.length - 1]
+        if (!last) {
+          reject(new Error('No output from skill process'))
+          return
+        }
+        const parsed = JSON.parse(last)
+        if (parsed.ok) {
+          resolve(parsed.result)
+        } else {
+          reject(new Error(parsed.error || 'Skill execution failed'))
+        }
+      } catch (err) {
+        reject(new Error(`Failed to parse skill result: ${err.message}. Output: ${output.slice(0, 200)}`))
+      }
+    })
+
+    // Send the payload over stdin
+    child.stdin.write(JSON.stringify({ code, input, env }) + '\n')
+    child.stdin.end()
   })
 }

@@ -132,6 +132,12 @@ export const api = {
   // Custom Models (Fine-Tuning)
   getCustomModels: (tenantId: string) => request(`/tenants/${tenantId}/custom-models`),
   trainCustomModel: (tenantId: string, body: any) => request(`/tenants/${tenantId}/custom-models`, { method: 'POST', body: JSON.stringify(body) }),
+  getOllamaAvailableModels: (tenantId: string) => request(`/tenants/${tenantId}/custom-models/ollama/available`).catch(() => ({ models: [] })),
+  
+  // Dashboard Reports
+  getReports: (tenantId: string) => request(`/tenants/${tenantId}/reports`),
+  deleteReport: (tenantId: string, reportId: string) => request(`/tenants/${tenantId}/reports/${reportId}`, { method: 'DELETE' }),
+
   testDbConnection: (tenantId: string, body: any) => request(`/tenants/${tenantId}/custom-models/test-db-connection`, { method: 'POST', body: JSON.stringify(body) }),
 
   // Agents
@@ -139,13 +145,20 @@ export const api = {
   listAgents: (tenantId: string) => request(`/tenants/${tenantId}/agents`),
   getAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}`),
   updateAgent: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}`, { method: 'DELETE' }),
   activateAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/activate`, { method: 'POST' }),
   addSkill: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/skills`, { method: 'POST', body: JSON.stringify(body) }),
+  removeSkill: (tenantId: string, agentId: string, skillId: string) => request(`/tenants/${tenantId}/agents/${agentId}/skills/${skillId}`, { method: 'DELETE' }),
   testSkill: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/test-skill`, { method: 'POST', body: JSON.stringify(body) }),
   addRule: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/rules`, { method: 'POST', body: JSON.stringify(body) }),
+  removeRule: (tenantId: string, agentId: string, ruleId: string) => request(`/tenants/${tenantId}/agents/${agentId}/rules/${ruleId}`, { method: 'DELETE' }),
+  linkKnowledgeBase: (tenantId: string, agentId: string, kbId: string) => request(`/tenants/${tenantId}/agents/${agentId}/knowledge-bases/${kbId}`, { method: 'POST' }),
+  unlinkKnowledgeBase: (tenantId: string, agentId: string, kbId: string) => request(`/tenants/${tenantId}/agents/${agentId}/knowledge-bases/${kbId}`, { method: 'DELETE' }),
   dispatchTask: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`, { method: 'POST', body: JSON.stringify(body) }),
   listTasks: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`),
   getTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}`),
+  cancelTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}/cancel`, { method: 'POST' }),
+  deleteTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}`, { method: 'DELETE' }),
   linkKB: (tenantId: string, agentId: string, kbId: string) => request(`/tenants/${tenantId}/agents/${agentId}/knowledge-bases/${kbId}`, { method: 'POST' }),
 
   // Knowledge

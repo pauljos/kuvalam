@@ -8,10 +8,15 @@ import { useConfirm } from '@/components/ConfirmModal'
 const ARCHETYPES = ['Planner', 'Research', 'Compliance', 'Document', 'Communication', 'Analytics', 'Coordinator']
 
 const PROMPT_TEMPLATES = [
-  { label: 'Data Analyst', prompt: 'You are an expert Data Analyst agent. Your goal is to analyze provided datasets, compute key metrics, identify trends, and generate comprehensive summary reports.\n\nRULES:\n1. Always verify data formatting before processing.\n2. Summarize key findings in clear markdown tables.\n3. Do not hallucinate data.' },
-  { label: 'Software Engineer', prompt: 'You are an autonomous Software Engineering agent. Your role is to write clean, maintainable, and efficient code.\n\nRULES:\n1. Plan your architecture before writing code.\n2. Always include basic test coverage for logic.\n3. Ensure code conforms to modern linting standards.' },
-  { label: 'Research Assistant', prompt: 'You are a meticulous Research Assistant. Your role is to gather information, synthesize long documents, and provide accurate, cited summaries.\n\nRULES:\n1. Extract key facts and list them as bullet points.\n2. Do not invent information.\n3. When asked to summarize, maintain the original tone.' },
-  { label: 'Customer Support', prompt: 'You are a polite and empathetic Customer Support agent. Your role is to resolve user issues efficiently while maintaining a professional tone.\n\nRULES:\n1. Always start by acknowledging the user\'s frustration or issue.\n2. Provide step-by-step solutions.\n3. Escalate to a human if the issue cannot be resolved.' }
+  { label: 'Data Analyst', name: 'Data Analyst', description: 'Analyzes provided datasets, computes key metrics, and generates summary reports.', archetype: 'analytics', prompt: 'You are an expert Data Analyst agent. Your goal is to analyze provided datasets, compute key metrics, identify trends, and generate comprehensive summary reports.\n\nRULES:\n1. Always verify data formatting before processing.\n2. Summarize key findings in clear markdown tables.\n3. Do not hallucinate data.' },
+  { label: 'Software Engineer', name: 'Software Engineer', description: 'Autonomous software engineering agent that writes clean, maintainable code.', archetype: 'coordinator', prompt: 'You are an autonomous Software Engineering agent. Your role is to write clean, maintainable, and efficient code.\n\nRULES:\n1. Plan your architecture before writing code.\n2. Always include basic test coverage for logic.\n3. Ensure code conforms to modern linting standards.' },
+  { label: 'Research Assistant', name: 'Research Assistant', description: 'Gathers information, synthesizes long documents, and provides cited summaries.', archetype: 'research', prompt: 'You are a meticulous Research Assistant. Your role is to gather information, synthesize long documents, and provide accurate, cited summaries.\n\nRULES:\n1. Extract key facts and list them as bullet points.\n2. Do not invent information.\n3. When asked to summarize, maintain the original tone.' },
+  { label: 'Customer Support', name: 'Customer Support', description: 'Polite and empathetic agent for resolving user issues efficiently.', archetype: 'communication', prompt: 'You are a polite and empathetic Customer Support agent. Your role is to resolve user issues efficiently while maintaining a professional tone.\n\nRULES:\n1. Always start by acknowledging the user\'s frustration or issue.\n2. Provide step-by-step solutions.\n3. Escalate to a human if the issue cannot be resolved.' },
+  { label: 'Analytical Agent', name: 'Analytical Agent', description: 'Advanced analytics agent that identifies complex patterns and performs predictive modeling.', archetype: 'analytics', prompt: 'You are a sophisticated Analytical Agent. Your objective is to dive deep into complex datasets, uncover hidden patterns, perform predictive modeling, and provide actionable business intelligence.\n\nRULES:\n1. Use statistical methods to validate your findings.\n2. Present data visualizations and interpretations clearly.\n3. Highlight anomalies or edge cases in the data.' },
+  { label: 'Project Manager', name: 'Project Manager', description: 'Coordinates tasks, tracks project progress, and ensures timely delivery.', archetype: 'planner', prompt: 'You are an organized Project Management agent. Your role is to coordinate tasks, allocate resources, track project milestones, and ensure deliverables are met on time.\n\nRULES:\n1. Break down large goals into actionable tasks.\n2. Monitor progress and flag potential bottlenecks early.\n3. Maintain clear and concise communication with all stakeholders.' },
+  { label: 'Compliance Officer', name: 'Compliance Officer', description: 'Ensures documents and processes adhere to regulatory and organizational standards.', archetype: 'compliance', prompt: 'You are a strict Compliance agent. Your role is to review documents, code, or processes to ensure they meet all legal, regulatory, and organizational standards.\n\nRULES:\n1. Cross-reference all claims against official guidelines.\n2. Flag any violations or risky language immediately.\n3. Provide specific suggestions for remediation.' },
+  { label: 'Content Strategist', name: 'Content Strategist', description: 'Plans, creates, and optimizes content strategies for maximum engagement.', archetype: 'document', prompt: 'You are a creative Content Strategist agent. Your role is to plan, create, and optimize content for maximum audience engagement and brand consistency.\n\nRULES:\n1. Align all content with the target audience and brand voice.\n2. Optimize for readability and SEO where applicable.\n3. Provide structured outlines before drafting long-form content.' },
+  { label: 'Browser Automation Agent', name: 'Data Entry Specialist', description: 'Navigates web pages and performs automated data entry and extraction.', archetype: 'coordinator', prompt: 'You are a Browser Automation Agent. Your role is to navigate to specified URLs, interact with web elements (clicking buttons, filling forms), and perform accurate data entry or extraction.\n\nRULES:\n1. Always verify the page state and selectors before interacting with elements.\n2. Handle timeouts and loading states gracefully.\n3. Ensure all data entered matches the provided source perfectly.' }
 ];
 
 // Providers whose model catalogue is user-defined (Ollama pulls, LM Studio loads, etc.)
@@ -39,6 +44,8 @@ export default function AgentsPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [hasLlmProvider, setHasLlmProvider] = useState<boolean | null>(null)
   const [llmProviders, setLlmProviders] = useState<Record<string, { model?: string; baseUrl?: string }>>({})
+  const [customModels, setCustomModels] = useState<any[]>([])
+  const [ollamaModels, setOllamaModels] = useState<string[]>([])
   const [form, setForm] = useState({
     name: '', description: '', archetype: '', autonomyLevel: 'SUPERVISED',
     llmProvider: 'openai', llmModel: 'gpt-4o',
@@ -60,7 +67,18 @@ export default function AgentsPage() {
         setForm(f => ({ ...f, llmProvider: def, llmModel: providers[def].model || f.llmModel }))
       }
     }).catch(() => setHasLlmProvider(false))
+    api.getCustomModels(tenantId).then(c => setCustomModels(c?.customModels || [])).catch(() => {})
   }, [tenantId])
+
+  // Fetch available Ollama models when provider is ollama
+  useEffect(() => {
+    if (form.llmProvider === 'ollama' && tenantId) {
+      api.getOllamaAvailableModels(tenantId).then((res: any) => {
+        const models = res?.data?.models || res?.models || []
+        setOllamaModels(models.map((m: any) => m.name || m))
+      }).catch(() => {})
+    }
+  }, [form.llmProvider, tenantId])
 
   const set = (k: string) => (e: any) => setForm(f => ({ ...f, [k]: e.target.value }))
 
@@ -96,6 +114,22 @@ export default function AgentsPage() {
       setAgents(a => [clone, ...a])
       toast('success', 'Agent duplicated', `Created "${clone.name}".`)
     } catch (err: any) { toast('error', 'Duplicate failed', err.message) }
+  }
+
+  async function deleteAgent(agentId: string) {
+    const agent = agents.find(a => a.id === agentId)
+    const ok = await confirm({
+      title: `Delete "${agent?.name || 'this agent'}"?`,
+      description: 'This action cannot be undone. All task history and skills for this agent will be permanently removed.',
+      confirmLabel: 'Delete Agent',
+      variant: 'danger'
+    })
+    if (!ok) return
+    try {
+      await api.deleteAgent(tenantId, agentId)
+      setAgents(a => a.filter(x => x.id !== agentId))
+      toast('success', 'Agent deleted', `The agent was successfully removed.`)
+    } catch (err: any) { toast('error', 'Delete failed', err.message) }
   }
 
   return (
@@ -182,7 +216,7 @@ export default function AgentsPage() {
                   {agent.status === 'ACTIVE' && (
                     <Link href={`/dashboard/agents/${agent.id}`} className="btn btn-primary btn-sm" style={{ flex: 1, textDecoration: 'none' }}>Run Task</Link>
                   )}
-                  <button className="btn btn-secondary btn-sm" onClick={() => duplicate(agent.id)} title="Duplicate agent" style={{ padding: '0 10px' }}>⧉</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => deleteAgent(agent.id)} title="Delete agent" style={{ padding: '0 10px', color: 'var(--red)' }}>🗑</button>
                 </div>
               </div>
             ))}
@@ -200,6 +234,30 @@ export default function AgentsPage() {
             </div>
             <form onSubmit={createAgent}>
               <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div className="form-group" style={{ marginBottom: 4, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
+                  <label className="form-label">Start from a Template (Optional)</label>
+                  <select 
+                    className="select"
+                    onChange={(e) => {
+                      const t = PROMPT_TEMPLATES.find(x => x.label === e.target.value);
+                      if (t) {
+                        setForm(f => ({
+                          ...f,
+                          name: t.name,
+                          description: t.description,
+                          archetype: t.archetype,
+                          systemPrompt: t.prompt
+                        }));
+                      }
+                      e.target.value = "";
+                    }}
+                  >
+                    <option value="">Select a template to auto-fill...</option>
+                    {PROMPT_TEMPLATES.map(t => (
+                      <option key={t.label} value={t.label}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="form-group">
                   <label className="form-label">Agent Name *</label>
                   <input className="input" placeholder="e.g. Contract Compliance Officer" value={form.name} onChange={set('name')} required />
@@ -246,23 +304,26 @@ export default function AgentsPage() {
                           <option key={pid} value={pid}>{PROVIDER_LABELS[pid] || pid}</option>
                         ))}
                       </select>
-                      {LOCAL_PROVIDERS.has(form.llmProvider) ? (
-                        <input
-                          className="input"
-                          value={form.llmModel}
-                          onChange={set('llmModel')}
-                          placeholder="Model name (e.g. llama3.2)"
-                          required
-                        />
-                      ) : (
-                        <input
-                          className="input"
-                          value={form.llmModel}
-                          onChange={set('llmModel')}
-                          placeholder="Model name"
-                          required
-                        />
-                      )}
+                      {(() => {
+                        const completedCustom = customModels.filter(cm => cm.status === 'COMPLETED')
+                        const hasOllamaModels = form.llmProvider === 'ollama' && (ollamaModels.length > 0 || completedCustom.length > 0)
+                        if (hasOllamaModels) {
+                          return (
+                            <select className="select" value={form.llmModel} onChange={set('llmModel')} required>
+                              <option value="" disabled>Select a model...</option>
+                              {ollamaModels.map(m => <option key={m} value={m}>{m}</option>)}
+                              {completedCustom.length > 0 && ollamaModels.length > 0 && <option disabled>── Trained Models ──</option>}
+                              {completedCustom.map(cm => (
+                                <option key={cm.id} value={cm.ollama_tag || cm.model_name}>{cm.model_name} ✨</option>
+                              ))}
+                            </select>
+                          )
+                        }
+                        if (LOCAL_PROVIDERS.has(form.llmProvider)) {
+                          return <input className="input" placeholder="e.g. llama3.2" value={form.llmModel} onChange={set('llmModel')} required />
+                        }
+                        return <input className="input" placeholder="Model name" value={form.llmModel} onChange={set('llmModel')} required />
+                      })()}
                     </div>
                   )}
                   <p className="form-hint" style={{ marginTop: 6 }}>
@@ -270,22 +331,7 @@ export default function AgentsPage() {
                   </p>
                 </div>
                 <div className="form-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4 }}>
-                    <label className="form-label" style={{ marginBottom: 0 }}>System Instructions / Prompt</label>
-                    <select 
-                      className="select" 
-                      style={{ width: 'auto', padding: '2px 8px', fontSize: 11, height: 24, minHeight: 24, borderRadius: 4 }}
-                      onChange={(e) => {
-                        if (e.target.value) setForm(f => ({ ...f, systemPrompt: e.target.value }));
-                        e.target.value = "";
-                      }}
-                    >
-                      <option value="">Load template...</option>
-                      {PROMPT_TEMPLATES.map(t => (
-                        <option key={t.label} value={t.prompt}>{t.label}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <label className="form-label">System Instructions / Prompt</label>
                   <textarea className="input" rows={6} placeholder="Describe rules, behaviors, and standard operating procedures for the agent..." value={form.systemPrompt} onChange={set('systemPrompt')} style={{ resize: 'vertical' }} />
                 </div>
                 {error && <div className="alert alert-error">{error}</div>}

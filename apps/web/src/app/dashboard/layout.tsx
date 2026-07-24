@@ -36,6 +36,7 @@ const primaryNav: NavItem[] = [
 
 const insightsNav: NavItem[] = [
   { href: '/dashboard/analytics',  label: 'Analytics',     icon: BarChart3 },
+  { href: '/dashboard/reports',    label: 'Reports',       icon: ScrollText },
   { href: '/dashboard/audit',      label: 'Audit Log',     icon: ScrollText },
 ]
 
@@ -68,9 +69,9 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
   }
 
   return (
-    <>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Brand */}
-      <div style={{ padding: '18px 20px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ padding: '18px 20px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
         <Link href="/dashboard" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }} onClick={onClose}>
           <div style={{
             width: 32, height: 32, borderRadius: 9, flexShrink: 0,
@@ -89,7 +90,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
         )}
       </div>
 
-      {/* Nav */}
+      {/* Nav — scrolls if needed */}
       <nav style={{ flex: 1, padding: '4px 0 12px', overflowY: 'auto' }}>
         {groups.map((group, gi) => (
           <div key={gi} style={{ marginBottom: 6 }}>
@@ -112,9 +113,9 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
         ))}
       </nav>
 
-      {/* User footer */}
+      {/* User footer — always pinned at bottom */}
       {user && (
-        <div style={{ padding: '12px 14px 16px', borderTop: '1px solid var(--border)' }}>
+        <div style={{ padding: '12px 14px 16px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 6px' }}>
             <div style={{
               width: 30, height: 30, borderRadius: '50%', flexShrink: 0,
@@ -128,7 +129,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
             <button
               onClick={logout}
               className="btn btn-secondary btn-sm"
-              style={{ padding: '6px 10px', fontSize: 11, height: 28, display: 'flex', alignItems: 'center', gap: 4 }}
+              style={{ padding: '6px 10px', fontSize: 11, height: 28, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
               title="Sign out"
             >
               <LogOut size={12} />
@@ -137,7 +138,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -163,7 +164,7 @@ function pageTitleFromPath(pathname: string): string {
 
 function AppHeader({ onMenuClick }: { onMenuClick: () => void }) {
   const pathname = usePathname()
-  const { tenant, tenants, setTenant } = useApp()
+  const { tenant, tenants, setTenant, logout } = useApp()
   const title = pageTitleFromPath(pathname)
 
   function openPalette() {
@@ -202,6 +203,15 @@ function AppHeader({ onMenuClick }: { onMenuClick: () => void }) {
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }}>{tenant.name}</span>
           </div>
         ) : null}
+        <button
+          onClick={logout}
+          className="btn btn-secondary btn-sm"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 12, height: 32, flexShrink: 0 }}
+          title="Sign out"
+        >
+          <LogOut size={13} />
+          <span>Sign out</span>
+        </button>
       </div>
     </div>
   )
@@ -219,7 +229,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
       <a href="#main-content" className="skip-link">Skip to main content</a>
 
       {/* Desktop sidebar */}
-      <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh', overflowY: 'hidden' }}>
+      <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh', overflow: 'hidden' }}>
         <SidebarContent />
       </aside>
 

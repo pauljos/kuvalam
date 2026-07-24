@@ -2,7 +2,13 @@
 import { useEffect, useState, useRef } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
-import WorkflowCanvas, { type Step as CanvasStep, type WorkflowMeta } from '@/components/WorkflowCanvas'
+import dynamic from 'next/dynamic'
+import type { Step as CanvasStep, WorkflowMeta } from '@/components/WorkflowCanvas'
+
+const WorkflowCanvas = dynamic(() => import('@/components/WorkflowCanvas'), { 
+  ssr: false,
+  loading: () => <div className="skeleton" style={{ height: 'calc(100vh - 120px)', width: '100%', borderRadius: 12 }}></div>
+})
 
 export default function WorkflowsPage() {
   const { tenantId, toast } = useApp()

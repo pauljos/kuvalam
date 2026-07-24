@@ -75,6 +75,7 @@ const CONNECTORS = [
     authType: 'OAUTH',
     docsUrl: 'https://login.salesforce.com',
   },
+
   {
     id: 'linear',
     name: 'Linear',

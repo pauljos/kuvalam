@@ -6,6 +6,9 @@ import { Redis } from 'ioredis'
 let redis = null
 let cacheEnabled = false
 
+// Sentinel used to distinguish "no cache entry" from "cached null value"
+const CACHE_MISS = Symbol('cache-miss')
+
 // Initialize Redis connection
 export function initCache() {
   if (!process.env.REDIS_URL) {
@@ -44,13 +47,13 @@ export function initCache() {
 
 // Get from cache
 export async function get(key) {
-  if (!cacheEnabled || !redis) return null
+  if (!cacheEnabled || !redis) return CACHE_MISS
   try {
     const data = await redis.get(key)
-    return data ? JSON.parse(data) : null
+    return data !== null ? JSON.parse(data) : CACHE_MISS
   } catch (err) {
     console.error('[Cache] Get error:', err.message)
-    return null
+    return CACHE_MISS
   }
 }
 
@@ -97,14 +100,14 @@ export async function delPattern(pattern) {
 export async function cached(key, fn, ttl = 300) {
   // Try cache first
   const cached = await get(key)
-  if (cached !== null) {
+  if (cached !== CACHE_MISS) {
     return cached
   }
 
   // Execute function
   const result = await fn()
 
-  // Cache result
+  // Cache result (null/undefined are valid cacheable values)
   await set(key, result, ttl)
 
   return result

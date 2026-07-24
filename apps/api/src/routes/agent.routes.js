@@ -9,12 +9,18 @@ import { errorResponse, AppError } from '../utils/errors.js'
 const TASK_RATE_LIMIT = parseInt(process.env.TASK_RATE_LIMIT || '20')
 const TASK_RATE_WINDOW_MS = 60_000 // 1 minute
 const tenantTaskCounts = new Map() // tenantId -> { count, windowStart }
+const TASK_RATE_CACHE_MAX = 10_000 // absolute cap to prevent unbounded growth
 
 function checkTenantTaskRateLimit(tenantId) {
   const now = Date.now()
   const entry = tenantTaskCounts.get(tenantId)
 
   if (!entry || now - entry.windowStart >= TASK_RATE_WINDOW_MS) {
+    // Lazy cleanup of stale entries (cheap: only when we'd be inserting a new key)
+    if (!entry && tenantTaskCounts.size >= TASK_RATE_CACHE_MAX) {
+      const oldest = tenantTaskCounts.keys().next().value
+      if (oldest !== undefined) tenantTaskCounts.delete(oldest)
+    }
     tenantTaskCounts.set(tenantId, { count: 1, windowStart: now })
     return
   }
@@ -55,6 +61,14 @@ export default async function agentRoutes(fastify) {
     try {
       const agent = await agentService.getAgent(req.params.tenantId, req.params.agentId)
       return reply.send({ success: true, data: agent, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/agents/:agentId
+  fastify.delete('/tenants/:tenantId/agents/:agentId', auth, async (req, reply) => {
+    try {
+      await agentService.deleteAgent(req.params.tenantId, req.params.agentId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
 
@@ -162,6 +176,46 @@ export default async function agentRoutes(fastify) {
     try {
       const task = await taskService.getTask(req.params.tenantId, req.params.taskId)
       return reply.send({ success: true, data: task, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/agents/:agentId/tasks/:taskId/cancel
+  fastify.post('/tenants/:tenantId/agents/:agentId/tasks/:taskId/cancel', auth, async (req, reply) => {
+    try {
+      await taskService.cancelTask(req.params.tenantId, req.params.agentId, req.params.taskId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/agents/:agentId/skills/:skillId
+  fastify.delete('/tenants/:tenantId/agents/:agentId/skills/:skillId', auth, async (req, reply) => {
+    try {
+      await agentService.removeSkill(req.params.tenantId, req.params.agentId, req.params.skillId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/agents/:agentId/rules/:ruleId
+  fastify.delete('/tenants/:tenantId/agents/:agentId/rules/:ruleId', auth, async (req, reply) => {
+    try {
+      await agentService.removeRule(req.params.tenantId, req.params.agentId, req.params.ruleId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/agents/:agentId/knowledge-bases/:kbId
+  fastify.delete('/tenants/:tenantId/agents/:agentId/knowledge-bases/:kbId', auth, async (req, reply) => {
+    try {
+      await agentService.unlinkKnowledgeBase(req.params.tenantId, req.params.agentId, req.params.kbId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/agents/:agentId/tasks/:taskId
+  fastify.delete('/tenants/:tenantId/agents/:agentId/tasks/:taskId', auth, async (req, reply) => {
+    try {
+      await agentService.deleteTask(req.params.tenantId, req.params.agentId, req.params.taskId, req.user.sub)
+      return reply.send({ success: true, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
 }

@@ -1,5 +1,16 @@
 // apps/api/src/index.js — Kuvalam API Server
 import 'dotenv/config'
+
+// ─── NODE_ENV normalisation ──────────────────────────────────────────────
+// If NODE_ENV is unset, default to 'development' so that fallback-secret
+// guards (which check `!== 'production'`) don't silently use weak dev secrets
+// when someone forgets to set the env var.
+if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = 'development'
+}
+
+const isProduction = process.env.NODE_ENV === 'production'
+
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import cookie from '@fastify/cookie'
@@ -27,6 +38,7 @@ import mcpRoutes from './routes/mcp.routes.js'
 import feedbackRoutes from './routes/feedback.routes.js'
 import profileRoutes from './routes/profile.routes.js'
 import customModelsRoutes from './routes/custom-models.routes.js'
+import reportsRoutes from './routes/reports.routes.js'
 import { initQueues, getQueueStats, shutdownQueues } from './services/queue.service.js'
 import { startScheduler, stopScheduler, getSchedulerStatus } from './services/scheduler.service.js'
 import { initTelemetry } from './services/telemetry.service.js'
@@ -34,8 +46,8 @@ import { initCache, shutdownCache } from './services/cache.service.js'
 
 const fastify = Fastify({
   logger: {
-    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
-    transport: process.env.NODE_ENV !== 'production'
+    level: isProduction ? 'info' : 'debug',
+    transport: !isProduction
       ? { target: 'pino-pretty', options: { colorize: true, translateTime: 'SYS:standard' } }
       : undefined
   }
@@ -49,13 +61,12 @@ await fastify.register(helmet, {
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   crossOriginOpenerPolicy: { policy: 'same-origin' },
   referrerPolicy: { policy: 'no-referrer' },
-  hsts: process.env.NODE_ENV === 'production'
+  hsts: isProduction
     ? { maxAge: 31536000, includeSubDomains: true, preload: true }
     : false
 })
 
 // CORS — strict origin allowlist. Never fall back to localhost in production.
-const isProduction = process.env.NODE_ENV === 'production'
 const rawFrontend = process.env.FRONTEND_URL || (isProduction ? '' : 'http://localhost:3000')
 const allowedOrigins = rawFrontend.split(',').map(s => s.trim()).filter(Boolean)
 if (isProduction && (allowedOrigins.length === 0 || allowedOrigins.some(o => /localhost|127\.0\.0\.1/i.test(o)))) {
@@ -150,16 +161,27 @@ fastify.decorate('authenticate', async function (request, reply) {
 // authenticated user is a member of that tenant. System admins bypass this check.
 // Membership is loaded lazily and cached in-request.
 import { query as _q } from './db/pool.js'
-const _tenantMembershipCache = new Map() // key = `${userId}:${tenantId}` → boolean; capped size
+const _tenantMembershipCache = new Map() // key = `${userId}:${tenantId}` → boolean; LRU-evicted
+const MEMBERSHIP_CACHE_MAX = 5000
 async function _isTenantMember(userId, tenantId) {
   const key = `${userId}:${tenantId}`
-  if (_tenantMembershipCache.has(key)) return _tenantMembershipCache.get(key)
+  if (_tenantMembershipCache.has(key)) {
+    // LRU touch — delete and re-insert so recent accesses stay alive
+    const val = _tenantMembershipCache.get(key)
+    _tenantMembershipCache.delete(key)
+    _tenantMembershipCache.set(key, val)
+    return val
+  }
   const { rows } = await _q(
     `SELECT 1 FROM tenant_members WHERE user_id = $1 AND tenant_id = $2 AND status = 'ACTIVE' LIMIT 1`,
     [userId, tenantId]
   )
   const ok = rows.length > 0
-  if (_tenantMembershipCache.size > 5000) _tenantMembershipCache.clear()
+  // LRU eviction: remove the oldest entry (first key in insertion order)
+  if (_tenantMembershipCache.size >= MEMBERSHIP_CACHE_MAX) {
+    const oldest = _tenantMembershipCache.keys().next().value
+    if (oldest !== undefined) _tenantMembershipCache.delete(oldest)
+  }
   _tenantMembershipCache.set(key, ok)
   return ok
 }
@@ -236,6 +258,7 @@ await fastify.register(mcpRoutes, { prefix: '/api/v1' })
 await fastify.register(feedbackRoutes, { prefix: '/api/v1' })
 await fastify.register(profileRoutes, { prefix: '/api/v1' })
 await fastify.register(customModelsRoutes, { prefix: '/api/v1' })
+await fastify.register(reportsRoutes, { prefix: '/api/v1' })
 
 // ─── Global error handler ──────────────────────────────────────────────────
 fastify.setErrorHandler(async (error, request, reply) => {
