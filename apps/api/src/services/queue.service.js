@@ -10,7 +10,7 @@ import IORedis from 'ioredis'
 let connection = null
 let isRedisAvailable = false
 
-function getRedisConnection() {
+export function getRedisConnection() {
   if (connection) return connection
 
   const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379'
@@ -83,7 +83,12 @@ export async function initQueues(logger) {
     })
 
     taskWorker.on('failed', (job, err) => {
-      // Task failure logged by task.service.js
+      // Job has exhausted all BullMQ retry attempts — log permanently-failed jobs
+      // so ops/monitoring can see them (previously this was a silent no-op).
+      if (logger) logger.error(
+        { jobId: job?.id, attempts: job?.attemptsMade, err: err?.message },
+        '[Queue] Agent task permanently failed after all retries'
+      )
     })
 
     // ─── Workflow Step Worker ─────────────────────────────────────────────────
@@ -97,15 +102,78 @@ export async function initQueues(logger) {
     })
 
     workflowWorker.on('failed', (job, err) => {
-      // Workflow step failure logged by workflow.service.js
+      // Job has exhausted all BullMQ retry attempts
+      if (logger) logger.error(
+        { jobId: job?.id, execId: job?.data?.execId, stepIdx: job?.data?.stepIdx, err: err?.message },
+        '[Queue] Workflow step permanently failed after all retries'
+      )
     })
 
-    workerInstances = [taskWorker, workflowWorker]
+    // ─── WhatsApp Message Worker ──────────────────────────────────────────────
+    const whatsappWorker = new Worker('whatsapp-messages', async (job) => {
+      const { processIncomingMessage } = await import('./whatsapp.service.js')
+      await processIncomingMessage(job)
+    }, {
+      connection: conn,
+      concurrency: parseInt(process.env.WHATSAPP_CONCURRENCY || '5'),
+      limiter: { max: 20, duration: 1000 },  // WhatsApp rate limits — max 20/sec
+    })
 
-    if (logger) logger.info({ concurrency: process.env.TASK_CONCURRENCY || '5' }, '[Queue] BullMQ workers initialised')
+    whatsappWorker.on('completed', (job) => {
+      if (logger) logger.info({ jobId: job.id }, '[WhatsApp] Message processed')
+    })
+
+    whatsappWorker.on('failed', (job, err) => {
+      if (logger) logger.error({ jobId: job.id, error: err.message }, '[WhatsApp] Message processing failed')
+    })
+
+    workerInstances = [taskWorker, workflowWorker, whatsappWorker]
+
+    // ─── Telegram Message Worker ──────────────────────────────────────────────
+    const telegramWorker = new Worker('telegram-messages', async (job) => {
+      const { processIncomingMessage } = await import('./telegram.service.js')
+      await processIncomingMessage(job)
+    }, {
+      connection: conn,
+      concurrency: parseInt(process.env.TELEGRAM_CONCURRENCY || '5'),
+      limiter: { max: 30, duration: 1000 },  // Telegram rate limit: 30 msg/sec
+    })
+
+    telegramWorker.on('completed', (job) => {
+      if (logger) logger.info({ jobId: job.id }, '[Telegram] Message processed')
+    })
+
+    telegramWorker.on('failed', (job, err) => {
+      if (logger) logger.error({ jobId: job.id, error: err.message }, '[Telegram] Message processing failed')
+    })
+
+    workerInstances.push(telegramWorker)
+
+    // ─── Knowledge Ingestion Worker ───────────────────────────────────────────
+    // ── L1 Fix: BullMQ-backed document indexing (durable, retryable) ──────────
+    const { createKnowledgeWorker, recoverStuckDocuments } = await import('./knowledge.service.js')
+    const knowledgeWorker = await createKnowledgeWorker(conn, logger)
+    workerInstances.push(knowledgeWorker)
+
+    // Recover stuck PROCESSING documents from before a restart (5s delay for DB)
+    setTimeout(() => recoverStuckDocuments().catch(() => {}), 5000)
+
+    if (logger) {
+      logger.info(
+        { concurrency: process.env.TASK_CONCURRENCY || '5' },
+        '[Queue] BullMQ workers initialised — tasks, workflows, knowledge and messaging will be processed'
+      )
+    }
     return true
+
   } catch (err) {
-    if (logger) logger.warn({ error: err.message }, '[Queue] Failed to initialise BullMQ — using in-process fallback')
+    if (logger) {
+      logger.warn(
+        { error: err.message, code: err.code },
+        '[Queue] Failed to initialise BullMQ — falling back to in-process setImmediate. ' +
+        'Tasks will still run but without retries, persistence, or horizontal scaling.'
+      )
+    }
     return false
   }
 }
@@ -118,6 +186,7 @@ export async function initQueues(logger) {
  */
 export async function enqueueTask(task, agent, executeTaskFn) {
   if (taskQueue && isRedisAvailable) {
+    console.log(`[Queue] Enqueuing task ${task.id} via BullMQ (priority: ${task.priority || 'MEDIUM'})`)
     await taskQueue.add(
       `task:${task.id}`,
       { task, agent },
@@ -127,10 +196,30 @@ export async function enqueueTask(task, agent, executeTaskFn) {
       }
     )
   } else {
-    // Fallback: in-process execution
-    setImmediate(() => executeTaskFn(task, agent).catch(() => {
-      // Error logged by task.service.js
-    }))
+    console.log(`[Queue] Enqueuing task ${task.id} via setImmediate fallback (Redis unavailable)`)
+    // Fallback: in-process execution via setImmediate.
+    // IMPORTANT: If executeTaskFn throws or the process crashes before the
+    // task is marked RUNNING, the task would be orphaned at QUEUED forever.
+    // We catch errors here and mark the task FAILED to prevent silent orphans.
+    setImmediate(async () => {
+      try {
+        await executeTaskFn(task, agent)
+      } catch (err) {
+        console.error(`[Queue:fallback] Task ${task.id} failed:`, err.message)
+        // Mark the task as FAILED if it's stuck in QUEUED or RUNNING.
+        // executeTask sets status to RUNNING early, so we must handle both states.
+        try {
+          const { query } = await import('../db/pool.js')
+          await query(
+            `UPDATE agent_tasks SET status = 'FAILED', error = $1, completed_at = NOW()
+             WHERE id = $2 AND status IN ('QUEUED', 'RUNNING')`,
+            [err.message || 'Unknown error in fallback execution', task.id]
+          )
+        } catch (dbErr) {
+          console.error(`[Queue:fallback] Failed to mark task ${task.id} as FAILED:`, dbErr.message)
+        }
+      }
+    })
   }
 }
 
@@ -149,9 +238,24 @@ export async function enqueueWorkflowStep(execId, steps, stepIdx, context, runSt
       }
     )
   } else {
-    setImmediate(() => runStepFn(execId, steps, stepIdx, context).catch(() => {
-      // Error logged by workflow.service.js
-    }))
+    setImmediate(async () => {
+      try {
+        await runStepFn(execId, steps, stepIdx, context)
+      } catch (err) {
+        console.error(`[Queue:fallback] Workflow step ${execId}:${stepIdx} failed:`, err.message)
+        // Mark the execution as FAILED so it doesn't stay stuck
+        try {
+          const { query } = await import('../db/pool.js')
+          await query(
+            `UPDATE workflow_executions SET status = 'FAILED', error = $1, completed_at = NOW()
+             WHERE id = $2 AND status NOT IN ('COMPLETED','FAILED')`,
+            [err.message, execId]
+          )
+        } catch (dbErr) {
+          console.error(`[Queue:fallback] Failed to mark execution ${execId} as FAILED:`, dbErr.message)
+        }
+      }
+    })
   }
 }
 

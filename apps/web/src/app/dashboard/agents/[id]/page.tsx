@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { api } from '@/lib/api'
+import { api, API_BASE } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import Link from 'next/link'
 import { useConfirm } from '@/components/ConfirmModal'
@@ -27,6 +27,9 @@ const PHASE_LABELS: Record<string, string> = {
   planning: '🧠 Formulating plan',
   thinking: '⚡ Reasoning',
   synthesising: '✨ Synthesising results',
+  awaiting_approval: '⏳ Awaiting human approval',
+  resuming: '🔄 Resuming after approval',
+  rejected: '✕ Action rejected',
 }
 
 export default function AgentDetailPage() {
@@ -39,6 +42,8 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<any>(null)
   const [kbs, setKbs] = useState<any[]>([])
   const [selectedKBs, setSelectedKBs] = useState<string[]>([])
+  const [graphs, setGraphs] = useState<any[]>([])
+  const [selectedGraphs, setSelectedGraphs] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [llmProviders, setLlmProviders] = useState<Record<string, { model?: string; baseUrl?: string }>>({})
   const [customModels, setCustomModels] = useState<any[]>([])
@@ -54,6 +59,7 @@ export default function AgentDetailPage() {
 
   // Task execution state
   const [goal, setGoal] = useState('')
+  const [autoLoadedGoal, setAutoLoadedGoal] = useState(false) // true if goal was pre-filled from past execution
   const [task, setTask] = useState<any>(null)
   const [running, setRunning] = useState(false)
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([])
@@ -61,36 +67,111 @@ export default function AgentDetailPage() {
   const [showFeedback, setShowFeedback] = useState(false)
   const [currentPhase, setCurrentPhase] = useState<string>('')
   const [pastTasks, setPastTasks] = useState<any[]>([])
+  const [showAllTasks, setShowAllTasks] = useState(false)
   const [deleteState, setDeleteState] = useState(0)
 
   // Skill Modal State
   const [showSkillModal, setShowSkillModal] = useState(false)
-  const [newSkill, setNewSkill] = useState({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '' })
+  const [newSkill, setNewSkill] = useState({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '', language: 'javascript' })
   const [testInput, setTestInput] = useState('{}')
   const [testResult, setTestResult] = useState<any>(null)
   const [isTesting, setIsTesting] = useState(false)
+  const [skillPrompt, setSkillPrompt] = useState('')
+  const [generatingSkill, setGeneratingSkill] = useState(false)
+
+  // Tool Capabilities State
+  const [scopes, setScopes] = useState<any[]>([])
+  const [connectors, setConnectors] = useState<any[]>([])
+  const [mcpServers, setMcpServers] = useState<any[]>([])
+  const [scopeDraft, setScopeDraft] = useState<Record<string, { scopeType: string; accessLevel: string }>>({})
+  const [loadingScopes, setLoadingScopes] = useState(false)
+  const [showAllConnectors, setShowAllConnectors] = useState(false)
+  const [showAllMcp, setShowAllMcp] = useState(false)
+
+  // Browser agent connectivity test
+  const [browserStatus, setBrowserStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
+
+  // System prompt preview
+  const [promptPreview, setPromptPreview] = useState<any>(null)
+  const [loadingPromptPreview, setLoadingPromptPreview] = useState(false)
+
+  const BUILTIN_TOOLS = [
+    { id: 'http_request', name: 'HTTP Request', description: 'Make HTTP requests to any URL' },
+    { id: 'http_download', name: 'HTTP Download', description: 'Download a file from a URL (max 5MB)' },
+    { id: 'file_search', name: 'File Search', description: 'Search file contents on the filesystem via grep/rg' },
+    { id: 'docker_run', name: 'Docker Run', description: 'Run commands in a Docker container' },
+    { id: 'ssh_exec', name: 'SSH Exec', description: 'Execute commands on remote machines via SSH' },
+    { id: 'a2a_call', name: 'A2A Call', description: 'Delegate tasks to external agents via A2A' },
+    { id: 'delegate_task', name: 'Delegate Task', description: 'Delegate subtasks to other internal agents' },
+    { id: 'browser_use', name: 'Browser Use', description: 'Control a real web browser' },
+    { id: 'publish_dashboard_report', name: 'Publish Report', description: 'Publish dynamic HTML reports to dashboard' },
+  ]
 
   const wsRef = useRef<WebSocket | null>(null)
   const pollRef = useRef<any>(null)
   const traceEndRef = useRef<HTMLDivElement>(null)
+  const traceContainerRef = useRef<HTMLDivElement>(null)
   const currentTaskId = useRef<string | null>(null)
+  const wsRetryCount = useRef<number>(0)
+  const wsRetryTimeout = useRef<any>(null)
+  const cancellingRef = useRef<boolean>(false) // prevents WS reconnect when user hits Stop
+  const userScrolledUpRef = useRef<boolean>(false) // user manually scrolled away from bottom → pause auto-scroll
 
   useEffect(() => {
     if (tenantId) {
       Promise.all([
         api.getAgent(tenantId, agentId),
         api.listKBs(tenantId).catch(() => ({ knowledgeBases: [] })),
+        api.listKnowledgeGraphs(tenantId).catch(() => ({ knowledgeGraphs: [] })),
         api.getSettings(tenantId).catch(() => ({ llm_config: { providers: {} } })),
         api.getCustomModels(tenantId).catch(() => ({ customModels: [] }))
-      ]).then(([a, k, s, c]) => {
+      ]).then(([a, k, g, s, c]) => {
         setAgent(a)
         setKbs(k.knowledgeBases || [])
         setSelectedKBs(a.knowledge_bases || [])
+        setGraphs(g.knowledgeGraphs || [])
+        setSelectedGraphs(a.knowledge_graph_ids || [])
         setLlmProviders(s?.llm_config?.providers || {})
         setCustomModels(c?.customModels || [])
         setLoading(false)
       })
-      api.listTasks(tenantId, agentId).then((res: any) => setPastTasks(res.tasks || [])).catch(() => {})
+      api.listTasks(tenantId, agentId).then((res: any) => {
+        const tasks = res?.tasks || res || []
+        setPastTasks(tasks)
+        // Auto-load the last SUCCESSFUL/COMPLETED/STOPPED task's prompt
+        // so users can quickly re-run with the same prompt (one click).
+        const lastSuccessful = tasks.find((t: any) =>
+          ['COMPLETED','STOPPED','SUCCESSFUL'].includes(t.status?.toUpperCase?.() || '')
+        )
+        if (lastSuccessful?.goal) {
+          setGoal(lastSuccessful.goal)
+          setAutoLoadedGoal(true)
+        }
+      }).catch(() => {})
+
+      // Fetch scopes, connectors, and MCPs for the Capabilities UI
+      setLoadingScopes(true)
+      Promise.all([
+        api.listScopes(tenantId, agentId).catch(() => []),
+        api.listConnectors(tenantId).catch(() => ({ data: { connectors: [] } })),
+        api.listMcpServers(tenantId).catch(() => []),
+      ]).then(([scopesRes, connRes, mcpRes]) => {
+        const scopesList = Array.isArray(scopesRes) ? scopesRes : scopesRes?.scopes || []
+        setScopes(scopesList)
+        setConnectors(connRes?.data?.connectors || connRes?.connectors || [])
+        setMcpServers(Array.isArray(mcpRes) ? mcpRes : mcpRes?.servers || [])
+        // Build draft from existing scopes
+        const draft: Record<string, { scopeType: string; accessLevel: string }> = {}
+        for (const s of scopesList) {
+          const key = s.scope_type === 'connector' ? `connector:${s.connector_id}`
+            : s.scope_type === 'mcp_server' ? `mcp:${s.mcp_server_id}`
+            : s.scope_type === 'group' ? `group:${s.group_name}`
+            : `builtin:${s.builtin_name}`
+          draft[key] = { scopeType: s.scope_type, accessLevel: s.access_level }
+        }
+        setScopeDraft(draft)
+        setLoadingScopes(false)
+      }).catch(() => setLoadingScopes(false))
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
@@ -108,17 +189,31 @@ export default function AgentDetailPage() {
     }
   }, [agent?.llm_provider, tenantId])
 
-  // Auto-scroll trace to bottom
+  // Auto-scroll trace to bottom — only if user hasn't manually scrolled up.
+  // When the user scrolls away from the bottom, auto-scroll is paused so they
+  // can freely review past output. It resumes when they scroll back to bottom.
   useEffect(() => {
-    traceEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const container = traceContainerRef.current
+    if (!container || userScrolledUpRef.current) return
+    const threshold = 100 // px from bottom: still auto-scroll
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold
+    if (nearBottom) {
+      traceEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [traceEvents, streamBuffers])
 
   // ── WebSocket connection for live streaming ──────────────────────────────
   const connectWS = useCallback((tid: string, taskId: string) => {
     wsRef.current?.close()
-    const apiBase = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1')
-      .replace('/api/v1', '')
-    const wsUrl = `${apiBase.replace(/^http/, 'ws')}/ws/tenants/${tid}/telemetry`
+    
+    // Reset retry count on successful connection
+    wsRetryCount.current = 0
+    
+    // Build WebSocket URL safely
+    const url = new URL(API_BASE)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    url.pathname = `/ws/tenants/${tid}/telemetry`
+    const wsUrl = url.toString()
 
     const ws = new WebSocket(wsUrl) // httpOnly cookie is sent automatically
     wsRef.current = ws
@@ -161,7 +256,13 @@ export default function AgentDetailPage() {
         setCurrentPhase('')
         ws.close()
         // Fetch final task state for the result panel
-        api.getTask(tid, agentId, taskId).then(setTask).catch(() => {})
+        api.getTask(tid, agentId, taskId).then(t => {
+          setTask(t)
+          setPastTasks(prev => {
+            const exists = prev.some(p => p.id === t.id)
+            return exists ? prev : [t, ...prev]
+          })
+        }).catch(() => {})
         // Prompt user for feedback after brief delay
         setTimeout(() => setShowFeedback(true), 800)
 
@@ -170,14 +271,73 @@ export default function AgentDetailPage() {
         setRunning(false)
         setCurrentPhase('')
         ws.close()
+        // Also add the failed task to past executions
+        api.getTask(tid, agentId, taskId).then(t => {
+          setTask(t)
+          setPastTasks(prev => {
+            const exists = prev.some(p => p.id === t.id)
+            return exists ? prev : [t, ...prev]
+          })
+        }).catch(() => {})
+
+      } else if (eventType === 'agent.approval_required') {
+        // Task is paused waiting for human approval
+        setCurrentPhase('awaiting_approval')
+        setTraceEvents(prev => [...prev, {
+          type: 'phase', phase: 'awaiting_approval',
+          label: `⏳ Waiting for approval — tool "${payload.tool}" needs human review`
+        }])
+
+      } else if (eventType === 'agent.approval_granted') {
+        setCurrentPhase('resuming')
+        setTraceEvents(prev => [...prev, {
+          type: 'phase', phase: 'resuming',
+          label: `✅ Tool "${payload.tool}" approved${payload.decisionNote ? ` — "${payload.decisionNote}"` : ''}, resuming execution...`
+        }])
+
+      } else if (eventType === 'agent.approval_rejected') {
+        setCurrentPhase('rejected')
+        setTraceEvents(prev => [...prev, {
+          type: 'phase', phase: 'rejected',
+          label: `✕ Tool "${payload.tool}" rejected${payload.reason ? ` — "${payload.reason}"` : ''}`
+        }])
+
+      } else if (eventType === 'agent.approval_timeout') {
+        setCurrentPhase('failed')
+        setTraceEvents(prev => [...prev, {
+          type: 'phase', phase: 'failed',
+          label: `⏰ Approval timeout — no response received in time`
+        }])
+
+      } else if (eventType === 'agent.task_resuming') {
+        setCurrentPhase('resuming')
+        setTraceEvents(prev => [...prev, {
+          type: 'phase', phase: 'resuming',
+          label: '🔄 Task resuming after approval...'
+        }])
       }
     }
 
     ws.onerror = () => {
-      // Fall back to polling if WS fails (e.g. in dev without WS proxy)
-      startPolling(tid, taskId)
+      console.warn('[WS] WebSocket error, will attempt reconnection')
     }
-  }, [agentId])
+
+    ws.onclose = (event) => {
+      console.log('[WS] Connection closed:', event.code, event.reason)
+      
+      // Don't reconnect if task is done or user cancelled
+      if (cancellingRef.current || !running) return
+      
+      // Exponential backoff reconnection
+      const retryDelay = Math.min(1000 * Math.pow(2, wsRetryCount.current), 30000)
+      console.log(`[WS] Reconnecting in ${retryDelay}ms (attempt ${wsRetryCount.current + 1})`)
+      
+      wsRetryTimeout.current = setTimeout(() => {
+        wsRetryCount.current++
+        connectWS(tid, taskId)
+      }, retryDelay)
+    }
+  }, [agentId, running])
 
   function startPolling(tid: string, taskId: string) {
     if (pollRef.current) clearInterval(pollRef.current)
@@ -189,6 +349,10 @@ export default function AgentDetailPage() {
           clearInterval(pollRef.current)
           setRunning(false)
           setCurrentPhase('')
+          setPastTasks(prev => {
+            const exists = prev.some(p => p.id === t.id)
+            return exists ? prev : [t, ...prev]
+          })
           if (t.status === 'COMPLETED') setTimeout(() => setShowFeedback(true), 800)
         }
       } catch {
@@ -208,7 +372,8 @@ export default function AgentDetailPage() {
       if (task.actions && Array.isArray(task.actions)) {
         task.actions.forEach((act: any) => {
           reconstructed.push({ type: 'tool_call', phase: 'executing', tool: act.skill, input: act.input } as any)
-          reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: act.success, output: act.result || act.error } as any)
+          // Actions store { output: { success, ... } } — read output directly
+          reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: act.output?.success, output: act.output } as any)
         })
       }
       if (reconstructed.length > 0) {
@@ -225,9 +390,16 @@ export default function AgentDetailPage() {
       const kbsToAdd = selectedKBs.filter(id => !existingKBs.includes(id))
       const kbsToRemove = existingKBs.filter((id: string) => !selectedKBs.includes(id))
 
+      // Sync Knowledge Graphs
+      const existingGraphs = agent.knowledge_graph_ids || []
+      const graphsToAdd = selectedGraphs.filter(id => !existingGraphs.includes(id))
+      const graphsToRemove = existingGraphs.filter((id: string) => !selectedGraphs.includes(id))
+
       await Promise.all([
         ...kbsToAdd.map(id => api.linkKB(tenantId, agentId, id)),
-        ...kbsToRemove.map((id: string) => api.unlinkKnowledgeBase(tenantId, agentId, id))
+        ...kbsToRemove.map((id: string) => api.unlinkKnowledgeBase(tenantId, agentId, id)),
+        ...graphsToAdd.map(id => api.linkKnowledgeGraph(tenantId, agentId, id)),
+        ...graphsToRemove.map((id: string) => api.unlinkKnowledgeGraph(tenantId, agentId, id))
       ])
 
       const updated = await api.updateAgent(tenantId, agentId, {
@@ -240,6 +412,33 @@ export default function AgentDetailPage() {
       setAgent(freshAgent.data || freshAgent)
       toast('success', 'Settings saved', 'Agent configuration has been updated.')
     } catch (err: any) { toast('error', 'Save failed', err.message) }
+  }
+
+  async function testBrowserAgent() {
+    setBrowserStatus('testing')
+    try {
+      // Call the browser-agent sidecar health endpoint directly
+      const res = await fetch('http://localhost:9223/health')
+      const data = await res.json()
+      setBrowserStatus(data?.browser === 'connected' || data?.status === 'ok' ? 'ok' : 'error')
+    } catch {
+      setBrowserStatus('error')
+    }
+    // Reset after 10 seconds
+    setTimeout(() => setBrowserStatus('idle'), 10000)
+  }
+
+  async function loadPromptPreview() {
+    if (!tenantId || !agentId) return
+    setLoadingPromptPreview(true)
+    try {
+      const res = await api.previewAgentPrompt(tenantId, agentId)
+      setPromptPreview(res)
+    } catch (err: any) {
+      toast('error', 'Failed to load prompt preview', err.message)
+    } finally {
+      setLoadingPromptPreview(false)
+    }
   }
 
   async function handleRemoveSkill(e: any, skillId: string) {
@@ -296,6 +495,91 @@ export default function AgentDetailPage() {
     } catch (err: any) { toast('error', 'Activation failed', err.message) }
   }
 
+  async function saveScopes() {
+    try {
+      // Convert draft to expected API format (camelCase, matching backend addScope)
+      const scopesPayload = Object.entries(scopeDraft).map(([key, val]) => {
+        const [type, id] = key.split(':')
+        const payload: any = { scopeType: val.scopeType, accessLevel: val.accessLevel }
+        if (type === 'connector') payload.connectorId = id
+        else if (type === 'mcp') payload.mcpServerId = id
+        else if (type === 'builtin') payload.builtinName = id
+        else if (type === 'group') payload.groupName = id
+        return payload
+      })
+      await api.setScopes(tenantId, agentId, { scopes: scopesPayload })
+      // Refresh scopes from server
+      const fresh = await api.listScopes(tenantId, agentId)
+      const freshList = Array.isArray(fresh) ? fresh : fresh?.scopes || []
+      setScopes(freshList)
+      toast('success', 'Tool capabilities saved')
+    } catch (err: any) {
+      toast('error', 'Failed to save capabilities', err.message)
+    }
+  }
+
+  async function applyArchetypePresets(archetype: string) {
+    try {
+      const res = await api.getScopePresets(tenantId, agentId)
+      // Backend returns { presets: { 'customer-support': [...], 'data-analyst': [...], ... } }
+      const allPresets = res?.presets || {}
+      const presetScopes = allPresets[archetype]
+      if (!presetScopes) { toast('error', `Archetype "${archetype}" not found`); return }
+      
+      // Build draft from preset scopes
+      const draft: Record<string, { scopeType: string; accessLevel: string }> = {}
+      for (const scope of presetScopes) {
+        // Backend presets use camelCase: { scopeType, builtinName, groupName, connectorType, accessLevel }
+        const scopeType = scope.scopeType
+        if (scopeType === 'builtin' && scope.builtinName) {
+          draft[`builtin:${scope.builtinName}`] = { scopeType: 'builtin', accessLevel: scope.accessLevel }
+        } else if (scopeType === 'group' && scope.groupName) {
+          draft[`group:${scope.groupName}`] = { scopeType: 'group', accessLevel: scope.accessLevel }
+        } else if (scopeType === 'connectorType' && scope.connectorType) {
+          // Match by connector tool_id (e.g. 'slack', 'jira', 'github') — set scope
+          // for EVERY connector of that type the tenant has configured
+          const matching = connectors.filter((c: any) => c.tool_id === scope.connectorType)
+          for (const c of matching) {
+            draft[`connector:${c.id}`] = { scopeType: 'connector', accessLevel: scope.accessLevel }
+          }
+          if (matching.length === 0) {
+            console.log(`[presets] No ${scope.connectorType} connector found to apply preset`)
+          }
+        } else if (scopeType === 'connector' && scope.connectorId) {
+          draft[`connector:${scope.connectorId}`] = { scopeType: 'connector', accessLevel: scope.accessLevel }
+        } else if (scopeType === 'mcp_server' && scope.mcpServerId) {
+          draft[`mcp:${scope.mcpServerId}`] = { scopeType: 'mcp_server', accessLevel: scope.accessLevel }
+        }
+      }
+      setScopeDraft(draft)
+      toast('info', `Archetype "${archetype}" presets applied`, 'Review and save to persist.')
+    } catch (err: any) {
+      toast('error', 'Failed to load presets', err.message)
+    }
+  }
+
+  function updateScopeDraft(key: string, accessLevel: string) {
+    setScopeDraft(prev => {
+      const next = { ...prev }
+      if (accessLevel === 'unset') {
+        delete next[key]
+      } else {
+        // Infer scopeType from the key prefix (connector: / mcp: / builtin: / group:)
+        const [type] = key.split(':')
+        const scopeType = type === 'connector' ? 'connector'
+          : type === 'mcp' ? 'mcp_server'
+          : type === 'group' ? 'group'
+          : 'builtin'
+        next[key] = { ...next[key], scopeType, accessLevel }
+      }
+      return next
+    })
+  }
+
+  function getScopeLevel(key: string): string {
+    return scopeDraft[key]?.accessLevel || 'unset'
+  }
+
   async function handleDelete() {
     if (deleteState === 0) {
       setDeleteState(1)
@@ -323,6 +607,10 @@ export default function AgentDetailPage() {
         config = { instruction: newSkill.instruction }
       } else if (isCode) {
         config = { code: newSkill.code }
+        // Include language for non-JS scripts
+        if (newSkill.language === 'python') {
+          config.language = 'python'
+        }
       } else {
         let parsedHeaders = {}
         let parsedBody = undefined
@@ -346,7 +634,7 @@ export default function AgentDetailPage() {
       const added = await api.addSkill(tenantId, agentId, skillData)
       setAgent((a: any) => ({ ...a, skills: [...(a.skills || []), added] }))
       setShowSkillModal(false)
-      setNewSkill({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '' })
+      setNewSkill({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '', language: 'javascript' })
       setTestResult(null)
       toast('success', 'Skill Added', 'Custom skill has been attached to the agent.')
     } catch (err: any) {
@@ -381,6 +669,7 @@ export default function AgentDetailPage() {
   async function startTask(e: any) {
     e.preventDefault()
     if (!goal.trim()) return
+    cancellingRef.current = false
     setRunning(true)
     setTask(null)
     setTraceEvents([])
@@ -399,6 +688,7 @@ export default function AgentDetailPage() {
   }
 
   async function cancelTask() {
+    cancellingRef.current = true
     setRunning(false)
     setCurrentPhase('')
     if (wsRef.current) wsRef.current.close()
@@ -416,7 +706,8 @@ export default function AgentDetailPage() {
       }
     }
     
-    toast('info', 'Task Cancelled', 'The execution trace was cancelled locally and on the server.')
+    cancellingRef.current = false
+    toast('info', 'Task Stopped', 'The execution was stopped locally and on the server.')
   }
 
   if (loading) return <div style={{ padding: 40 }}><div className="skeleton" style={{ height: 400 }} /></div>
@@ -439,6 +730,7 @@ export default function AgentDetailPage() {
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span>
+          {agent.archetype && <span className="badge" style={{ backgroundColor: 'var(--blue-light)', color: 'var(--blue-dark)', fontSize: 12, fontWeight: 600 }}>{agent.archetype}</span>}
           {agent.status === 'DRAFT' && <button className="btn btn-primary btn-sm" onClick={activate}>Activate Agent</button>}
           <button 
             className={`btn btn-sm ${deleteState === 1 ? 'btn-primary' : 'btn-secondary'}`} 
@@ -450,10 +742,10 @@ export default function AgentDetailPage() {
         </div>
       </div>
 
-      <div className="page-body grid-2col" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 24 }}>
+      <div className="page-body grid-2col" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 24, alignItems: 'start' }}>
 
         {/* Left Column: Properties */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24, minHeight: 0, overflowY: 'auto' }}>
           <div className="card" style={{ padding: 24 }}>
             <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Worker Configuration</h2>
             <form onSubmit={updateAgent} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -522,6 +814,27 @@ export default function AgentDetailPage() {
                 </p>
               </div>
               <div className="form-group">
+                <label className="form-label">Autonomy Level</label>
+                <select
+                  className="input"
+                  value={agent.autonomy_level || 'SUPERVISED'}
+                  onChange={e => setAgent({ ...agent, autonomy_level: e.target.value })}
+                >
+                  <option value="SUPERVISED">🔒 SUPERVISED — All marked tools require approval</option>
+                  <option value="GUARDED">🛡️ GUARDED — Only high-risk tools require approval</option>
+                  <option value="AUTONOMOUS">🚀 AUTONOMOUS — No approval required</option>
+                </select>
+                <p className="form-hint" style={{ marginTop: 6 }}>
+                  {agent.autonomy_level === 'AUTONOMOUS' ? (
+                    'Agents run without any human oversight. Use with caution in production environments.'
+                  ) : agent.autonomy_level === 'GUARDED' ? (
+                    'Only SSH exec, Docker run, HTTP requests and file downloads will require human approval.'
+                  ) : (
+                    'Every tool marked as "requires approval" in the Capabilities section will pause execution until a human approves.'
+                  )}
+                </p>
+              </div>
+              <div className="form-group">
                 <label className="form-label">Attached Knowledge Bases</label>
                 {kbs.length === 0 ? (
                   <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge bases found. <Link href="/dashboard/knowledge" style={{ color: 'var(--green-dark)' }}>Create one</Link></div>
@@ -535,6 +848,26 @@ export default function AgentDetailPage() {
                             setSelectedKBs(prev => isSelected ? prev.filter(i => i !== kb.id) : [...prev, kb.id])
                           }} style={{ accentColor: 'var(--green)' }} />
                           <strong>{kb.name}</strong> ({kb.document_count || 0} docs)
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+              <div className="form-group">
+                <label className="form-label">Attached Knowledge Graphs</label>
+                {graphs.length === 0 ? (
+                  <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge graphs found. <Link href="/dashboard/knowledge?tab=graphs" style={{ color: 'var(--purple, #8b5cf6)' }}>Create one</Link></div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                    {graphs.map(g => {
+                      const isSelected = selectedGraphs.includes(g.id)
+                      return (
+                        <label key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                          <input type="checkbox" checked={isSelected} onChange={() => {
+                            setSelectedGraphs(prev => isSelected ? prev.filter(i => i !== g.id) : [...prev, g.id])
+                          }} style={{ accentColor: 'var(--purple, #8b5cf6)' }} />
+                          <strong>{g.name}</strong> ({g.entity_count || 0} entities, {g.graph_kind})
                         </label>
                       )
                     })}
@@ -565,7 +898,8 @@ export default function AgentDetailPage() {
                     <div style={{ fontWeight: 600, fontSize: 14, paddingRight: 24 }}>{s.name}</div>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{s.description}</div>
                     {s.action_id === 'nl_instruction' && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#a855f7', display: 'inline-block' }}>Natural Language</div>}
-                    {s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--green-dark)', display: 'inline-block' }}>JS Script</div>}
+                    {s.config?.language === 'python' && s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#3776AB', display: 'inline-block' }}>🐍 Python Script</div>}
+                    {(!s.config?.language || s.config?.language === 'javascript') && s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--green-dark)', display: 'inline-block' }}>JS Script</div>}
                     {s.config?.url && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--blue)', display: 'inline-block' }}>API Endpoint</div>}
                   </div>
                 ))}
@@ -574,10 +908,312 @@ export default function AgentDetailPage() {
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No custom skills attached.</div>
             )}
           </div>
+
+          {/* System Prompt Preview */}
+          <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>📋</span> System Prompt Preview
+              </h2>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={loadPromptPreview}
+                disabled={loadingPromptPreview}
+                style={{ fontSize: 12 }}
+              >
+                {loadingPromptPreview ? '⟳ Loading...' : promptPreview ? '🔄 Refresh' : '🔍 Load Prompt'}
+              </button>
+            </div>
+            {promptPreview ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-muted)' }}>
+                  <span>📐 Archetype: <strong style={{ color: 'var(--text-secondary)' }}>{promptPreview.archetype || 'none'}</strong></span>
+                  <span>📝 Custom instructions: <strong style={{ color: promptPreview.hasCustomInstructions ? '#10b981' : 'var(--text-muted)' }}>{promptPreview.hasCustomInstructions ? 'Yes' : 'No'}</strong></span>
+                  <span>📊 ~{promptPreview.estimatedTokens} tokens</span>
+                  <span>📏 {promptPreview.charCount.toLocaleString()} chars</span>
+                </div>
+                <div style={{
+                  maxHeight: 400, overflowY: 'auto',
+                  background: '#0d1117', borderRadius: 8,
+                  padding: '14px 16px', border: '1px solid var(--border)',
+                }}>
+                  <pre style={{
+                    margin: 0, fontSize: 11, lineHeight: 1.7,
+                    color: '#c9d1d9', fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+                  }}>
+                    {promptPreview.systemPrompt}
+                  </pre>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
+                  💡 This is the exact prompt sent to the LLM every time this agent executes a task. 
+                  Edit the agent's <strong>System instructions</strong> above to customise it.
+                </p>
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '24px 0' }}>
+                Click <strong>Load Prompt</strong> to see the full system prompt that will be sent to the LLM when this agent runs.
+              </div>
+            )}
+          </div>
+
+          {/* ════════════════════════════════════════════════════════════════
+             Tool Capabilities — scope which connectors, MCP servers, and
+             built-in tools this agent is allowed to use.
+             ════════════════════════════════════════════════════════════════ */}
+          <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800 }}>Tool Capabilities</h2>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {agent?.archetype && (
+                  <button className="btn btn-primary btn-sm" onClick={() => applyArchetypePresets(agent.archetype)} title={`Apply "${agent.archetype}" preset for this agent's archetype`} style={{ fontWeight: 700 }}>
+                    ⭐ My Preset
+                  </button>
+                )}
+                <button className="btn btn-secondary btn-sm" onClick={() => applyArchetypePresets('customer-support')} title="Apply customer-support presets">🎧 Support</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => applyArchetypePresets('data-analyst')} title="Apply data-analyst presets">📊 Data</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => applyArchetypePresets('developer')} title="Apply developer presets">💻 Dev</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => applyArchetypePresets('browser-automation')} title="Apply browser-automation presets">🌐 Browser</button>
+                <button className="btn btn-secondary btn-sm" onClick={() => applyArchetypePresets('analyst')} title="Apply analyst presets (read-only)">🔒 Analyst</button>
+              </div>
+            </div>
+            {agent?.archetype ? (
+              <div style={{ fontSize: 12, padding: '8px 12px', backgroundColor: 'color-mix(in srgb, var(--blue) 10%, transparent)', borderRadius: 6, marginBottom: 12, color: 'var(--text-secondary)', border: '1px solid color-mix(in srgb, var(--blue) 25%, transparent)' }}>
+                💡 This agent's archetype is <strong>{agent.archetype}</strong>. Default tool scopes were applied at creation. Review and adjust below, or click <strong>⭐ My Preset</strong> to reload the archetype defaults.
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, padding: '8px 12px', backgroundColor: 'color-mix(in srgb, var(--yellow) 10%, transparent)', borderRadius: 6, marginBottom: 12, color: 'var(--text-secondary)', border: '1px solid color-mix(in srgb, var(--yellow) 25%, transparent)' }}>
+                ⚠️ This agent has no archetype. Without explicit scopes, it will have access to <strong>all tools</strong>. Choose a preset above to apply least-privilege defaults — then review and save.
+              </div>
+            )}
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+              Explicitly scoped items control what this agent can use. <strong>Allowed</strong> grants access, <strong>Not allowed</strong> blocks implicitly (unless all connectors are allowed). <strong>Requires approval</strong> pauses execution for human review before use.
+              {loadingScopes && <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>⏳ Loading...</span>}
+            </p>
+
+            {loadingScopes ? (
+              <div className="skeleton" style={{ height: 120 }} />
+            ) : (
+              <>
+                {/* ── Connectors ──────────────────────────────────────────── */}
+                {(() => {
+                  // Exclude vector-db & knowledge-graph connectors — these are now managed as Knowledge Bases / Graphs
+                  const nonKnowledgeConnectors = connectors.filter((c: any) => c.tool_id !== 'vector-db' && c.tool_id !== 'knowledge-graph')
+                  const assignedConnectors = nonKnowledgeConnectors.filter((c: any) => getScopeLevel(`connector:${c.id}`) !== 'unset')
+                  const unassignedConnectors = nonKnowledgeConnectors.filter((c: any) => getScopeLevel(`connector:${c.id}`) === 'unset')
+                  const visibleConnectors = showAllConnectors ? nonKnowledgeConnectors : assignedConnectors
+                  const totalAssigned = assignedConnectors.length
+                  return (
+                <details open style={{ marginBottom: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+                    🔌 Connectors ({totalAssigned} assigned{nonKnowledgeConnectors.length !== totalAssigned ? ` / ${nonKnowledgeConnectors.length} total` : ''})
+                  </summary>
+                  {connectors.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', paddingLeft: 16 }}>No connectors configured.</div>
+                  ) : visibleConnectors.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', paddingLeft: 16 }}>
+                      No connectors assigned to this agent.{' '}
+                      <button className="btn-link" onClick={() => setShowAllConnectors(true)}
+                        style={{ fontSize: 12, color: 'var(--green-dark)', textDecoration: 'underline', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                        Show all {connectors.length} connectors
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 16 }}>
+                      {visibleConnectors.map((c: any) => {
+                        const key = `connector:${c.id}`
+                        const level = getScopeLevel(key)
+                        const icon = c.tool_id === 'database' ? '🗄️' : c.tool_id === 'rest' ? '🌐' : c.tool_id === 'webhook' ? '🔗' : c.tool_id === 'local-dir' ? '📁' : c.tool_id === 'local-shell' ? '💻' : c.tool_id === 'local-applescript' ? '🍎' : '🔌'
+                        // Show config details for multi-instance connectors
+                        const detail = c.tool_id === 'database'
+                          ? `${c.config?.engine || 'sql'}://${c.config?.host || 'localhost'}:${c.config?.port || 5432}/${c.config?.database || c.config?.database_name || '?'}`
+                          : c.tool_id === 'local-dir'
+                          ? c.config?.path || ''
+                          : c.tool_id === 'rest'
+                          ? c.config?.baseUrl || ''
+                          : c.tool_id === 'webhook'
+                          ? c.config?.url || ''
+                          : c.tool_id === 'local-shell'
+                          ? c.config?.shell || 'bash'
+                          : ''
+                        return (
+                          <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                            <span style={{ fontSize: 16, flexShrink: 0 }}>{icon}</span>
+                            <span style={{ flex: 1 }}>
+                              <strong>{c.name}</strong>
+                              {detail && <span style={{ color: 'var(--text-muted)', fontSize: 11, display: 'block', fontFamily: 'monospace' }}>{detail}</span>}
+                              <span style={{ color: 'var(--text-muted)', fontSize: 10, display: 'block' }}>{c.tool_id}{c.status !== 'ACTIVE' ? ` · ${c.status}` : ''}</span>
+                            </span>
+                            <select className="input" style={{ width: 150, fontSize: 12, padding: '4px 6px' }}
+                              value={level}
+                              onChange={e => updateScopeDraft(key, e.target.value)}>
+                              <option value="unset">🚫 Not allowed</option>
+                              <option value="allowed">✅ Allowed</option>
+                              <option value="readonly">👁 Read only</option>
+                              <option value="requires_approval">🛑 Requires approval</option>
+                              <option value="denied">⛔ Denied</option>
+                            </select>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {!showAllConnectors && unassignedConnectors.length > 0 && (
+                    <button className="btn-link" onClick={() => setShowAllConnectors(true)}
+                      style={{ fontSize: 11, marginTop: 6, marginLeft: 16, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      + Show all {nonKnowledgeConnectors.length} connectors ({unassignedConnectors.length} more)
+                    </button>
+                  )}
+                  {showAllConnectors && unassignedConnectors.length > 0 && (
+                    <button className="btn-link" onClick={() => setShowAllConnectors(false)}
+                      style={{ fontSize: 11, marginTop: 6, marginLeft: 16, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      − Show assigned only
+                    </button>
+                  )}
+                </details>
+                )})()}
+
+                {/* ── MCP Servers ─────────────────────────────────────────── */}
+                {(() => {
+                  const assignedMcp = mcpServers.filter((s: any) => getScopeLevel(`mcp:${s.id}`) !== 'unset')
+                  const unassignedMcp = mcpServers.filter((s: any) => getScopeLevel(`mcp:${s.id}`) === 'unset')
+                  const visibleMcp = showAllMcp ? mcpServers : assignedMcp
+                  const totalAssignedMcp = assignedMcp.length
+                  return (
+                <details open style={{ marginBottom: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+                    🖥 MCP Servers ({totalAssignedMcp} assigned{mcpServers.length !== totalAssignedMcp ? ` / ${mcpServers.length} total` : ''})
+                  </summary>
+                  {mcpServers.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', paddingLeft: 16 }}>No MCP servers configured.</div>
+                  ) : visibleMcp.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', paddingLeft: 16 }}>
+                      No MCP servers assigned to this agent.{' '}
+                      <button className="btn-link" onClick={() => setShowAllMcp(true)}
+                        style={{ fontSize: 12, color: 'var(--green-dark)', textDecoration: 'underline', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                        Show all {mcpServers.length} servers
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 16 }}>
+                      {visibleMcp.map((s: any) => {
+                        const key = `mcp:${s.id}`
+                        const level = getScopeLevel(key)
+                        return (
+                          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                            <span style={{ flex: 1 }}><strong>{s.name}</strong> <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({s.url || s.base_url || ''})</span></span>
+                            <select className="input" style={{ width: 150, fontSize: 12, padding: '4px 6px' }}
+                              value={level}
+                              onChange={e => updateScopeDraft(key, e.target.value)}>
+                              <option value="unset">🚫 Not allowed</option>
+                              <option value="allowed">✅ Allowed</option>
+                              <option value="readonly">👁 Read only</option>
+                              <option value="requires_approval">🛑 Requires approval</option>
+                              <option value="denied">⛔ Denied</option>
+                            </select>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {!showAllMcp && unassignedMcp.length > 0 && (
+                    <button className="btn-link" onClick={() => setShowAllMcp(true)}
+                      style={{ fontSize: 11, marginTop: 6, marginLeft: 16, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      + Show all {mcpServers.length} servers ({unassignedMcp.length} more)
+                    </button>
+                  )}
+                  {showAllMcp && unassignedMcp.length > 0 && (
+                    <button className="btn-link" onClick={() => setShowAllMcp(false)}
+                      style={{ fontSize: 11, marginTop: 6, marginLeft: 16, color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      − Show assigned only
+                    </button>
+                  )}
+                </details>
+                )})()}
+
+                {/* ── Groups ──────────────────────────────────────────────── */}
+                <details open style={{ marginBottom: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+                    🏷️ Groups ({['communication', 'database', 'development', 'analytics', 'devops'].length})
+                  </summary>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 16, marginBottom: 8 }}>
+                    Groups let you tag connectors with a category (via <code>config.group</code>). 
+                    Enabling a group here grants access to all connectors in that category.
+                  </p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 16 }}>
+                    {['communication', 'database', 'development', 'analytics', 'devops'].map(groupName => {
+                      const key = `group:${groupName}`
+                      const level = getScopeLevel(key)
+                      return (
+                        <div key={groupName} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                          <span style={{ flex: 1 }}><strong>{groupName}</strong></span>
+                          <select className="input" style={{ width: 150, fontSize: 12, padding: '4px 6px' }}
+                            value={level}
+                            onChange={e => updateScopeDraft(key, e.target.value)}>
+                            <option value="unset">🚫 Not allowed</option>
+                            <option value="allowed">✅ Allowed</option>
+                            <option value="readonly">👁 Read only</option>
+                            <option value="denied">⛔ Denied</option>
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+
+                {/* ── Built-in Tools ──────────────────────────────────────── */}
+                <details open>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+                    ⚙ Built-in Tools ({BUILTIN_TOOLS.length})
+                  </summary>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 16 }}>
+                    {BUILTIN_TOOLS.map(tool => {
+                      const key = `builtin:${tool.id}`
+                      const level = getScopeLevel(key)
+                      const isBrowserUse = tool.id === 'browser_use'
+                      return (
+                        <div key={tool.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                          <span style={{ flex: 1 }}><strong>{tool.name}</strong> <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{tool.description}</span></span>
+                          {isBrowserUse && (
+                            <button
+                              className="btn btn-sm"
+                              onClick={testBrowserAgent}
+                              disabled={browserStatus === 'testing'}
+                              style={{
+                                fontSize: 10, padding: '2px 8px', marginRight: 4,
+                                backgroundColor: browserStatus === 'ok' ? 'rgba(16,185,129,0.15)' : browserStatus === 'error' ? 'rgba(239,68,68,0.15)' : 'transparent',
+                                color: browserStatus === 'ok' ? '#10b981' : browserStatus === 'error' ? '#ef4444' : 'var(--text-muted)',
+                                border: `1px solid ${browserStatus === 'ok' ? 'rgba(16,185,129,0.3)' : browserStatus === 'error' ? 'rgba(239,68,68,0.3)' : 'var(--border)'}`,
+                              }}
+                              title="Test browser-agent sidecar connectivity"
+                            >
+                              {browserStatus === 'testing' ? '⟳' : browserStatus === 'ok' ? '✓ Connected' : browserStatus === 'error' ? '✗ Offline' : '🔍 Test'}
+                            </button>
+                          )}
+                          <select className="input" style={{ width: 150, fontSize: 12, padding: '4px 6px' }}
+                            value={level}
+                            onChange={e => updateScopeDraft(key, e.target.value)}>
+                            <option value="unset">✅ Allowed (default)</option>
+                            <option value="allowed">✅ Allowed</option>
+                            <option value="denied">⛔ Denied</option>
+                            <option value="requires_approval">🛑 Requires approval</option>
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                  <button className="btn btn-primary btn-sm" onClick={saveScopes}>Save Capabilities</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Right Column: Live Execution */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24, minHeight: 0, overflowY: 'auto' }}>
           <div className="card" style={{ padding: 24 }}>
             <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Autonomous Execution</h2>
             <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 20 }}>
@@ -587,8 +1223,13 @@ export default function AgentDetailPage() {
             <form onSubmit={startTask} style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
               <textarea className="input" rows={3}
                 placeholder="e.g. Audit the Acme lease agreement PDF and flag any non-standard termination clauses."
-                value={goal} onChange={e => setGoal(e.target.value)} required
+                value={goal} onChange={e => { setGoal(e.target.value); setAutoLoadedGoal(false); }} required
                 disabled={agent.status !== 'ACTIVE' || running} />
+              {autoLoadedGoal && goal && (
+                <div style={{ fontSize: 11, color: '#059669', fontWeight: 600, marginTop: -8, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  🔄 Using prompt from last successful run — edit above or click a past execution below
+                </div>
+              )}
               
               {/* Suggested Tasks */}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -621,8 +1262,8 @@ export default function AgentDetailPage() {
                   ) : '🚀 Execute Task'}
                 </button>
                 {running && (
-                  <button type="button" className="btn btn-secondary" onClick={cancelTask} style={{ color: 'var(--red)' }}>
-                    Cancel
+                  <button type="button" className="btn btn-danger-solid" onClick={cancelTask} style={{ flex: 1, fontWeight: 700, fontSize: 14 }}>
+                    ⏹ Stop
                   </button>
                 )}
               </div>
@@ -632,9 +1273,10 @@ export default function AgentDetailPage() {
               <div className="alert alert-warning">⚠ You must Activate this Agent before sending it goals.</div>
             )}
 
-            {/* Live streaming trace or past result */}
-            {(traceEvents.length > 0 || running || task?.result) && (
-              <div style={{ marginTop: 8 }} className="animate-in">
+            {/* Live streaming trace — always reserved to prevent layout jumps */}
+            <div style={{ marginTop: 8, minHeight: 200 }}>
+              {(traceEvents.length > 0 || running || task?.result) ? (
+              <div className="animate-in">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <span style={{ fontWeight: 700, fontSize: 13 }}>Live Execution Trace</span>
                   {task?.status && (
@@ -642,7 +1284,20 @@ export default function AgentDetailPage() {
                   )}
                 </div>
 
-                <div style={{
+                <div ref={traceContainerRef}
+                  onScroll={() => {
+                    const el = traceContainerRef.current
+                    if (!el) return
+                    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+                    // User scrolled up >100px from bottom → pause auto-scroll
+                    if (distFromBottom > 100) {
+                      userScrolledUpRef.current = true
+                    } else {
+                      // User scrolled back to bottom → resume auto-scroll
+                      userScrolledUpRef.current = false
+                    }
+                  }}
+                  style={{
                   background: '#0f1117', borderRadius: 10, padding: '14px 16px',
                   fontFamily: 'monospace', fontSize: 12.5, color: '#e2e8f0',
                   maxHeight: 480, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10
@@ -713,17 +1368,34 @@ export default function AgentDetailPage() {
                   <div ref={traceEndRef} />
                 </div>
               </div>
-            )}
+            ) : null}
+            </div>
           </div>
 
 
 
           {/* Past Executions */}
-          {pastTasks.length > 0 && (
-            <div className="card" style={{ padding: 24 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Past Executions</h2>
+          <div className="card" style={{ padding: 24, marginTop: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>Past Executions</h2>
+              {pastTasks.length > 5 && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setShowAllTasks(!showAllTasks)}
+                >
+                  {showAllTasks ? 'Show less' : `View all (${pastTasks.length})`}
+                </button>
+              )}
+            </div>
+            {pastTasks.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.5 }}>📋</div>
+                <div style={{ fontSize: 13 }}>No past executions yet.</div>
+                <div style={{ fontSize: 11, marginTop: 4 }}>Run a task from the agent chat to see it here.</div>
+              </div>
+            ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 400, overflowY: 'auto' }}>
-                {pastTasks.map(t => (
+                {(showAllTasks ? pastTasks : pastTasks.slice(0, 5)).map(t => (
                   <div 
                     key={t.id} 
                     style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', transition: 'border-color 0.2s', position: 'relative' }} 
@@ -733,7 +1405,7 @@ export default function AgentDetailPage() {
                   >
                     <button 
                       onClick={(e) => handleDeleteTask(e, t.id)}
-                      style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', opacity: 0.6 }}
+                      style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626', opacity: 0.6 }}
                       title="Delete execution"
                       onMouseOver={e => e.currentTarget.style.opacity = '1'}
                       onMouseOut={e => e.currentTarget.style.opacity = '0.6'}
@@ -741,11 +1413,9 @@ export default function AgentDetailPage() {
                     {(t.status === 'RUNNING' || t.status === 'PENDING') && (
                       <button 
                         onClick={(e) => handleCancelTask(e, t.id)}
-                        style={{ position: 'absolute', top: 13, right: 36, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--yellow)', opacity: 0.8, fontSize: 11, fontWeight: 'bold' }}
+                        style={{ position: 'absolute', top: 10, right: 36, background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', padding: '3px 10px', fontSize: 11, fontWeight: 700 }}
                         title="Stop execution"
-                        onMouseOver={e => e.currentTarget.style.opacity = '1'}
-                        onMouseOut={e => e.currentTarget.style.opacity = '0.8'}
-                      >STOP</button>
+                      >⏹ STOP</button>
                     )}
                      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{t.goal}</div>
                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -755,8 +1425,8 @@ export default function AgentDetailPage() {
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
@@ -775,158 +1445,308 @@ export default function AgentDetailPage() {
 
       {showSkillModal && (
         <div className="modal-overlay">
-          <div className="modal-content" style={{ width: 800, maxHeight: '90vh', overflowY: 'auto' }}>
-            <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>Add Custom Skill</h2>
-            <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 24 }}>
-              Define a new capability for your agent using plain English, an API endpoint, or custom Node.js code.
-            </p>
-
-            <div style={{ display: 'flex', gap: 8, marginBottom: 24, borderBottom: '1px solid var(--border)', paddingBottom: 16 }}>
-              <button 
-                type="button"
-                className={`btn ${newSkill.type === 'nl' ? 'btn-primary' : 'btn-secondary'}`} 
-                onClick={() => setNewSkill({ ...newSkill, type: 'nl' })}
-              >
-                Natural Language
-              </button>
-              <button 
-                type="button"
-                className={`btn ${newSkill.type === 'api' ? 'btn-primary' : 'btn-secondary'}`} 
-                onClick={() => setNewSkill({ ...newSkill, type: 'api' })}
-              >
-                API Endpoint
-              </button>
-              <button 
-                type="button"
-                className={`btn ${newSkill.type === 'code' ? 'btn-primary' : 'btn-secondary'}`} 
-                onClick={() => setNewSkill({ ...newSkill, type: 'code' })}
-              >
-                Advanced Script
-              </button>
+          <div className="modal" style={{ maxWidth: 860 }}>
+            <div className="modal-header">
+              <h2 className="modal-title">Add Custom Skill</h2>
+              <button onClick={() => { setShowSkillModal(false); setTestResult(null) }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 18 }}>✕</button>
             </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: 'calc(90vh - 140px)', overflowY: 'auto' }}>
 
-            <form onSubmit={saveSkill} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                <div className="form-group">
-                  <label className="form-label">Skill Name (No spaces, e.g. search_crm)</label>
-                  <input className="input" value={newSkill.name} onChange={e => setNewSkill({ ...newSkill, name: e.target.value.replace(/\s+/g, '_') })} required />
+              {/* ── Skill Templates ──────────────────────────────────────── */}
+              <div style={{ padding: 16, background: 'var(--surface)', borderRadius: 10, border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14 }}>📋 Skill Templates</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click a template to pre-fill the form</span>
                 </div>
-                <div className="form-group">
-                  <label className="form-label">Description (Tell the AI *when* to use this)</label>
-                  <input className="input" value={newSkill.description} onChange={e => setNewSkill({ ...newSkill, description: e.target.value })} required />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {[
+                    { label: 'Send Email', type: 'nl', icon: '📧', name: 'send_email', description: 'Send an email via Gmail/ SMTP', instruction: 'Compose and send an email. Use the input to specify recipient, subject, and body. If a Gmail connector is available, use it; otherwise return the email content for manual sending.' },
+                    { label: 'Slack Alert', type: 'nl', icon: '💬', name: 'slack_alert', description: 'Post a message to a Slack channel', instruction: 'Post a message to the specified Slack channel. Format the message clearly with markdown. Include relevant context from the task.' },
+                    { label: 'Lookup Jira', type: 'api', icon: '🎫', name: 'lookup_jira', description: 'Fetch a Jira ticket by key', url: 'https://your-domain.atlassian.net/rest/api/3/issue/{{input.issue_key}}', method: 'GET', headers: '{\n  "Authorization": "Bearer {{config.jira_token}}"\n}' },
+                    { label: 'GitHub PR', type: 'api', icon: '🐙', name: 'github_pr', description: 'Create a GitHub Pull Request', url: 'https://api.github.com/repos/{{input.owner}}/{{input.repo}}/pulls', method: 'POST', headers: '{\n  "Authorization": "Bearer {{config.github_token}}",\n  "Content-Type": "application/json"\n}', bodyTemplate: '{\n  "title": "{{input.title}}",\n  "head": "{{input.branch}}",\n  "base": "main",\n  "body": "{{input.description}}"\n}' },
+                    { label: 'DB Query', type: 'nl', icon: '🗄️', name: 'db_query', description: 'Run a SQL query against a database', instruction: 'Run a SQL query. Use the database connector tool (db__*) to execute a SELECT statement. Return the results as a formatted table. Never run DDL or DML.' },
+                    { label: 'Web Scraper', type: 'code', icon: '🕸️', name: 'web_scraper', description: 'Fetch and extract content from a URL', code: 'const url = input.url || "https://example.com";\nconst res = await fetch(url, {\n  headers: { "User-Agent": "Kuvalam-Agent/1.0" }\n});\nif (!res.ok) throw new Error(`HTTP ${res.status}`);\nconst html = await res.text();\n// Extract text content (strip HTML tags)\nconst text = html.replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 10000);\nreturn { url, contentLength: text.length, snippet: text.slice(0, 500) };' },
+                    { label: 'Gen Report', type: 'code', icon: '📊', name: 'generate_report', description: 'Generate a formatted markdown report', code: 'const title = input.title || "Report";\nconst sections = input.sections || [];\nlet report = `# ${title}\\n\\n**Generated:** ${new Date().toISOString()}\\n\\n`;\nfor (const s of sections) {\n  report += `## ${s.heading}\\n\\n${s.body}\\n\\n`;\n}\nif (input.data) {\n  report += "## Data\\n\\n";\n  report += "| Key | Value |\\n| --- | --- |\\n";\n  for (const [k, v] of Object.entries(input.data)) {\n    report += `| ${k} | ${v} |\\n`;\n  }\n  report += "\\n";\n}\nreturn { report, format: "markdown" };' },
+                    { label: 'Webhook Call', type: 'api', icon: '🔔', name: 'webhook_call', description: 'Trigger a webhook with payload', url: '{{input.webhook_url}}', method: 'POST', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '{\n  "event": "{{input.event}}",\n  "payload": {{input.payload}},\n  "timestamp": "{{$now}}"\n}' },
+                    { label: 'Transform JSON', type: 'code', icon: '🔄', name: 'transform_data', description: 'Transform JSON data with a mapping', code: 'const data = input.data || {};\nconst mapping = input.mapping || {};\nconst result = {};\nfor (const [key, path] of Object.entries(mapping)) {\n  const value = path.split(".").reduce((obj, k) => obj?.[k], data);\n  result[key] = value ?? null;\n}\nreturn { original: data, transformed: result };' },
+                    { label: 'Python Analysis', type: 'code', icon: '🐍', name: 'data_analysis', description: 'Analyse data with Python (pandas)', code: 'def run(input):\n    import json\n    data = input.get("data", [])\n    field = input.get("field", "value")\n    values = [d.get(field, 0) for d in data if isinstance(d, dict)]\n    return {\n        "count": len(values),\n        "sum": sum(values),\n        "avg": sum(values) / len(values) if values else 0,\n        "min": min(values) if values else 0,\n        "max": max(values) if values else 0\n    }', language: 'python' },
+                  ].map(tpl => (
+                    <button
+                      key={tpl.label}
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ fontSize: 12, padding: '4px 10px' }}
+                      onClick={() => {
+                        setNewSkill({
+                          type: tpl.type as 'nl' | 'api' | 'code',
+                          name: tpl.name,
+                          description: tpl.description,
+                          instruction: (tpl as any).instruction || '',
+                          code: (tpl as any).code || '',
+                          url: (tpl as any).url || '',
+                          method: (tpl as any).method || 'GET',
+                          headers: (tpl as any).headers || '{\n  "Content-Type": "application/json"\n}',
+                          bodyTemplate: (tpl as any).bodyTemplate || '',
+                          language: (tpl as any).language || 'javascript',
+                        });
+                        toast('info', `Template "${tpl.label}" applied`, 'Review and customise before saving.');
+                      }}
+                    >
+                      {tpl.icon} {tpl.label}
+                    </button>
+                  ))}
                 </div>
               </div>
-              
-              {newSkill.type === 'nl' ? (
-                <div className="form-group">
-                  <label className="form-label">Instructions (Plain English)</label>
-                  <textarea 
-                    className="input" 
-                    rows={6} 
-                    value={newSkill.instruction} 
-                    onChange={e => setNewSkill({ ...newSkill, instruction: e.target.value })} 
-                    placeholder="Describe exactly what the agent should do when using this skill. e.g. 'To generate a report, first fetch the sales data, then format it as a markdown table...'" 
-                    required={newSkill.type === 'nl'}
-                  />
-                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                    When the agent uses this skill, it will read these instructions and spawn a specialized sub-agent to execute them securely.
-                  </p>
-                </div>
-              ) : newSkill.type === 'api' ? (
-                <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 16 }}>
-                    <div className="form-group">
-                      <label className="form-label">Method</label>
-                      <select className="input" value={newSkill.method} onChange={e => setNewSkill({ ...newSkill, method: e.target.value })}>
-                        <option value="GET">GET</option>
-                        <option value="POST">POST</option>
-                        <option value="PUT">PUT</option>
-                        <option value="DELETE">DELETE</option>
-                      </select>
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">API URL</label>
-                      <input className="input" value={newSkill.url} onChange={e => setNewSkill({ ...newSkill, url: e.target.value })} placeholder="https://api.example.com/v1/data" required={newSkill.type === 'api'} />
-                      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>You can use `{"{{input.parameter}}"}` to map AI arguments into the URL.</p>
-                    </div>
-                  </div>
-                  
-                  <div className="form-group">
-                    <label className="form-label">Headers (JSON format)</label>
-                    <textarea className="input" rows={3} style={{ fontFamily: 'monospace' }} value={newSkill.headers} onChange={e => setNewSkill({ ...newSkill, headers: e.target.value })} />
-                  </div>
-                  
-                  {['POST', 'PUT', 'PATCH'].includes(newSkill.method) && (
-                    <div className="form-group">
-                      <label className="form-label">Body Template (JSON format)</label>
-                      <textarea className="input" rows={4} style={{ fontFamily: 'monospace' }} value={newSkill.bodyTemplate} onChange={e => setNewSkill({ ...newSkill, bodyTemplate: e.target.value })} placeholder={'{\n  "query": "{{input.query}}"\n}'} />
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div className="form-group">
-                    <label className="form-label">Node.js Sandbox Script</label>
-                    <div style={{ borderRadius: 6, overflow: 'hidden', border: '1px solid #1e293b' }}>
-                      <Editor
-                        value={newSkill.code}
-                        onValueChange={code => setNewSkill({ ...newSkill, code })}
-                        highlight={code => Prism.highlight(code, Prism.languages.javascript, 'javascript')}
-                        padding={16}
-                        style={{
-                          fontFamily: '"Fira Code", "JetBrains Mono", monospace',
-                          fontSize: 13,
-                          backgroundColor: '#1d1f21',
-                          color: '#c5c8c6',
-                          minHeight: 200
-                        }}
-                        textareaClassName="code-editor-textarea"
-                      />
-                    </div>
-                    <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                      Example: <code>{"const res = await fetch(`https://api.example.com/data?q=${input.query}`); return await res.json();"}</code>
-                    </p>
-                  </div>
 
-                  {/* Test Panel */}
-                  <div style={{ background: 'var(--surface)', padding: 16, borderRadius: 8, border: '1px solid var(--border)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
-                      <div className="form-group" style={{ flex: 1, margin: 0 }}>
-                        <label className="form-label" style={{ fontSize: 12 }}>Test Input (JSON)</label>
-                        <textarea 
-                          className="input" 
-                          rows={3} 
-                          style={{ fontFamily: 'monospace', fontSize: 12 }}
-                          value={testInput} 
-                          onChange={e => setTestInput(e.target.value)} 
-                        />
+              {/* ── Skill Type Tabs ──────────────────────────────────────────── */}
+              <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border)', paddingBottom: 16 }}>
+                <button 
+                  type="button"
+                  className={`btn ${newSkill.type === 'nl' ? 'btn-primary' : 'btn-secondary'}`} 
+                  onClick={() => setNewSkill({ ...newSkill, type: 'nl' })}
+                >
+                  📝 Natural Language
+                </button>
+                <button 
+                  type="button"
+                  className={`btn ${newSkill.type === 'api' ? 'btn-primary' : 'btn-secondary'}`} 
+                  onClick={() => setNewSkill({ ...newSkill, type: 'api' })}
+                >
+                  🔗 API Endpoint
+                </button>
+                <button 
+                  type="button"
+                  className={`btn ${newSkill.type === 'code' && newSkill.language === 'javascript' ? 'btn-primary' : 'btn-secondary'}`} 
+                  onClick={() => setNewSkill({ ...newSkill, type: 'code', language: 'javascript' })}
+                >
+                  ⚡ JS Script
+                </button>
+                <button 
+                  type="button"
+                  className={`btn ${newSkill.type === 'code' && newSkill.language === 'python' ? 'btn-primary' : 'btn-secondary'}`} 
+                  onClick={() => setNewSkill({ ...newSkill, type: 'code', language: 'python' })}
+                >
+                  🐍 Python Script
+                </button>
+              </div>
+
+              {/* ── AI Generate Skill ────────────────────────────────────── */}
+              <div style={{ padding: 16, background: 'linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.08))', borderRadius: 10, border: '1px solid rgba(139,92,246,0.25)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <span style={{ fontSize: 18 }}>✨</span>
+                  <span style={{ fontWeight: 700, fontSize: 14 }}>AI Generate</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Describe what you need and AI will fill in the form</span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                  <div style={{ flex: 1 }}>
+                    <textarea
+                      className="input"
+                      rows={2}
+                      value={skillPrompt}
+                      onChange={e => setSkillPrompt(e.target.value)}
+                      placeholder={
+                        newSkill.type === 'nl'
+                          ? 'e.g. Search the CRM for a customer by email, then send them a follow-up'
+                          : newSkill.type === 'api'
+                          ? 'e.g. Look up a GitHub user profile and return their public repos'
+                          : 'e.g. Fetch stock price data and calculate the 7-day moving average'
+                      }
+                      style={{ fontSize: 13, resize: 'vertical' }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={async () => {
+                      if (!skillPrompt.trim() || skillPrompt.trim().length < 10) {
+                        toast('error', 'Too short', 'Please describe the skill in at least 10 characters.')
+                        return
+                      }
+                      setGeneratingSkill(true)
+                      try {
+                        const res = await api.generateSkill(tenantId, {
+                          prompt: skillPrompt.trim(),
+                          skillType: newSkill.type,
+                          language: newSkill.language as 'javascript' | 'python',
+                        })
+                        const data = res.data || res
+                        // Pre-fill the form with AI-generated values
+                        setNewSkill(prev => ({
+                          ...prev,
+                          name: data.name || prev.name,
+                          description: data.description || prev.description,
+                          instruction: data.instruction || prev.instruction,
+                          code: data.code || prev.code,
+                          url: data.url || prev.url,
+                          method: data.method || prev.method,
+                          headers: typeof data.headers === 'object' ? JSON.stringify(data.headers, null, 2) : (data.headers || prev.headers),
+                          bodyTemplate: typeof data.bodyTemplate === 'object' ? JSON.stringify(data.bodyTemplate, null, 2) : (data.bodyTemplate || prev.bodyTemplate),
+                          language: data.language || prev.language,
+                        }))
+                        setSkillPrompt('')
+                        toast('success', 'Skill generated!', 'Review the fields and save when ready.')
+                      } catch (err: any) {
+                        toast('error', 'Generation failed', err.message || 'Please try again.')
+                      } finally {
+                        setGeneratingSkill(false)
+                      }
+                    }}
+                    disabled={generatingSkill || !skillPrompt.trim()}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    {generatingSkill ? '⏳ Generating...' : '✨ Generate'}
+                  </button>
+                </div>
+              </div>
+
+              <form onSubmit={saveSkill} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* ── Name & Description ──────────────────────────────────── */}
+                <div className="card" style={{ padding: 16 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">Skill Name <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(snake_case, e.g. search_crm)</span></label>
+                      <input className="input" value={newSkill.name} onChange={e => setNewSkill({ ...newSkill, name: e.target.value.replace(/\s+/g, '_') })} required placeholder="e.g. search_crm" />
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Description <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(tell the AI *when* to use this)</span></label>
+                      <input className="input" value={newSkill.description} onChange={e => setNewSkill({ ...newSkill, description: e.target.value })} required placeholder="e.g. Search the CRM for a customer by email" />
+                    </div>
+                  </div>
+                </div>
+              
+                {newSkill.type === 'nl' ? (
+                  <div className="card" style={{ padding: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">🧠 Instructions (Plain English)</label>
+                      <textarea 
+                        className="input" 
+                        rows={6} 
+                        value={newSkill.instruction} 
+                        onChange={e => setNewSkill({ ...newSkill, instruction: e.target.value })} 
+                        placeholder="Describe exactly what the agent should do when using this skill. e.g. 'To generate a report, first fetch the sales data from the database, then format it as a markdown table with columns for date, revenue, and growth rate.'" 
+                        required={newSkill.type === 'nl'}
+                        style={{ fontSize: 13, lineHeight: 1.6 }}
+                      />
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, padding: '8px 12px', background: 'var(--surface)', borderRadius: 6, border: '1px dashed var(--border)' }}>
+                        💡 <strong>Tip:</strong> The agent reads these instructions and spawns a sub-agent to execute them. Be specific about steps, data sources, and expected output format.
+                      </p>
+                    </div>
+                  </div>
+                ) : newSkill.type === 'api' ? (
+                  <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 16 }}>
+                      <div className="form-group">
+                        <label className="form-label">Method</label>
+                        <select className="input" value={newSkill.method} onChange={e => setNewSkill({ ...newSkill, method: e.target.value })}>
+                          <option value="GET">GET</option>
+                          <option value="POST">POST</option>
+                          <option value="PUT">PUT</option>
+                          <option value="DELETE">DELETE</option>
+                        </select>
                       </div>
-                      <button type="button" className="btn btn-secondary" onClick={testSkill} disabled={isTesting || !newSkill.code} style={{ marginTop: 24 }}>
-                        {isTesting ? 'Running...' : '▶ Test Skill'}
-                      </button>
+                      <div className="form-group">
+                        <label className="form-label">API URL</label>
+                        <input className="input" value={newSkill.url} onChange={e => setNewSkill({ ...newSkill, url: e.target.value })} placeholder="https://api.example.com/v1/data" required={newSkill.type === 'api'} />
+                        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Use <code>{'{{input.parameter}}'}</code> for dynamic arguments and <code>{'{{config.key}}'}</code> for connector secrets.</p>
+                      </div>
                     </div>
                     
-                    {testResult && (
-                      <div style={{ marginTop: 12, padding: 12, borderRadius: 6, background: '#0f1117', borderLeft: `3px solid ${testResult.success ? '#22c55e' : '#ef4444'}` }}>
-                        <div style={{ color: testResult.success ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4 }}>
-                          {testResult.success ? 'Success' : 'Error'}
-                        </div>
-                        <pre style={{ margin: 0, color: '#e2e8f0', fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 150, overflowY: 'auto' }}>
-                          {testResult.success ? JSON.stringify(testResult.data, null, 2) : testResult.error}
-                        </pre>
+                    <div className="form-group">
+                      <label className="form-label">Headers <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(JSON)</span></label>
+                      <textarea className="input" rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} value={newSkill.headers} onChange={e => setNewSkill({ ...newSkill, headers: e.target.value })} />
+                    </div>
+                    
+                    {['POST', 'PUT', 'PATCH'].includes(newSkill.method) && (
+                      <div className="form-group">
+                        <label className="form-label">Body Template <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(JSON)</span></label>
+                        <textarea className="input" rows={4} style={{ fontFamily: 'monospace', fontSize: 12 }} value={newSkill.bodyTemplate} onChange={e => setNewSkill({ ...newSkill, bodyTemplate: e.target.value })} placeholder={'{\n  "query": "{{input.query}}"\n}'} />
                       </div>
                     )}
                   </div>
-                </>
-              )}
+                ) : newSkill.type === 'code' && newSkill.language === 'python' ? (
+                  <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">🐍 Python Script</label>
+                      <div style={{ borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                        <textarea
+                          className="input"
+                          rows={12}
+                          value={newSkill.code}
+                          onChange={e => setNewSkill({ ...newSkill, code: e.target.value })}
+                          placeholder={`def run(input):\n    # input is a dict with task arguments\n    query = input.get("query", "")\n    result = {"message": f"Query was: {query}"}\n    return result`}
+                          style={{ fontFamily: '"Fira Code", "JetBrains Mono", monospace', fontSize: 13, minHeight: 220, background: '#1d1f21', color: '#c5c8c6' }}
+                        />
+                      </div>
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, padding: '8px 12px', background: 'var(--surface)', borderRadius: 6, border: '1px dashed var(--border)' }}>
+                        🐍 <strong>Tip:</strong> Define a <code>run(input)</code> function that returns a dict. Use <code>input</code> for arguments. Example: <code>{'def run(input):\n    return {"sum": input["a"] + input["b"]}'}</code>
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">⚡ JavaScript Sandbox Script</label>
+                      <div style={{ borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                        <Editor
+                          value={newSkill.code}
+                          onValueChange={code => setNewSkill({ ...newSkill, code })}
+                          highlight={code => Prism.highlight(code, Prism.languages.javascript, 'javascript')}
+                          padding={16}
+                          style={{
+                            fontFamily: '"Fira Code", "JetBrains Mono", monospace',
+                            fontSize: 13,
+                            backgroundColor: '#1d1f21',
+                            color: '#c5c8c6',
+                            minHeight: 220
+                          }}
+                          textareaClassName="code-editor-textarea"
+                        />
+                      </div>
+                      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, padding: '8px 12px', background: 'var(--surface)', borderRadius: 6, border: '1px dashed var(--border)' }}>
+                        💡 <strong>Tip:</strong> Use <code>input</code> for arguments. Return a value or object. <code>fetch()</code> is available globally. Example: <code>{"const res = await fetch(`https://api.example.com/data?q=${input.query}`); return await res.json();"}</code>
+                      </p>
+                    </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 8 }}>
-                <button type="button" className="btn btn-secondary" onClick={() => {
-                  setShowSkillModal(false); setTestResult(null)
-                }}>Cancel</button>
-                <button type="submit" className="btn btn-primary" disabled={!newSkill.name || (newSkill.type === 'code' ? !newSkill.code : newSkill.type === 'api' ? !newSkill.url : !newSkill.instruction)}>Save Skill</button>
-              </div>
-            </form>
+                    {/* Test Panel */}
+                    <div className="card" style={{ padding: 16, background: 'var(--surface)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+                        <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                          <label className="form-label" style={{ fontSize: 12 }}>🧪 Test Input <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(JSON)</span></label>
+                          <textarea 
+                            className="input" 
+                            rows={3} 
+                            style={{ fontFamily: 'monospace', fontSize: 12 }}
+                            value={testInput} 
+                            onChange={e => setTestInput(e.target.value)} 
+                            placeholder='{"query": "example"}'
+                          />
+                        </div>
+                        <button type="button" className="btn btn-secondary" onClick={testSkill} disabled={isTesting || !newSkill.code} style={{ marginTop: 24, whiteSpace: 'nowrap' }}>
+                          {isTesting ? '⏳ Running...' : '▶ Test Skill'}
+                        </button>
+                      </div>
+                      
+                      {testResult && (
+                        <div style={{ marginTop: 12, padding: 12, borderRadius: 6, background: '#0f1117', borderLeft: `3px solid ${testResult.success ? '#22c55e' : '#ef4444'}` }}>
+                          <div style={{ color: testResult.success ? '#22c55e' : '#ef4444', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', marginBottom: 4 }}>
+                            {testResult.success ? '✓ Success' : '✗ Error'}
+                          </div>
+                          <pre style={{ margin: 0, color: '#e2e8f0', fontSize: 12, whiteSpace: 'pre-wrap', maxHeight: 150, overflowY: 'auto' }}>
+                            {testResult.success ? JSON.stringify(testResult.data, null, 2) : testResult.error}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </form>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" onClick={() => {
+                setShowSkillModal(false); setTestResult(null)
+              }}>Cancel</button>
+              <button type="submit" className="btn btn-primary" onClick={saveSkill} disabled={!newSkill.name || (newSkill.type === 'api' ? !newSkill.url : newSkill.type === 'nl' ? !newSkill.instruction : !newSkill.code)}>💾 Save Skill</button>
+            </div>
           </div>
         </div>
       )}

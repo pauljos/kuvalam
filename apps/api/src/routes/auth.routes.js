@@ -134,6 +134,17 @@ export default async function authRoutes(fastify) {
         maxAge: 15 * 60
       })
 
+      // IMPORTANT: also rotate the refresh token cookie so the browser
+      // always holds the latest valid token. Without this, the next
+      // refresh attempt would send the old (now revoked) token and fail.
+      reply.setCookie('kuvalam_refresh', result.refreshToken, {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: isProduction ? 'strict' : 'lax',
+        path: '/api/v1/auth',
+        maxAge: 30 * 24 * 60 * 60 // 30 days
+      })
+
       // Return accessToken in body for cross-origin requests
       return reply.send({
         success: true,

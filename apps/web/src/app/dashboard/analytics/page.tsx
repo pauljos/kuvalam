@@ -55,27 +55,42 @@ function DailyChart({ data }: { data: any[] }) {
   )
 }
 
+const DATE_PRESETS = [
+  { label: '7 days', value: 7 },
+  { label: '14 days', value: 14 },
+  { label: '30 days', value: 30 },
+  { label: '90 days', value: 90 },
+]
+
 export default function AnalyticsPage() {
-  const { tenantId } = useApp()
+  const { tenantId, toast } = useApp()
   const [analytics, setAnalytics] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [refreshed, setRefreshed] = useState<Date | null>(null)
+  const [dateRange, setDateRange] = useState(30)
 
   useEffect(() => {
     if (tenantId) loadAnalytics(tenantId)
   }, [tenantId])
 
-  async function loadAnalytics(tid: string) {
+  async function loadAnalytics(tid: string, days?: number) {
+    const range = days ?? dateRange
     setLoading(true)
     try {
-      const data = await api.getAnalytics(tid)
+      const data = await api.getAnalytics(tid, { days: range })
       setAnalytics(data)
       setRefreshed(new Date())
     } catch (err) {
       console.error(err)
+      toast('error', 'Failed to load analytics', (err as any)?.message || '')
     } finally {
       setLoading(false)
     }
+  }
+
+  function changeRange(days: number) {
+    setDateRange(days)
+    loadAnalytics(tenantId, days)
   }
 
   if (loading) {
@@ -118,9 +133,25 @@ export default function AnalyticsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Analytics</h1>
-          <p className="page-sub">30-day operational metrics across your agents</p>
+          <p className="page-sub">Operational metrics across your agents</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 4, background: 'var(--bg)', borderRadius: 8, padding: 3, border: '1px solid var(--border)' }}>
+            {DATE_PRESETS.map(p => (
+              <button
+                key={p.value}
+                onClick={() => changeRange(p.value)}
+                style={{
+                  padding: '5px 12px', fontSize: 12, fontWeight: 700, border: 'none', borderRadius: 6,
+                  background: dateRange === p.value ? 'var(--green)' : 'transparent',
+                  color: dateRange === p.value ? '#fff' : 'var(--text-muted)',
+                  cursor: 'pointer', transition: 'all 0.15s',
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
           {refreshed && (
             <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               Updated {refreshed.toLocaleTimeString()}
@@ -277,17 +308,20 @@ export default function AnalyticsPage() {
                       width: 32, height: 32, borderRadius: 8, background: 'var(--green-pale)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14
                     }}>
-                      {event.actor_type === 'USER' ? '👤' : event.actor_type === 'AGENT' ? '⚡' : '⚙️'}
+                      {event.actor?.type === 'USER' ? '👤' : event.actor?.type === 'AGENT' ? '⚡' : '⚙️'}
                     </div>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{event.action?.replace(/_/g, ' ')}</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }}>
+                        {event.summary || event.action?.replace(/_/g, ' ')}
+                      </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {event.resource_type} · {event.actor_type.toLowerCase()}
+                        {event.actor?.name ?? event.actor?.id} · {event.eventType?.replace(/_/g, ' ').replace('agent.', '').replace('workflow.', '')}
+                        {event.durationMs ? ` · ${event.durationMs > 1000 ? `${(event.durationMs / 1000).toFixed(1)}s` : `${event.durationMs}ms`}` : ''}
                       </div>
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right' }}>
-                    {new Date(event.created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                    {event.timestamp ? new Date(event.timestamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''}
                   </div>
                 </div>
               ))}

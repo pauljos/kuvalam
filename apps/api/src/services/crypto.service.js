@@ -19,13 +19,15 @@ function deriveKey(masterSecret, salt) {
 
 function getMasterSecret() {
   const secret = process.env.CREDENTIAL_ENCRYPTION_KEY
-  if (!secret || secret.length < 32) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('CREDENTIAL_ENCRYPTION_KEY must be set to a 32+ char secret in production')
-    }
-    // Dev fallback — NOT safe for production
-    return 'kuvalam-dev-credential-key-min-32-chars'
+  
+  if (!secret) {
+    throw new Error('CREDENTIAL_ENCRYPTION_KEY environment variable is required. Please set it to a secure random string (min 32 characters).')
   }
+  
+  if (secret.length < 32) {
+    throw new Error('CREDENTIAL_ENCRYPTION_KEY must be at least 32 characters long for security.')
+  }
+  
   return secret
 }
 
@@ -60,22 +62,27 @@ export function encrypt(plaintext) {
 export function decrypt(ciphertext) {
   if (!ciphertext || !ciphertext.includes(':')) return ciphertext
 
-  const master = getMasterSecret()
   const parts = ciphertext.split(':')
   if (parts.length !== 4) return ciphertext // Not encrypted — pass through
 
-  const [saltB64, ivB64, tagB64, dataB64] = parts
-  const salt = Buffer.from(saltB64, 'base64')
-  const iv = Buffer.from(ivB64, 'base64')
-  const tag = Buffer.from(tagB64, 'base64')
-  const data = Buffer.from(dataB64, 'base64')
+  try {
+    const master = getMasterSecret()
+    const [saltB64, ivB64, tagB64, dataB64] = parts
+    const salt = Buffer.from(saltB64, 'base64')
+    const iv = Buffer.from(ivB64, 'base64')
+    const tag = Buffer.from(tagB64, 'base64')
+    const data = Buffer.from(dataB64, 'base64')
 
-  const key = deriveKey(master, salt)
-  const decipher = createDecipheriv(ALGORITHM, key, iv)
-  decipher.setAuthTag(tag)
+    const key = deriveKey(master, salt)
+    const decipher = createDecipheriv(ALGORITHM, key, iv)
+    decipher.setAuthTag(tag)
 
-  const decrypted = Buffer.concat([decipher.update(data), decipher.final()])
-  return decrypted.toString('utf8')
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()])
+    return decrypted.toString('utf8')
+  } catch {
+    // Decryption failed — return as-is (may be plaintext or encrypted with old key)
+    return ciphertext
+  }
 }
 
 /**

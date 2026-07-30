@@ -1,0 +1,11 @@
+Version,Updated by ,Changes ,Associated Ticket
+v1.1,Dravika,Data Contract,
+v1.2,Dravika,Data MI Requirement,
+v1.3,Dravika,New Columns and tables added,
+v1.4,Dravika,Updated mapping logics and business descriptions.,
+v1.5,Dravika,Review Comments ,
+v1.5,Dravika,added src_process_request_key in fact_policy_process for reporting. ,https://directline.atlassian.net/browse/MDA-3234
+v1.6,Dravika ,added IPSOS/CSI related fields,https://directline.atlassian.net/browse/MDA-3215
+v1.6,Dravika ,Added DLM related columns.,https://directline.atlassian.net/browse/MDA-3309
+v1.7,Dravika ,Added column in fact_insured_risk table and fact_task_detail,https://directline.atlassian.net/browse/MODE-120
+v1.7,Dravika,Added column in dim_policy ,https://directline.atlassian.net/browse/MODE-523

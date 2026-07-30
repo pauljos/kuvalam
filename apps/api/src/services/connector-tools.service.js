@@ -20,6 +20,7 @@ import { promisify } from 'util'
 import { createHmac } from 'crypto'
 
 const execAsync = promisify(exec)
+export { execAsync }
 import { query } from '../db/pool.js'
 import { decryptCredentials } from './crypto.service.js'
 import { getValidAccessToken } from './oauth.service.js'
@@ -66,6 +67,17 @@ export async function verifyConnector(conn) {
   // running SELECT 1 — no OAuth / API_KEY dance applies.
   if (conn.tool_id === 'database' || conn.tool_id === 'postgres') {
     return verifyDatabaseConnector(conn)
+  }
+
+  // Knowledge Graph connectors — verify via Neo4j/ArangoDB ping
+  if (conn.tool_id === 'knowledge-graph') {
+    const { verifyGraphConnector } = await import('./graph-knowledge.service.js')
+    return verifyGraphConnector(conn)
+  }
+
+  // Vector DB connectors — verify by checking reachability
+  if (conn.tool_id === 'vector-db') {
+    return verifyVectorDbConnector(conn, decryptedConfig)
   }
 
   // Generic REST connector — check baseUrl + auth shape, optionally ping a healthCheck path
@@ -116,12 +128,18 @@ function requiredFieldsFor(toolId) {
   switch (toolId) {
     case 'jira':    return ['apiKey', 'baseUrl', 'email']
     case 'github':  return ['token']
+    case 'docker':  return ['socketPath']
     case 'notion':  return ['apiKey']
     case 'linear':  return ['apiKey']
     case 'webhook': return ['url']
+    case 'whatsapp': return ['phoneNumberId', 'accessToken']
+    case 'telegram': return ['botToken']
     // Slack normally uses OAuth, but users can also paste a bot token
     case 'slack':   return ['token']
+    case 'ssh':     return ['host']
     case 'local-dir': return ['path']
+    case 'knowledge-graph': return ['baseUrl', 'username', 'password']
+    case 'vector-db': return ['baseUrl']
     default:        return []
   }
 }
@@ -139,6 +157,24 @@ async function getSlackToken(conn) {
     return cfg.token.trim()
   }
   return await getValidAccessToken(conn.tenant_id, conn.id)
+}
+
+/**
+ * Verify a vector-db connector by pinging the base URL.
+ */
+async function verifyVectorDbConnector(conn, decryptedConfig) {
+  try {
+    const baseUrl = decryptedConfig.baseUrl
+    if (!baseUrl) return { success: false, message: 'Base URL is required' }
+    const resp = await fetch(`${baseUrl}/.well-known/ready`, { signal: AbortSignal.timeout(5000) })
+    if (resp.ok) return { success: true, message: 'Vector DB reachable' }
+    // Some vector DBs don't have a health endpoint — try the root
+    const resp2 = await fetch(baseUrl, { signal: AbortSignal.timeout(5000) })
+    if (resp2.ok || resp2.status === 401) return { success: true, message: 'Vector DB reachable (auth required)' }
+    return { success: false, message: `Vector DB returned ${resp2.status}` }
+  } catch (err) {
+    return { success: false, message: `Vector DB unreachable: ${err.message}` }
+  }
 }
 
 /**
@@ -198,12 +234,34 @@ async function providerPing(toolId, { token, config }) {
         const base = String(config.baseUrl || '').replace(/\/$/, '')
         assertSafeUrl(base)
         const basic = Buffer.from(`${config.email}:${config.apiKey}`).toString('base64')
-        const res = await fetchWithTimeout(`${base}/rest/api/3/myself`, {
-          headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' }
-        })
-        if (!res.ok) return { success: false, message: `Jira /myself returned ${res.status}` }
-        const body = await res.json().catch(() => ({}))
-        return { success: true, message: `Connected as ${body.displayName || body.emailAddress || 'Jira user'}` }
+
+        // Try Jira Cloud API v3 first, then fall back to Jira Server v2
+        const paths = ['/rest/api/3/myself', '/rest/api/2/myself']
+        let lastErr = null
+
+        for (const path of paths) {
+          try {
+            const res = await fetchWithTimeout(`${base}${path}`, {
+              headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' }
+            })
+            if (res.ok) {
+              const body = await res.json().catch(() => ({}))
+              const user = body.displayName || body.emailAddress || 'Jira user'
+              const apiVer = path.includes('/3/') ? 'Cloud' : 'Server'
+              return { success: true, message: `Connected as ${user} (${apiVer})` }
+            }
+            if (res.status === 401) {
+              lastErr = `Authentication failed (401). Check that: 1) Your API token is correct (generate at https://id.atlassian.com/manage-profile/security/api-tokens), 2) Your email matches the Atlassian account that created the token`
+            } else if (res.status === 404) {
+              lastErr = null // try next path
+            } else {
+              lastErr = `Jira returned HTTP ${res.status}: ${res.statusText || 'Unknown error'}`
+            }
+          } catch (err) {
+            lastErr = `Jira ping failed: ${err.message}`
+          }
+        }
+        return { success: false, message: lastErr || 'Jira instance not reachable. Check your base URL (e.g. https://your-domain.atlassian.net for Cloud, or https://jira.your-company.com for self-hosted).' }
       }
       case 'github': {
         const res = await fetchWithTimeout('https://api.github.com/user', {
@@ -236,6 +294,48 @@ async function providerPing(toolId, { token, config }) {
         // many endpoints have side effects. Reachability check via HEAD is often blocked.
         assertSafeUrl(config.url)
         return { success: true, message: `Webhook target ${config.url} accepted (no live ping)` }
+      }
+      case 'telegram': {
+        // Verify Telegram Bot API credentials by calling getMe
+        const botToken = config.botToken || config.bot_token
+        if (!botToken) {
+          return { success: false, message: 'Telegram requires a bot token (get from @BotFather)' }
+        }
+        try {
+          const res = await fetchWithTimeout(
+            `https://api.telegram.org/bot${botToken}/getMe`,
+            { headers: { 'User-Agent': 'kuvalam-agent/1.0' } }
+          )
+          const body = await res.json().catch(() => ({}))
+          if (!body.ok) {
+            return { success: false, message: `Telegram API error: ${body.description || res.status} — check your bot token` }
+          }
+          const bot = body.result
+          return { success: true, message: `Connected to Telegram bot: @${bot.username} (${bot.first_name})` }
+        } catch (err) {
+          return { success: false, message: `Telegram connection failed: ${err.message}` }
+        }
+      }
+      case 'whatsapp': {
+        // Verify WhatsApp Cloud API credentials by querying phone number info
+        const phoneNumberId = config.phoneNumberId || config.phone_number_id
+        const accessToken = config.accessToken || config.access_token
+        if (!phoneNumberId || !accessToken) {
+          return { success: false, message: 'WhatsApp requires phoneNumberId and accessToken (generate from Meta Business app → WhatsApp → API Setup)' }
+        }
+        try {
+          const res = await fetchWithTimeout(
+            `https://graph.facebook.com/v21.0/${phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          )
+          const body = await res.json().catch(() => ({}))
+          if (!res.ok) {
+            return { success: false, message: `WhatsApp API error: ${body.error?.message || res.status} — check your access token and phone number ID` }
+          }
+          return { success: true, message: `Connected to WhatsApp: ${body.display_phone_number} (${body.verified_name})` }
+        } catch (err) {
+          return { success: false, message: `WhatsApp connection failed: ${err.message}` }
+        }
       }
       case 'salesforce': {
         // Salesforce OAuth grants an instance URL alongside the token.
@@ -281,15 +381,15 @@ export async function getConnectorToolDefinitions(tenantId) {
     // Database connectors get per-instance tool names so an agent can
     // distinguish "the sales DB" from "the warehouse DB" (much like MCP).
     if (c.tool_id === 'database' || c.tool_id === 'postgres') {
-      for (const d of databaseToolDefs(c)) defs.push(d)
+      for (const d of databaseToolDefs(c)) { d._connectorId = c.id; defs.push(d) }
       continue
     }
     // Generic REST connectors expose one tool per user-defined operation.
     if (c.tool_id === 'rest') {
-      for (const d of restToolDefs(c)) defs.push(d)
+      for (const d of restToolDefs(c)) { d._connectorId = c.id; defs.push(d) }
       continue
     }
-    for (const d of toolDefsForProvider(c)) defs.push(d)
+    for (const d of toolDefsForProvider(c)) { d._connectorId = c.id; defs.push(d) }
   }
   return defs
 }
@@ -580,11 +680,13 @@ function databaseToolDefs(conn) {
       name: `db__${slug}__query`,
       description:
         `${label} Run a read-only SQL SELECT (or WITH … SELECT). Multi-statement and DDL/DML are rejected. ` +
-        `Result is capped at 200 rows. Use $1, $2, … for parameterisation.`,
+        `Result is capped at 200 rows. Use $1, $2, … for parameterisation. ` +
+        `⚠️  CRITICAL: You MUST call list_tables AND describe_table BEFORE this tool. Never guess table or column names — use only names confirmed by describe_table. ` +
+        `If this tool returns an error, DO NOT fabricate data — report the error honestly and retry with corrected SQL.`,
       inputSchema: {
         type: 'object', required: ['sql'],
         properties: {
-          sql:    { type: 'string', description: 'A single SELECT / WITH … SELECT statement' },
+          sql:    { type: 'string', description: 'A single SELECT / WITH … SELECT statement using ONLY table/column names confirmed by describe_table' },
           params: { type: 'array', description: 'Positional parameters for $1, $2, …', items: {} },
           limit:  { type: 'integer', description: 'Row cap (max 200)', maximum: 200 }
         }
@@ -597,38 +699,38 @@ function toolDefsForProvider(conn) {
   switch (conn.tool_id) {
     case 'local-shell': return [{
       name: 'local_shell__execute',
-      description: `[Local Shell: ${conn.name}] Execute a bash/zsh command locally on the host machine.`,
+      description: `[Local Shell: ${conn.name}] Execute a bash/zsh command on the host. MANDATORY: you MUST provide "command" — the shell command string to execute (e.g. "ls -la" or "cat /etc/hosts").`,
       inputSchema: {
-        type: 'object', required: ['command'], properties: { command: { type: 'string', description: 'The shell command to run' } }
+        type: 'object', required: ['command'], properties: { command: { type: 'string', description: 'REQUIRED — The shell command string to run, e.g. "ls -la"' } }
       }
     }]
     case 'local-applescript': return [{
       name: 'local_applescript__execute',
-      description: `[Local Mac Automation: ${conn.name}] Execute an AppleScript snippet to automate macOS desktop applications.`,
+      description: `[Local Mac Automation: ${conn.name}] Execute an AppleScript snippet to automate macOS apps. MANDATORY: you MUST provide "script" — the AppleScript code string to run.`,
       inputSchema: {
-        type: 'object', required: ['script'], properties: { script: { type: 'string', description: 'The AppleScript code to run' } }
+        type: 'object', required: ['script'], properties: { script: { type: 'string', description: 'REQUIRED — The AppleScript code to execute' } }
       }
     }]
     case 'local-dir': return [{
       name: 'local_dir__list',
-      description: `[Local Directory: ${conn.name}] List files and folders in the configured local directory.`,
+      description: `[Local Directory: ${conn.name} — ${conn.config?.path || 'path not set'}] List files and folders. Call WITHOUT any parameter to list the root directory shown above. Returns { path, files: [{ name, type }] }. To list a sub-directory, pass sub_path (e.g. "data" or "reports/2024").`,
       inputSchema: {
-        type: 'object', properties: { sub_path: { type: 'string', description: 'Optional sub-directory to list' } }
+        type: 'object', properties: { sub_path: { type: 'string', description: 'Optional. Sub-directory to list (e.g. "data"). Omit to list the root.' } }
       }
     }, {
       name: 'local_dir__read',
-      description: `[Local Directory: ${conn.name}] Read the text contents of a file in the local directory.`,
+      description: `[Local Directory: ${conn.name} — ${conn.config?.path || 'path not set'}] Read a file's text contents. MANDATORY: you MUST provide "file_path" — the relative path of the file to read (e.g. "report.csv" or "data/sales.json"). Use local_dir__list FIRST to see what files are available, then pass the exact file name as file_path. Without file_path this will fail.`,
       inputSchema: {
-        type: 'object', required: ['file_path'], properties: { file_path: { type: 'string', description: 'Relative path of the file' } }
+        type: 'object', required: ['file_path'], properties: { file_path: { type: 'string', description: 'REQUIRED — Relative path of the file to read. Get available files from local_dir__list first.' } }
       }
     }, {
       name: 'local_dir__write',
-      description: `[Local Directory: ${conn.name}] Write text content to a file in the local directory (overwrites existing).`,
+      description: `[Local Directory: ${conn.name} — ${conn.config?.path || 'path not set'}] Write text content to a file. MANDATORY: you MUST provide "file_path" (relative path, e.g. "output/report.md") AND "content" (the text to write). Creates parent directories if needed. Overwrites existing files.`,
       inputSchema: {
         type: 'object', required: ['file_path', 'content'], 
         properties: { 
-          file_path: { type: 'string', description: 'Relative path of the file to write to' },
-          content: { type: 'string', description: 'The text content to write to the file' }
+          file_path: { type: 'string', description: 'REQUIRED — Relative path of the file to write to, e.g. "output/report.md"' },
+          content: { type: 'string', description: 'REQUIRED — The full text content to write to the file' }
         }
       }
     }]
@@ -702,9 +804,9 @@ function toolDefsForProvider(conn) {
       name: 'jira__create_issue',
       description: `[Jira: ${conn.name}] Create a new Jira issue.`,
       inputSchema: {
-        type: 'object', required: ['projectKey', 'summary'],
+        type: 'object', required: ['summary'],
         properties: {
-          projectKey:  { type: 'string', description: 'Jira project key, e.g. "ENG"' },
+          projectKey:  { type: 'string', description: 'Jira project key, e.g. "ENG". Falls back to connector default if omitted.' },
           summary:     { type: 'string' },
           description: { type: 'string' },
           issueType:   { type: 'string', description: 'e.g. Task, Bug, Story', default: 'Task' }
@@ -751,6 +853,55 @@ function toolDefsForProvider(conn) {
         properties: { owner: { type: 'string' }, repo: { type: 'string' } }
       }
     }]
+
+    case 'docker': return [
+      {
+        name: `docker__run`,
+        description: `[Docker: ${conn.name}] Run a command in a new container (docker run --rm). Great for isolated execution, running tools not on the host, or temporary services.`,
+        inputSchema: {
+          type: 'object', required: ['image', 'command'],
+          properties: {
+            image: { type: 'string', description: 'Docker image (e.g. python:3.12, alpine:latest)' },
+            command: { type: 'string', description: 'Command to run inside the container' },
+            workdir: { type: 'string', description: 'Working directory inside container' },
+            mount: { type: 'string', description: 'Volume mount (e.g. /host/path:/container/path)' },
+            env: { type: 'object', description: 'Environment variables' },
+            timeout: { type: 'integer', default: 30, description: 'Timeout in seconds (max 120)' }
+          }
+        }
+      },
+      {
+        name: `docker__exec`,
+        description: `[Docker: ${conn.name}] Execute a command in an existing running container.`,
+        inputSchema: {
+          type: 'object', required: ['container', 'command'],
+          properties: {
+            container: { type: 'string', description: 'Container name or ID' },
+            command: { type: 'string', description: 'Command to execute' }
+          }
+        }
+      },
+      {
+        name: `docker__logs`,
+        description: `[Docker: ${conn.name}] Fetch logs from a container.`,
+        inputSchema: {
+          type: 'object', required: ['container'],
+          properties: {
+            container: { type: 'string', description: 'Container name or ID' },
+            tail: { type: 'integer', default: 50, description: 'Number of recent lines' }
+          }
+        }
+      },
+      {
+        name: `docker__ps`,
+        description: `[Docker: ${conn.name}] List running Docker containers.`,
+        inputSchema: {
+          type: 'object', properties: {
+            all: { type: 'boolean', default: false, description: 'Include stopped containers' }
+          }
+        }
+      },
+    ]
 
     case 'gmail': return [{
       name: 'gmail__send_email',
@@ -933,18 +1084,258 @@ function toolDefsForProvider(conn) {
       }
     }]
 
+    case 'ssh': return [
+      {
+        name: `ssh__exec`,
+        description: `[SSH: ${conn.name}] Execute a command on a remote machine via SSH. Requires SSH key-based auth.`,
+        inputSchema: {
+          type: 'object', required: ['host', 'command'],
+          properties: {
+            host: { type: 'string', description: 'Remote hostname or IP' },
+            command: { type: 'string', description: 'Command to execute' },
+            port: { type: 'integer', default: 22, description: 'SSH port' },
+            user: { type: 'string', default: 'root', description: 'SSH user' },
+            timeout: { type: 'integer', default: 30, description: 'Timeout seconds (max 120)' }
+          }
+        }
+      },
+      {
+        name: `ssh__upload`,
+        description: `[SSH: ${conn.name}] Upload a file to a remote machine via SCP.`,
+        inputSchema: {
+          type: 'object', required: ['host', 'remote_path', 'content'],
+          properties: {
+            host: { type: 'string', description: 'Remote hostname or IP' },
+            remote_path: { type: 'string', description: 'Remote file path' },
+            content: { type: 'string', description: 'File content' },
+            port: { type: 'integer', default: 22 },
+            user: { type: 'string', default: 'root' }
+          }
+        }
+      },
+    ]
+
     case 'webhook': return [{
       name: 'webhook__post',
-      description: `[Webhook: ${conn.name}] POST a JSON payload to the configured endpoint. Use for custom integrations.`,
+      description: `[Webhook: ${conn.name}] POST a JSON payload to the configured webhook URL. MANDATORY: you MUST provide "payload" — a JSON object with the data to send.`,
       inputSchema: {
         type: 'object', required: ['payload'],
         properties: {
-          payload: { type: 'object', description: 'Arbitrary JSON payload to send' }
+          payload: { type: 'object', description: 'REQUIRED — JSON object to POST to the webhook URL' }
         }
       }
     }]
 
-    default: return []
+    case 'whatsapp': return [{
+      name: 'whatsapp__send_message',
+      description: `[WhatsApp: ${conn.name}] Send a text message to a WhatsApp user. MANDATORY: you MUST provide "to" (phone number with country code) and "text" (the message body). Use this to reply to users or send proactive notifications.`,
+      inputSchema: {
+        type: 'object', required: ['to', 'text'],
+        properties: {
+          to: { type: 'string', description: 'REQUIRED — Phone number in international format (e.g. 1234567890)' },
+          text: { type: 'string', description: 'REQUIRED — The message text to send (max 4096 chars)' },
+          preview_url: { type: 'boolean', description: 'Whether to show link previews (default: false)' },
+        }
+      }
+    }, {
+      name: 'whatsapp__send_template',
+      description: `[WhatsApp: ${conn.name}] Send a pre-approved message template. Useful for notifications and alerts. MANDATORY: "to" (phone number), "template_name" (must match an approved template in Meta Business).`,
+      inputSchema: {
+        type: 'object', required: ['to', 'template_name'],
+        properties: {
+          to: { type: 'string', description: 'REQUIRED — Phone number in international format' },
+          template_name: { type: 'string', description: 'REQUIRED — Name of the approved template in Meta Business Manager' },
+          language: { type: 'string', description: 'Language code (default: en)' },
+          parameters: { type: 'array', items: { type: 'string' }, description: 'Template parameter values' },
+        }
+      }
+    }]
+
+    case 'telegram': return [{
+      name: 'telegram__send_message',
+      description: `[Telegram: ${conn.name}] Send a text message to a Telegram user or group. MANDATORY: you MUST provide "chat_id" (Telegram chat ID) and "text" (the message body, supports MarkdownV2). Use this to reply to users or send proactive notifications.`,
+      inputSchema: {
+        type: 'object', required: ['chat_id', 'text'],
+        properties: {
+          chat_id: { type: 'number', description: 'REQUIRED — Telegram chat ID (integer)' },
+          text: { type: 'string', description: 'REQUIRED — The message text to send (max 4096 chars, supports MarkdownV2)' },
+          parse_mode: { type: 'string', enum: ['MarkdownV2', 'HTML'], description: 'Parse mode (default: plain text)' },
+        }
+      }
+    }, {
+      name: 'telegram__send_photo',
+      description: `[Telegram: ${conn.name}] Send a photo to a Telegram user or group. MANDATORY: "chat_id" and "photo" (URL or file_id).`,
+      inputSchema: {
+        type: 'object', required: ['chat_id', 'photo'],
+        properties: {
+          chat_id: { type: 'number', description: 'REQUIRED — Telegram chat ID' },
+          photo: { type: 'string', description: 'REQUIRED — Photo URL or Telegram file_id' },
+          caption: { type: 'string', description: 'Optional caption' },
+        }
+      }
+    }]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Cloud Infrastructure
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'aws': return [
+      { name: `aws__s3_list`,        description: `[AWS: ${conn.name}] List S3 buckets.`, inputSchema: { type: 'object', properties: {} } },
+      { name: `aws__s3_objects`,     description: `[AWS: ${conn.name}] List objects in an S3 bucket.`, inputSchema: { type: 'object', required: ['bucket'], properties: { bucket: { type: 'string' }, prefix: { type: 'string' }, maxKeys: { type: 'integer', default: 50 } } } },
+      { name: `aws__ec2_list`,       description: `[AWS: ${conn.name}] List EC2 instances with status.`, inputSchema: { type: 'object', properties: { region: { type: 'string' }, filters: { type: 'object' } } } },
+      { name: `aws__cloudwatch_metrics`, description: `[AWS: ${conn.name}] Query CloudWatch metrics.`, inputSchema: { type: 'object', required: ['namespace', 'metricName'], properties: { namespace: { type: 'string' }, metricName: { type: 'string' }, period: { type: 'integer', default: 300 }, stat: { type: 'string', default: 'Average' } } } },
+      { name: `aws__lambda_invoke`,  description: `[AWS: ${conn.name}] Invoke a Lambda function.`, inputSchema: { type: 'object', required: ['functionName'], properties: { functionName: { type: 'string' }, payload: { type: 'object' } } } },
+    ]
+
+    case 'kubernetes': return [
+      { name: `k8s__get`,     description: `[K8s: ${conn.name}] Get a Kubernetes resource (pods, deployments, etc.).`, inputSchema: { type: 'object', required: ['resource', 'name'], properties: { resource: { type: 'string', description: 'Resource type (pods, deployments, services, etc.)' }, name: { type: 'string' }, namespace: { type: 'string', default: 'default' } } } },
+      { name: `k8s__logs`,    description: `[K8s: ${conn.name}] Fetch pod logs.`, inputSchema: { type: 'object', required: ['pod'], properties: { pod: { type: 'string' }, container: { type: 'string' }, namespace: { type: 'string', default: 'default' }, tail: { type: 'integer', default: 50 } } } },
+      { name: `k8s__describe`,description: `[K8s: ${conn.name}] Describe a resource.`, inputSchema: { type: 'object', required: ['resource', 'name'], properties: { resource: { type: 'string' }, name: { type: 'string' }, namespace: { type: 'string', default: 'default' } } } },
+    ]
+
+    case 'terraform': return [
+      { name: `terraform__plan`,  description: `[Terraform: ${conn.name}] Trigger a plan.`, inputSchema: { type: 'object', required: ['workspaceId'], properties: { workspaceId: { type: 'string' } } } },
+      { name: `terraform__apply`, description: `[Terraform: ${conn.name}] Apply a run.`, inputSchema: { type: 'object', required: ['runId'], properties: { runId: { type: 'string' }, comment: { type: 'string' } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // IoT
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'mqtt': return [
+      { name: `mqtt__publish`,   description: `[MQTT: ${conn.name}] Publish a message to a topic.`, inputSchema: { type: 'object', required: ['topic', 'payload'], properties: { topic: { type: 'string' }, payload: { type: 'string' }, qos: { type: 'integer', default: 0 } } } },
+      { name: `mqtt__subscribe`, description: `[MQTT: ${conn.name}] Subscribe to a topic.`, inputSchema: { type: 'object', required: ['topic'], properties: { topic: { type: 'string' }, timeout: { type: 'integer', default: 10 } } } },
+    ]
+
+    case 'thingsboard': return [
+      { name: `thingsboard__telemetry`, description: `[ThingsBoard: ${conn.name}] Get device telemetry.`, inputSchema: { type: 'object', required: ['deviceId'], properties: { deviceId: { type: 'string' }, keys: { type: 'string' }, startTs: { type: 'integer' }, endTs: { type: 'integer' } } } },
+      { name: `thingsboard__devices`,   description: `[ThingsBoard: ${conn.name}] List devices.`, inputSchema: { type: 'object', properties: { pageSize: { type: 'integer', default: 50 }, type: { type: 'string' } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Communication
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'twilio': return [
+      { name: `twilio__send_sms`, description: `[Twilio: ${conn.name}] Send SMS.`, inputSchema: { type: 'object', required: ['to', 'body'], properties: { to: { type: 'string', description: 'Phone number' }, body: { type: 'string' } } } },
+      { name: `twilio__make_call`,description: `[Twilio: ${conn.name}] Make a voice call.`, inputSchema: { type: 'object', required: ['to', 'twiml'], properties: { to: { type: 'string' }, twiml: { type: 'string', description: 'TwiML instructions URL' } } } },
+    ]
+
+    case 'sendgrid': return [
+      { name: `sendgrid__send`,  description: `[SendGrid: ${conn.name}] Send email.`, inputSchema: { type: 'object', required: ['to', 'subject', 'body'], properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' }, html: { type: 'string' } } } },
+      { name: `sendgrid__stats`, description: `[SendGrid: ${conn.name}] Email stats.`, inputSchema: { type: 'object', properties: { startDate: { type: 'string' }, endDate: { type: 'string' }, aggregatedBy: { type: 'string', default: 'day' } } } },
+    ]
+
+    case 'discord': return [
+      { name: `discord__send`,          description: `[Discord: ${conn.name}] Send message to channel.`, inputSchema: { type: 'object', required: ['channelId', 'content'], properties: { channelId: { type: 'string' }, content: { type: 'string' } } } },
+      { name: `discord__list_channels`, description: `[Discord: ${conn.name}] List channels.`, inputSchema: { type: 'object', properties: {} } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Payments
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'stripe': return [
+      { name: `stripe__customers`,    description: `[Stripe: ${conn.name}] List customers.`, inputSchema: { type: 'object', properties: { email: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `stripe__payments`,     description: `[Stripe: ${conn.name}] List payment intents.`, inputSchema: { type: 'object', properties: { status: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `stripe__subscriptions`,description: `[Stripe: ${conn.name}] List subscriptions.`, inputSchema: { type: 'object', properties: { status: { type: 'string' }, customer: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `stripe__refund`,       description: `[Stripe: ${conn.name}] Create a refund.`, inputSchema: { type: 'object', required: ['paymentIntent'], properties: { paymentIntent: { type: 'string' }, amount: { type: 'integer' } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Support & ITSM
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'zendesk': return [
+      { name: `zendesk__tickets`,       description: `[Zendesk: ${conn.name}] List tickets.`, inputSchema: { type: 'object', properties: { status: { type: 'string' }, priority: { type: 'string' }, limit: { type: 'integer', default: 25 } } } },
+      { name: `zendesk__create_ticket`, description: `[Zendesk: ${conn.name}] Create a ticket.`, inputSchema: { type: 'object', required: ['subject'], properties: { subject: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string' } } } },
+      { name: `zendesk__update_ticket`, description: `[Zendesk: ${conn.name}] Update a ticket.`, inputSchema: { type: 'object', required: ['ticketId'], properties: { ticketId: { type: 'string' }, status: { type: 'string' }, comment: { type: 'string' } } } },
+    ]
+
+    case 'servicenow': return [
+      { name: `servicenow__incidents`, description: `[ServiceNow: ${conn.name}] Query incidents.`, inputSchema: { type: 'object', properties: { sysparm_query: { type: 'string' }, sysparm_limit: { type: 'integer', default: 20 } } } },
+      { name: `servicenow__changes`,   description: `[ServiceNow: ${conn.name}] Query changes.`, inputSchema: { type: 'object', properties: { sysparm_query: { type: 'string' }, sysparm_limit: { type: 'integer', default: 20 } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CRM
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'hubspot': return [
+      { name: `hubspot__contacts`,  description: `[HubSpot: ${conn.name}] Search contacts.`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `hubspot__deals`,     description: `[HubSpot: ${conn.name}] List deals.`, inputSchema: { type: 'object', properties: { stage: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `hubspot__companies`, description: `[HubSpot: ${conn.name}] Search companies.`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer', default: 20 } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Data & Analytics
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'snowflake': return [
+      { name: `snowflake__query`,  description: `[Snowflake: ${conn.name}] Run read-only SQL.`, inputSchema: { type: 'object', required: ['sql'], properties: { sql: { type: 'string' } } } },
+      { name: `snowflake__tables`, description: `[Snowflake: ${conn.name}] List tables.`, inputSchema: { type: 'object', properties: { schema: { type: 'string' } } } },
+    ]
+
+    case 'elasticsearch': return [
+      { name: `elastic__search`,          description: `[ES: ${conn.name}] Search documents.`, inputSchema: { type: 'object', required: ['query'], properties: { index: { type: 'string' }, query: { type: 'object', description: 'Elasticsearch query DSL' }, size: { type: 'integer', default: 10 } } } },
+      { name: `elastic__cluster_health`,  description: `[ES: ${conn.name}] Cluster health.`, inputSchema: { type: 'object', properties: {} } },
+    ]
+
+    case 'redis': return [
+      { name: `redis__get`,  description: `[Redis: ${conn.name}] Get key value.`, inputSchema: { type: 'object', required: ['key'], properties: { key: { type: 'string' } } } },
+      { name: `redis__set`,  description: `[Redis: ${conn.name}] Set key value.`, inputSchema: { type: 'object', required: ['key', 'value'], properties: { key: { type: 'string' }, value: { type: 'string' }, ttl: { type: 'integer', description: 'TTL in seconds' } } } },
+      { name: `redis__keys`, description: `[Redis: ${conn.name}] List keys matching pattern.`, inputSchema: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string', description: 'e.g. user:*' } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Monitoring
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'prometheus': return [
+      { name: `prometheus__query`, description: `[Prometheus: ${conn.name}] Instant query.`, inputSchema: { type: 'object', required: ['query'], properties: { query: { type: 'string', description: 'PromQL query' } } } },
+      { name: `prometheus__range`, description: `[Prometheus: ${conn.name}] Range query.`, inputSchema: { type: 'object', required: ['query', 'start', 'end', 'step'], properties: { query: { type: 'string' }, start: { type: 'string', description: 'ISO timestamp' }, end: { type: 'string', description: 'ISO timestamp' }, step: { type: 'string', default: '1m' } } } },
+      { name: `prometheus__alerts`,description: `[Prometheus: ${conn.name}] List alerts.`, inputSchema: { type: 'object', properties: {} } },
+    ]
+
+    case 'datadog': return [
+      { name: `datadog__metrics`,  description: `[Datadog: ${conn.name}] Query metrics.`, inputSchema: { type: 'object', required: ['query', 'from', 'to'], properties: { query: { type: 'string' }, from: { type: 'integer' }, to: { type: 'integer' } } } },
+      { name: `datadog__logs`,     description: `[Datadog: ${conn.name}] Search logs.`, inputSchema: { type: 'object', required: ['query', 'from', 'to'], properties: { query: { type: 'string' }, from: { type: 'integer' }, to: { type: 'integer' }, limit: { type: 'integer', default: 50 } } } },
+      { name: `datadog__monitors`, description: `[Datadog: ${conn.name}] List monitors.`, inputSchema: { type: 'object', properties: {} } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Finance — QuickBooks Online
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'quickbooks': return [
+      { name: `quickbooks__invoices`,      description: `[QuickBooks: ${conn.name}] List invoices.`,        inputSchema: { type: 'object', properties: { status: { type: 'string' }, customer: { type: 'string' }, limit: { type: 'integer', default: 25 } } } },
+      { name: `quickbooks__expenses`,      description: `[QuickBooks: ${conn.name}] List expenses.`,         inputSchema: { type: 'object', properties: { limit: { type: 'integer', default: 25 } } } },
+      { name: `quickbooks__accounts`,      description: `[QuickBooks: ${conn.name}] List chart of accounts.`,inputSchema: { type: 'object', properties: { type: { type: 'string', description: 'e.g. Income, Expense, Bank' } } } },
+      { name: `quickbooks__profit_loss`,   description: `[QuickBooks: ${conn.name}] Profit and Loss report.`,inputSchema: { type: 'object', properties: { startDate: { type: 'string' }, endDate: { type: 'string' } } } },
+      { name: `quickbooks__customers`,     description: `[QuickBooks: ${conn.name}] List customers.`,        inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer', default: 25 } } } },
+    ]
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Documentation
+    // ═══════════════════════════════════════════════════════════════════════
+    case 'confluence': return [
+      { name: `confluence__search`,      description: `[Confluence: ${conn.name}] Search pages.`,       inputSchema: { type: 'object', required: ['cql'], properties: { cql: { type: 'string', description: 'CQL query' }, limit: { type: 'integer', default: 20 } } } },
+      { name: `confluence__get_page`,    description: `[Confluence: ${conn.name}] Get page by ID.`,      inputSchema: { type: 'object', required: ['pageId'], properties: { pageId: { type: 'string' } } } },
+      { name: `confluence__create_page`, description: `[Confluence: ${conn.name}] Create a page.`,       inputSchema: { type: 'object', required: ['spaceKey', 'title', 'body'], properties: { spaceKey: { type: 'string' }, title: { type: 'string' }, body: { type: 'string', description: 'Storage format HTML' } } } },
+    ]
+
+    // Generic passthrough for any other API-key connector — generates a single
+    // query tool that the agent can use to call the configured API endpoint.
+    default: {
+      const cfg = decryptCredentials(conn.config || {})
+      // Only generate tools if we have a baseUrl or url to work with
+      const endpoint = cfg.baseUrl || cfg.url || cfg.instanceUrl || cfg.brokerUrl || cfg.connectionUrl || cfg.host || ''
+      if (!endpoint) return [] // no endpoint, no tools
+      return [{
+        name: `${conn.tool_id}__query`,
+        description: `[${conn.name}] Generic API query tool. Calls ${endpoint} with the provided path and parameters.`,
+        inputSchema: {
+          type: 'object', required: ['path'],
+          properties: {
+            path: { type: 'string', description: 'API path to call (appended to base URL)' },
+            method: { type: 'string', default: 'GET', enum: ['GET', 'POST', 'PUT', 'PATCH'] },
+            query: { type: 'object', description: 'Query string parameters' },
+            body: { type: 'object', description: 'Request body (for POST/PUT/PATCH)' },
+          }
+        }
+      }]
+    }
   }
 }
 
@@ -954,7 +1345,16 @@ function toolDefsForProvider(conn) {
  * Look up the connector row for a given tool prefix and run the provider API call.
  * Returns { success, ...data } matching the shape task.service expects.
  */
-export async function executeConnectorTool(toolName, input, tenantId) {
+/**
+ * Execute a connector tool, respecting agent scopes.
+ * @param {string} toolName - e.g. "local_dir__list"
+ * @param {object} input - tool input parameters
+ * @param {string} tenantId
+ * @param {Set<string>} [allowedConnectorIds] - optional set of agent-scoped connector IDs.
+ *   If empty/undefined, all active connectors for the provider are eligible (backward compat).
+ *   If non-empty, only connectors whose ID is in the set may be used.
+ */
+export async function executeConnectorTool(toolName, input, tenantId, allowedConnectorIds) {
   const [provider] = toolName.split('__')
   if (!provider) return { success: false, error: `Malformed connector tool name: ${toolName}` }
 
@@ -965,18 +1365,100 @@ export async function executeConnectorTool(toolName, input, tenantId) {
 
   const toolIdQuery = ['local_dir', 'local_shell', 'local_applescript'].includes(provider) ? provider.replace('_', '-') : provider
 
-  // Fetch the single ACTIVE connector for this provider on this tenant.
-  // If a tenant has multiple (e.g. two Slack workspaces) we currently pick the newest.
-  const { rows: [conn] } = await query(
-    `SELECT id, tenant_id, tool_id, name, auth_type, config
-     FROM tool_connections
-     WHERE tenant_id = $1 AND tool_id = $2 AND status = 'ACTIVE'
-     ORDER BY created_at DESC LIMIT 1`,
-    [tenantId, toolIdQuery]
-  )
+  // Fetch ACTIVE connectors for this provider on this tenant.
+  // When the agent has explicit scope → only scoped connectors are eligible.
+  // Otherwise → fall back to newest (backward-compatible default).
+  const hasExplicitScopes = allowedConnectorIds && allowedConnectorIds.size > 0
+  let conn
+  if (hasExplicitScopes) {
+    // Try scoped connectors first — pick the newest among allowed ones
+    const { rows } = await query(
+      `SELECT id, tenant_id, tool_id, name, auth_type, config
+       FROM tool_connections
+       WHERE tenant_id = $1 AND tool_id = $2 AND status = 'ACTIVE'
+         AND id = ANY($3::uuid[])
+       ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, toolIdQuery, [...allowedConnectorIds]]
+    )
+    conn = rows[0]
+  }
+  // Fallback: no explicit scopes → pick newest (original behavior)
+  if (!conn) {
+    const { rows: [fallback] } = await query(
+      `SELECT id, tenant_id, tool_id, name, auth_type, config
+       FROM tool_connections
+       WHERE tenant_id = $1 AND tool_id = $2 AND status = 'ACTIVE'
+       ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, toolIdQuery]
+    )
+    // If we had explicit scopes but found no match → the agent is not authorized for this provider
+    if (hasExplicitScopes && fallback && !allowedConnectorIds.has(fallback.id)) {
+      return { success: false, error: `Agent is not authorized to use ${provider} connector "${fallback.name}". The agent has explicit connector scopes that do not include this provider.` }
+    }
+    conn = fallback
+  }
   if (!conn) return { success: false, error: `No active ${provider} connector configured for this tenant.` }
 
   const config = decryptCredentials(conn.config || {})
+
+  // ── Docker ────────────────────────────────────────────────────────────
+  if (toolName.startsWith('docker__')) {
+    const { execAsync } = await import('./connector-tools.service.js')
+    const subCmd = toolName.replace('docker__', '')
+    try {
+      let cmd = ''
+      const { image, command, container, workdir, mount, env, timeout, tail, all } = input
+      if (subCmd === 'run') {
+        const wd = workdir ? `-w '${workdir}'` : ''
+        const vol = mount ? `-v '${mount}'` : ''
+        const envs = env ? Object.entries(env).map(([k, v]) => `-e ${k}='${v}'`).join(' ') : ''
+        const t = Math.min(timeout || 30, 120)
+        cmd = `docker run --rm ${wd} ${vol} ${envs} --network none ${image} sh -c '${command}'`
+      } else if (subCmd === 'exec') {
+        cmd = `docker exec ${container} sh -c '${command}'`
+      } else if (subCmd === 'logs') {
+        cmd = `docker logs --tail ${tail || 50} ${container} 2>&1`
+      } else if (subCmd === 'ps') {
+        cmd = `docker ${all ? 'ps -a' : 'ps'} --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'`
+      } else {
+        return { success: false, error: `Unknown docker sub-command: ${subCmd}` }
+      }
+      const { stdout } = await execAsync(cmd)
+      return { success: true, output: stdout.trim() }
+    } catch (err) {
+      return { success: false, error: `Docker ${subCmd} failed: ${err.message}` }
+    }
+  }
+
+  // ── SSH ───────────────────────────────────────────────────────────────
+  if (toolName.startsWith('ssh__')) {
+    const { execAsync } = await import('./connector-tools.service.js')
+    const subCmd = toolName.replace('ssh__', '')
+    try {
+      const { host, command, port, user, timeout, remote_path, content } = input
+      const p = port || 22
+      const u = user || 'root'
+      const t = Math.min(timeout || 30, 120)
+      if (subCmd === 'exec') {
+        const cmd = `ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p ${p} ${u}@${host} '${command}'`
+        const { stdout } = await execAsync(cmd, { timeout: t * 1000 })
+        return { success: true, output: stdout.trim() }
+      } else if (subCmd === 'upload') {
+        // Write content to tmp file, scp it, clean up
+        const tmpFile = `/tmp/ssh_upload_${Date.now()}`
+        const { execAsync: exec } = await import('./connector-tools.service.js')
+        await exec(`cat > ${tmpFile} << 'KUVALAM_EOF'\n${content}\nKUVALAM_EOF`)
+        const cmd = `scp -o StrictHostKeyChecking=accept-new -P ${p} ${tmpFile} ${u}@${host}:${remote_path}`
+        await exec(cmd, { timeout: 30000 })
+        await exec(`rm -f ${tmpFile}`)
+        return { success: true, message: `File uploaded to ${host}:${remote_path}` }
+      } else {
+        return { success: false, error: `Unknown ssh sub-command: ${subCmd}` }
+      }
+    } catch (err) {
+      return { success: false, error: `SSH ${subCmd} failed: ${err.message}` }
+    }
+  }
 
   try {
     switch (toolName) {
@@ -1023,7 +1505,20 @@ export async function executeConnectorTool(toolName, input, tenantId) {
       case 'salesforce__update_record':   return await salesforceUpdateRecord(conn, config, input)
 
       case 'webhook__post':        return await webhookPost(config, input)
-      default: return { success: false, error: `Unknown connector tool: ${toolName}` }
+
+      case 'whatsapp__send_message':  return await whatsappSendMessage(conn, input)
+      case 'whatsapp__send_template': return await whatsappSendTemplate(conn, input)
+
+      case 'telegram__send_message':  return await telegramSendMessage(conn, input)
+      case 'telegram__send_photo':    return await telegramSendPhoto(conn, input)
+
+      // ═══════════════════════════════════════════════════════════
+      // Generic REST API connector — handles AWS, Stripe, Twilio,
+      // SendGrid, Discord, Zendesk, ServiceNow, HubSpot, Snowflake,
+      // Elasticsearch, Prometheus, Datadog, Confluence, Terraform,
+      // ThingsBoard, and any other REST-based provider.
+      // ═══════════════════════════════════════════════════════════
+      default: return await genericRestExecute(conn, config, toolName, input)
     }
   } catch (err) {
     return { success: false, error: err.message }
@@ -1062,7 +1557,11 @@ async function executeDatabaseTool(toolName, input, tenantId) {
       default: return { success: false, error: `Unknown DB operation: ${op}` }
     }
   } catch (err) {
-    return { success: false, error: err.message }
+    return {
+      success: false,
+      error: `DATABASE QUERY FAILED — DO NOT INVENT OR FABRICATE DATA: ${err.message}`,
+      instruction: 'Use list_tables to see available tables, then describe_table to check column names, then retry with correct SQL using only real column names.'
+    }
   }
 }
 
@@ -1088,6 +1587,11 @@ async function slackPostMessage(conn, { channel, text, thread_ts, blocks }) {
 }
 
 async function jiraCreateIssue(conn, config, { projectKey, summary, description, issueType = 'Task' }) {
+  // Fall back to the default projectKey stored in the connector config
+  const effectiveProjectKey = projectKey || config.projectKey
+  if (!effectiveProjectKey) {
+    return { success: false, error: 'projectKey is required — either pass it at runtime or set a Default Project Key on the Jira connector' }
+  }
   const base = String(config.baseUrl || '').replace(/\/$/, '')
   assertSafeUrl(base)
   const basic = Buffer.from(`${config.email}:${config.apiKey}`).toString('base64')
@@ -1096,7 +1600,7 @@ async function jiraCreateIssue(conn, config, { projectKey, summary, description,
     headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       fields: {
-        project: { key: projectKey },
+        project: { key: effectiveProjectKey },
         summary,
         issuetype: { name: issueType },
         // Jira Cloud v3 requires Atlassian Document Format for description
@@ -1230,6 +1734,164 @@ async function webhookPost(config, { payload }) {
   const res = await fetchWithTimeout(url, { method: 'POST', headers, body: bodyStr })
   const text = await res.text().catch(() => '')
   return { success: res.ok, status: res.status, response: text.slice(0, 500) }
+}
+
+// ─── WhatsApp handlers ────────────────────────────────────────────────────
+
+async function whatsappSendMessage(conn, input) {
+  const cfg = decryptCredentials(conn.config || {})
+  const phoneNumberId = cfg.phoneNumberId || cfg.phone_number_id
+  const accessToken = cfg.accessToken || cfg.access_token
+  if (!phoneNumberId || !accessToken) {
+    return { success: false, error: 'WhatsApp connector missing phoneNumberId or accessToken' }
+  }
+
+  const to = input.to
+  const text = input.text || input.message || input.content || ''
+  if (!to) return { success: false, error: 'to (phone number) is required' }
+  if (!text) return { success: false, error: 'text (message body) is required' }
+
+  const body = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'text',
+    text: {
+      preview_url: input.preview_url || false,
+      body: text.slice(0, 4096),
+    },
+  }
+
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    return { success: false, error: data.error?.message || `HTTP ${res.status}`, details: data.error }
+  }
+  return { success: true, wa_message_id: data.messages?.[0]?.id }
+}
+
+async function whatsappSendTemplate(conn, input) {
+  const cfg = decryptCredentials(conn.config || {})
+  const phoneNumberId = cfg.phoneNumberId || cfg.phone_number_id
+  const accessToken = cfg.accessToken || cfg.access_token
+  if (!phoneNumberId || !accessToken) {
+    return { success: false, error: 'WhatsApp connector missing credentials' }
+  }
+
+  const to = input.to
+  const templateName = input.template_name
+  if (!to || !templateName) {
+    return { success: false, error: 'to and template_name are required' }
+  }
+
+  const componentParams = (input.parameters || []).map(p => ({
+    type: 'text',
+    text: String(p).slice(0, 1024),
+  }))
+
+  const body = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: input.language || 'en' },
+      components: componentParams.length > 0 ? [{
+        type: 'body',
+        parameters: componentParams,
+      }] : [],
+    },
+  }
+
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    return { success: false, error: data.error?.message || `HTTP ${res.status}`, details: data.error }
+  }
+  return { success: true, wa_message_id: data.messages?.[0]?.id }
+}
+
+// ─── Telegram handlers ────────────────────────────────────────────────────
+
+async function telegramSendMessage(conn, input) {
+  const cfg = decryptCredentials(conn.config || {})
+  const botToken = cfg.botToken || cfg.bot_token
+  if (!botToken) {
+    return { success: false, error: 'Telegram connector missing botToken' }
+  }
+
+  const chatId = input.chat_id || input.chatId
+  const text = input.text || input.message || input.content || ''
+  if (!chatId) return { success: false, error: 'chat_id is required' }
+  if (!text) return { success: false, error: 'text (message body) is required' }
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`
+  const body = {
+    chat_id: chatId,
+    text: String(text).slice(0, 4096),
+    parse_mode: input.parse_mode || undefined,
+    disable_web_page_preview: true,
+  }
+
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!data.ok) {
+    return { success: false, error: data.description || `HTTP ${res.status}`, error_code: data.error_code }
+  }
+  return { success: true, telegram_message_id: data.result?.message_id, chat: data.result?.chat }
+}
+
+async function telegramSendPhoto(conn, input) {
+  const cfg = decryptCredentials(conn.config || {})
+  const botToken = cfg.botToken || cfg.bot_token
+  if (!botToken) {
+    return { success: false, error: 'Telegram connector missing botToken' }
+  }
+
+  const chatId = input.chat_id || input.chatId
+  const photo = input.photo
+  if (!chatId || !photo) {
+    return { success: false, error: 'chat_id and photo are required' }
+  }
+
+  const url = `https://api.telegram.org/bot${botToken}/sendPhoto`
+  const body = {
+    chat_id: chatId,
+    photo,
+    caption: (input.caption || '').slice(0, 1024),
+  }
+
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!data.ok) {
+    return { success: false, error: data.description || `HTTP ${res.status}` }
+  }
+  return { success: true, telegram_message_id: data.result?.message_id }
 }
 
 // ─── Slack extended handlers ──────────────────────────────────────────────
@@ -1718,47 +2380,81 @@ async function salesforceUpdateRecord(conn, config, { sobject, id, fields }) {
   return { success: true, id }
 }
 
-async function localDirList(config, { sub_path }) {
-  if (!config.path) return { success: false, error: 'Local directory path not configured' }
+async function localDirList(config, input) {
+  // Accept both 'sub_path' and 'path' — small models often hallucinate 'path'
+  const sub_path = input.sub_path || input.path
+  if (!config.path) return { success: false, error: 'Local directory path not configured. The connector needs a base directory path set in its config.' }
   try {
     const targetPath = sub_path ? path.join(config.path, sub_path) : config.path
-    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied — sub_path escapes the base directory' }
+    // Check existence first for a friendlier error than EPERM
+    try { await fs.access(targetPath) } catch (e) {
+      if (e.code === 'ENOENT') return { success: false, error: `Directory does not exist: ${targetPath}. Check the connector base path or sub_path.` }
+      if (e.code === 'EPERM' || e.code === 'EACCES') return { success: false, error: `Permission denied accessing ${targetPath}. macOS: grant Full Disk Access to the terminal/Node.js process in System Settings → Privacy & Security → Full Disk Access.` }
+      throw e
+    }
     const entries = await fs.readdir(targetPath, { withFileTypes: true })
     const files = entries.map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' }))
     return { success: true, path: targetPath, files }
   } catch (err) {
+    if (err.code === 'EPERM' || err.code === 'EACCES') {
+      return { success: false, error: `Permission denied: ${err.message}. On macOS, open System Settings → Privacy & Security → Full Disk Access and grant access to the terminal or process running the API.` }
+    }
     return { success: false, error: `Failed to list directory: ${err.message}` }
   }
 }
 
-async function localDirRead(config, { file_path }) {
-  if (!config.path) return { success: false, error: 'Local directory path not configured' }
-  if (!file_path) return { success: false, error: 'file_path is required' }
+async function localDirRead(config, input) {
+  // Accept both 'file_path' and 'path' — small models often hallucinate 'path'
+  const file_path = input.file_path || input.path
+  if (!config.path) return { success: false, error: 'Local directory path not configured. The connector needs a base directory path set in its config.' }
+  if (!file_path) return { success: false, error: 'file_path is required. Use local_dir__list first to discover available files, then pass the file name as file_path.' }
   try {
     const targetPath = path.join(config.path, file_path)
-    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied — file_path escapes the base directory' }
+    try { await fs.access(targetPath) } catch (e) {
+      if (e.code === 'ENOENT') return { success: false, error: `File not found: ${targetPath}. Use local_dir__list to see available files.` }
+      if (e.code === 'EPERM' || e.code === 'EACCES') return { success: false, error: `Permission denied accessing ${targetPath}. macOS: grant Full Disk Access in System Settings → Privacy & Security → Full Disk Access.` }
+      throw e
+    }
     const content = await fs.readFile(targetPath, 'utf8')
     return { success: true, path: targetPath, content }
   } catch (err) {
+    if (err.code === 'EPERM' || err.code === 'EACCES') {
+      return { success: false, error: `Permission denied: ${err.message}. On macOS, open System Settings → Privacy & Security → Full Disk Access and grant access to the terminal or process running the API.` }
+    }
     return { success: false, error: `Failed to read file: ${err.message}` }
   }
 }
 
-async function localDirWrite(config, { file_path, content }) {
-  if (!config.path) return { success: false, error: 'Local directory path not configured' }
-  if (!file_path || content === undefined) return { success: false, error: 'file_path and content are required' }
+async function localDirWrite(config, input) {
+  // Accept both 'file_path' and 'path' — small models often hallucinate 'path'
+  const file_path = input.file_path || input.path
+  const content = input.content
+  if (!config.path) return { success: false, error: 'Local directory path not configured. The connector needs a base directory path set in its config.' }
+  if (!file_path || content === undefined) return { success: false, error: 'file_path and content are required. Provide file_path (relative path, e.g. "output/report.md") and content (the text to write).' }
   try {
     const targetPath = path.join(config.path, file_path)
-    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied' }
-    await fs.mkdir(path.dirname(targetPath), { recursive: true })
-    await fs.writeFile(targetPath, content, 'utf8')
+    if (!targetPath.startsWith(config.path)) return { success: false, error: 'Path traversal denied — file_path escapes the base directory' }
+    try {
+      await fs.mkdir(path.dirname(targetPath), { recursive: true })
+      await fs.writeFile(targetPath, content, 'utf8')
+    } catch (e) {
+      if (e.code === 'EPERM' || e.code === 'EACCES') return { success: false, error: `Permission denied writing to ${targetPath}. macOS: grant Full Disk Access in System Settings → Privacy & Security → Full Disk Access.` }
+      throw e
+    }
     return { success: true, path: targetPath, bytes: Buffer.byteLength(content, 'utf8') }
   } catch (err) {
+    if (err.code === 'EPERM' || err.code === 'EACCES') {
+      return { success: false, error: `Permission denied: ${err.message}. On macOS, open System Settings → Privacy & Security → Full Disk Access and grant access to the terminal or process running the API.` }
+    }
     return { success: false, error: `Failed to write file: ${err.message}` }
   }
 }
 
-async function localShellExecute(config, { command }) {
+async function localShellExecute(config, input) {
+  const command = input.command || input.input
+  if (!command) return { success: false, error: 'command is required. Provide the shell command string to execute.' }
   try {
     const { stdout, stderr } = await execAsync(command, { timeout: 30000 })
     return { success: true, stdout, stderr }
@@ -1767,12 +2463,246 @@ async function localShellExecute(config, { command }) {
   }
 }
 
-async function localApplescriptExecute(config, { script }) {
+async function localApplescriptExecute(config, input) {
+  const script = input.script || input.input
+  if (!script) return { success: false, error: 'script is required. Provide the AppleScript code to execute.' }
   try {
     const { stdout, stderr } = await execAsync(`osascript -e ${JSON.stringify(script)}`, { timeout: 30000 })
     return { success: true, stdout, stderr }
   } catch (err) {
     return { success: false, error: err.message }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Generic REST API execution — covers AWS, Stripe, Twilio, SendGrid, Discord,
+// Zendesk, ServiceNow, HubSpot, Snowflake, Elasticsearch, Prometheus, Datadog,
+// Confluence, Terraform, ThingsBoard, Kubernetes, MQTT, Redis, and any other
+// REST-based SaaS connector.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Build the base URL from a connector config, trying every known key name.
+ */
+function resolveBaseUrl(cfg) {
+  return cfg.baseUrl || cfg.url || cfg.instanceUrl || cfg.brokerUrl || cfg.host || ''
+}
+
+/**
+ * Build auth headers from connector config. Handles:
+ *   - Bearer tokens  (apiKey, accessToken, botToken, secretKey, appKey, etc.)
+ *   - Basic auth      (username + password)
+ *   - Custom headers  (x-api-key etc.)
+ */
+function resolveAuthHeaders(cfg) {
+  const headers = {}
+
+  // Bearer-style tokens — common across dozens of APIs
+  const bearer = cfg.apiKey || cfg.accessToken || cfg.botToken || cfg.secretKey
+    || cfg.apiToken || cfg.personalAccessToken || cfg.accessKeyId
+  if (bearer) {
+    // Some APIs want "Bearer", others want raw token in a specific header
+    headers['Authorization'] = `Bearer ${bearer}`
+  }
+
+  // Basic auth
+  if (cfg.username && cfg.password) {
+    headers['Authorization'] = `Basic ${Buffer.from(`${cfg.username}:${cfg.password}`).toString('base64')}`
+  }
+
+  // Datadog: DD-API-KEY + DD-APPLICATION-KEY
+  if (cfg.apiKey && cfg.appKey) {
+    headers['DD-API-KEY'] = cfg.apiKey
+    headers['DD-APPLICATION-KEY'] = cfg.appKey
+  }
+
+  // AWS SigV4 is not done here; AWS tools use the AWS SDK path instead
+  // (placeholder for future SDK integration)
+
+  // Zendesk: email/token basic
+  if (cfg.email && (cfg.apiToken || cfg.apiKey)) {
+    headers['Authorization'] = `Basic ${Buffer.from(`${cfg.email}/token:${cfg.apiToken || cfg.apiKey}`).toString('base64')}`
+  }
+
+  // Discord: Bot prefix
+  if (cfg.botToken) {
+    headers['Authorization'] = `Bot ${cfg.botToken}`
+  }
+
+  // Twilio: accountSid + authToken basic
+  if (cfg.accountSid && cfg.authToken) {
+    headers['Authorization'] = `Basic ${Buffer.from(`${cfg.accountSid}:${cfg.authToken}`).toString('base64')}`
+  }
+
+  // ServiceNow: basic auth already covered above, but ensure we don't add Bearer
+  if (cfg.username && cfg.password) {
+    delete headers['Authorization'] // will be reset below
+    headers['Authorization'] = `Basic ${Buffer.from(`${cfg.username}:${cfg.password}`).toString('base64')}`
+  }
+
+  return headers
+}
+
+/**
+ * Map connector tool names to REST API paths.  This gives the agent a simple
+ * function-call interface while we translate to the correct REST path + method
+ * underneath.
+ */
+const REST_PATH_MAP = {
+  // ── AWS (inventory/read-only via generic REST) ──────────────
+  'aws__s3_list':          { method: 'GET', path: '/s3/buckets' },
+  'aws__s3_objects':       { method: 'GET', path: ({ bucket }) => `/s3/buckets/${bucket}/objects` },
+  'aws__ec2_list':         { method: 'GET', path: '/ec2/instances' },
+  'aws__cloudwatch_metrics':{ method: 'GET', path: '/cloudwatch/metrics' },
+  'aws__lambda_invoke':    { method: 'POST', path: ({ functionName }) => `/lambda/functions/${functionName}/invoke` },
+
+  // ── Kubernetes ─────────────────────────────────
+  'k8s__get':       { method: 'GET',    path: ({ resource, name, namespace }) => `/api/v1/namespaces/${namespace}/${resource}/${name}` },
+  'k8s__logs':      { method: 'GET',    path: ({ pod, namespace }) => `/api/v1/namespaces/${namespace}/pods/${pod}/log` },
+  'k8s__describe':  { method: 'GET',    path: ({ resource, name, namespace }) => `/api/v1/namespaces/${namespace}/${resource}/${name}` },
+
+  // ── Terraform Cloud ───────────────────────────
+  'terraform__plan':  { method: 'POST', path: ({ workspaceId }) => `/workspaces/${workspaceId}/runs` },
+  'terraform__apply': { method: 'POST', path: ({ runId }) => `/runs/${runId}/actions/apply` },
+
+  // ── MQTT (note: MQTT uses TCP not REST, but ThingsBoard MQTT has a REST proxy) ─
+  'mqtt__publish':   { method: 'POST', path: '/api/v1/telemetry' },
+  'mqtt__subscribe': { method: 'GET',  path: '/api/v1/telemetry' },
+
+  // ── ThingsBoard ───────────────────────────────
+  'thingsboard__telemetry': { method: 'GET',  path: ({ deviceId }) => `/api/plugins/telemetry/DEVICE/${deviceId}/values/timeseries` },
+  'thingsboard__devices':   { method: 'GET',  path: '/api/devices' },
+
+  // ── Twilio ─────────────────────────────────────
+  'twilio__send_sms':  { method: 'POST', path: '/2010-04-01/Accounts/{accountSid}/Messages.json' },
+  'twilio__make_call': { method: 'POST', path: '/2010-04-01/Accounts/{accountSid}/Calls.json' },
+
+  // ── SendGrid ───────────────────────────────────
+  'sendgrid__send':  { method: 'POST', path: '/v3/mail/send' },
+  'sendgrid__stats': { method: 'GET',  path: '/v3/stats' },
+
+  // ── Discord ────────────────────────────────────
+  'discord__send':          { method: 'POST', path: ({ channelId }) => `/channels/${channelId}/messages` },
+  'discord__list_channels': { method: 'GET',  path: '/guilds/{guildId}/channels' },
+
+  // ── Stripe ─────────────────────────────────────
+  'stripe__customers':     { method: 'GET',  path: '/v1/customers' },
+  'stripe__payments':      { method: 'GET',  path: '/v1/payment_intents' },
+  'stripe__subscriptions': { method: 'GET',  path: '/v1/subscriptions' },
+  'stripe__refund':        { method: 'POST', path: '/v1/refunds' },
+
+  // ── Zendesk ────────────────────────────────────
+  'zendesk__tickets':        { method: 'GET',  path: '/api/v2/tickets' },
+  'zendesk__create_ticket':  { method: 'POST', path: '/api/v2/tickets' },
+  'zendesk__update_ticket':  { method: 'PUT',  path: ({ ticketId }) => `/api/v2/tickets/${ticketId}` },
+
+  // ── ServiceNow ─────────────────────────────────
+  'servicenow__incidents': { method: 'GET', path: '/api/now/table/incident' },
+  'servicenow__changes':   { method: 'GET', path: '/api/now/table/change_request' },
+
+  // ── HubSpot ────────────────────────────────────
+  'hubspot__contacts':  { method: 'GET',  path: '/crm/v3/objects/contacts' },
+  'hubspot__deals':     { method: 'GET',  path: '/crm/v3/objects/deals' },
+  'hubspot__companies': { method: 'GET',  path: '/crm/v3/objects/companies' },
+
+  // ── Snowflake (SQL API via REST) ──────────────
+  'snowflake__query':  { method: 'POST', path: '/api/v2/statements' },
+  'snowflake__tables': { method: 'GET',  path: '/api/v2/tables' },
+
+  // ── Elasticsearch ──────────────────────────────
+  'elastic__search':          { method: 'POST', path: ({ index }) => `/${index || '_all'}/_search` },
+  'elastic__cluster_health':  { method: 'GET',  path: '/_cluster/health' },
+
+  // ── Redis (via Redis Enterprise REST API or RedisInsight proxy) ─
+  'redis__get':  { method: 'GET',  path: ({ key }) => `/api/keys/${encodeURIComponent(key)}` },
+  'redis__set':  { method: 'POST', path: '/api/keys' },
+  'redis__keys': { method: 'GET',  path: ({ pattern }) => `/api/keys?pattern=${encodeURIComponent(pattern)}` },
+
+  // ── Prometheus ─────────────────────────────────
+  'prometheus__query':  { method: 'GET', path: '/api/v1/query' },
+  'prometheus__range':  { method: 'GET', path: '/api/v1/query_range' },
+  'prometheus__alerts': { method: 'GET', path: '/api/v1/alerts' },
+
+  // ── Datadog ─────────────────────────────────────
+  'datadog__metrics':  { method: 'GET', path: '/api/v1/query' },
+  'datadog__logs':     { method: 'POST', path: '/api/v2/logs/events/search' },
+  'datadog__monitors': { method: 'GET', path: '/api/v1/monitor' },
+
+  // ── Confluence ──────────────────────────────────
+  'confluence__search':      { method: 'GET',  path: '/wiki/rest/api/content/search' },
+  'confluence__get_page':    { method: 'GET',  path: ({ pageId }) => `/wiki/rest/api/content/${pageId}` },
+  'confluence__create_page': { method: 'POST', path: '/wiki/rest/api/content' },
+}
+
+/**
+ * Generic execution function for REST-based connectors.
+ */
+async function genericRestExecute(conn, config, toolName, input) {
+  const baseUrl = resolveBaseUrl(config).replace(/\/+$/, '')
+  if (!baseUrl) {
+    return { success: false, error: `No API endpoint configured for ${conn.tool_id}. Add baseUrl in connector config.` }
+  }
+
+  // Check for mapped tool
+  const mapping = REST_PATH_MAP[toolName]
+  let method = 'GET', pathStr = ''
+  let body = undefined, queryParams = {}
+
+  if (mapping) {
+    method = mapping.method || 'GET'
+    // If path is a function, resolve it with the input
+    if (typeof mapping.path === 'function') {
+      pathStr = mapping.path(input || {})
+    } else {
+      pathStr = mapping.path
+    }
+  } else {
+    // Generic fallback: use input.path, input.method, input.query, input.body
+    pathStr = input.path || '/'
+    method = (input.method || 'GET').toUpperCase()
+    queryParams = input.query || {}
+    body = input.body
+  }
+
+  // Interpolate template variables like {accountSid}
+  pathStr = pathStr.replace(/\{(\w+)\}/g, (_, key) => config[key] || input[key] || `{${key}}`)
+
+  // Build query string
+  const searchParams = new URLSearchParams()
+  for (const [k, v] of Object.entries(queryParams)) {
+    if (v !== undefined && v !== null) searchParams.append(k, String(v))
+  }
+  const qs = searchParams.toString()
+  const fullUrl = `${baseUrl}${pathStr}${qs ? '?' + qs : ''}`
+
+  // Build headers
+  const headers = resolveAuthHeaders(config)
+  if (!headers['Content-Type'] && !headers['content-type']) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  try {
+    const fetchOpts = {
+      method,
+      headers,
+      signal: AbortSignal.timeout(30000),
+    }
+    if (body !== undefined && method !== 'GET') {
+      fetchOpts.body = typeof body === 'string' ? body : JSON.stringify(body)
+    }
+
+    const res = await fetch(fullUrl, fetchOpts)
+    const text = await res.text()
+    let data
+    try { data = JSON.parse(text) } catch { data = text }
+
+    if (!res.ok) {
+      return { success: false, error: `${conn.tool_id} API returned ${res.status}: ${JSON.stringify(data).substring(0, 500)}` }
+    }
+
+    return { success: true, status: res.status, data }
+  } catch (err) {
+    return { success: false, error: `${conn.tool_id} request failed: ${err.message}` }
   }
 }
 
@@ -1782,4 +2712,18 @@ export const CONNECTOR_TOOL_PREFIXES = [
   'local_dir__', 'local_shell__', 'local_applescript__', 'slack__', 'jira__', 'github__', 'gmail__',
   'notion__', 'linear__', 'salesforce__',
   'webhook__', 'db__', 'rest__',
+  // New connectors
+  'docker__', 'ssh__',
+  'aws__', 'k8s__', 'terraform__',
+  'mqtt__', 'thingsboard__',
+  'twilio__', 'sendgrid__', 'discord__',
+  'stripe__', 'quickbooks__',
+  'zendesk__', 'servicenow__',
+  'hubspot__',
+  'snowflake__', 'elastic__', 'redis__',
+  'prometheus__', 'datadog__',
+  'confluence__',
+  // Built-in tools exposed to workflow TOOL steps (agent-only capabilities
+  // that workflows can now invoke directly without routing through an agent)
+  'http_request__', 'http_download__', 'publish_dashboard_report__',
 ]

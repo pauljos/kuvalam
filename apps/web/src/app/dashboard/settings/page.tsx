@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
-import { api } from '@/lib/api'
+import { api, API } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import { useConfirm } from '@/components/ConfirmModal'
 import { Shield } from 'lucide-react'
@@ -21,13 +21,15 @@ const PROVIDERS: Array<{
   { id: 'anthropic', name: 'Anthropic', icon: '🧠', color: '#c07000', models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'], keyLabel: 'API Key', keyPlaceholder: 'sk-ant-...', baseUrl: null },
   { id: 'openrouter', name: 'OpenRouter', icon: '🔀', color: '#6366f1', models: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct', 'mistralai/mistral-large'], keyLabel: 'API Key', keyPlaceholder: 'sk-or-v1-...', baseUrl: 'https://openrouter.ai/api/v1' },
   { id: 'opencode', name: 'OpenCode', icon: '💻', color: '#10b981', models: ['deepseek-v4-pro', 'minimax-m3', 'qwen3.7-max', 'mimo-v2-pro'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://opencode.ai/zen/go/v1' },
+  { id: 'deepseek', name: 'DeepSeek', icon: '🔍', color: '#4f46e5', models: ['deepseek-chat', 'deepseek-reasoner'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.deepseek.com/v1' },
+  { id: 'kimi', name: 'Kimi (Moonshot)', icon: '🌙', color: '#8b5cf6', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-auto'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.moonshot.cn/v1' },
   { id: 'groq', name: 'Groq (Fast)', icon: '⚡', color: '#f59e0b', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'], keyLabel: 'API Key', keyPlaceholder: 'gsk_...', baseUrl: 'https://api.groq.com/openai/v1' },
   { id: 'mistral', name: 'Mistral AI', icon: '🌊', color: '#3b82f6', models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest'], keyLabel: 'API Key', keyPlaceholder: 'your-mistral-key', baseUrl: 'https://api.mistral.ai/v1' },
   // ── Local / self-hosted OpenAI-compatible servers ──────────────────────────
   { id: 'ollama', name: 'Ollama (Local)', icon: '🦙', color: '#3f8a43', kind: 'local', models: ['llama3.2', 'llama3.1', 'mistral', 'gemma2', 'phi3', 'qwen2.5', 'deepseek-r1'], keyLabel: 'Base URL', keyPlaceholder: 'http://localhost:11434/v1', baseUrl: 'http://localhost:11434/v1', description: 'Run open models on your own machine with Ollama. No API key required.' },
   { id: 'lmstudio', name: 'LM Studio (Local)', icon: '🖥️', color: '#3f8a43', kind: 'local', models: ['local-model'], keyLabel: 'Base URL', keyPlaceholder: 'http://localhost:1234/v1', baseUrl: 'http://localhost:1234/v1', description: 'Uses LM Studio\u2019s built-in OpenAI-compatible server (enable it in the Server tab).' },
   { id: 'localai', name: 'LocalAI (Local)', icon: '🏠', color: '#3f8a43', kind: 'local', models: ['gpt-3.5-turbo', 'ggml-gpt4all-j'], keyLabel: 'Base URL', keyPlaceholder: 'http://localhost:8080/v1', baseUrl: 'http://localhost:8080/v1', description: 'Self-hosted, OpenAI-compatible inference server.' },
-  { id: 'custom', name: 'Custom OpenAI-Compatible', icon: '🛠️', color: '#3f8a43', kind: 'local', models: [], keyLabel: 'Base URL', keyPlaceholder: 'https://your-server/v1', baseUrl: '', description: 'Point at any OpenAI-compatible endpoint (vLLM, llama.cpp, TGI, Together, Fireworks, etc.).' },
+  { id: 'custom', name: 'Custom OpenAI-Compatible', icon: '🛠️', color: '#3f8a43', kind: 'local', models: ['gpt-4o-mini', 'gpt-4o', 'Meta-Llama-3-70B', 'Mistral-7B', 'deepseek-coder-6.7b', 'Qwen-14B'], keyLabel: 'Base URL', keyPlaceholder: 'https://your-server/v1', baseUrl: '', description: 'Point at any OpenAI-compatible endpoint (vLLM, llama.cpp, TGI, Together, Fireworks, etc.).' },
 ]
 
 function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
@@ -56,15 +58,8 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
       try {
         const baseUrl = form.baseUrl || provider.baseUrl
         if (!baseUrl) return
-        const token = localStorage.getItem('kuvalam_access_token')
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/settings/llm/test`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: provider.id, baseUrl, model: form.model || provider.models[0] })
-        })
-        const json = await res.json()
-        const result = json.data || json
-        if (!cancelled && result.models?.length > 0) {
+        const result = await api.testLLMProvider(tenantId, { provider: provider.id, baseUrl, model: form.model || provider.models[0] })
+        if (!cancelled && result?.models?.length > 0) {
           setDynamicModels(result.models)
         }
       } catch {}
@@ -86,8 +81,14 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
       }
       if (!body.model) throw new Error('Model name is required')
       if (isLocal && !body.baseUrl) throw new Error('Base URL is required for local providers')
-      await api.saveLLMConfig(tenantId, body)
-      onSaved(); setOpen(false); setForm(f => ({ ...f, apiKey: '' }))
+      const result = await api.saveLLMConfig(tenantId, body)
+      // Use the returned config directly to avoid a stale GET round-trip
+      if (result?.llm_config) {
+        onSaved(result.llm_config)
+      } else {
+        onSaved()
+      }
+      setOpen(false); setForm(f => ({ ...f, apiKey: '' }))
       toast('success', `${provider.name} configured`, 'Model provider is now active.')
     } catch (err: any) { toast('error', 'Save failed', err.message) } finally { setSaving(false) }
   }
@@ -123,8 +124,15 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
     })
     if (!ok) return
     setRemoving(true)
-    try { await api.removeLLMProvider(tenantId, provider.id); onSaved(); toast('info', `${provider.name} removed`, '') }
-    catch (err: any) { toast('error', 'Remove failed', err.message) } finally { setRemoving(false) }
+    try {
+      const result = await api.removeLLMProvider(tenantId, provider.id)
+      if (result?.llm_config) {
+        onSaved(result.llm_config)
+      } else {
+        onSaved()
+      }
+      toast('info', `${provider.name} removed`, '')
+    } catch (err: any) { toast('error', 'Remove failed', err.message) } finally { setRemoving(false) }
   }
 
   return (
@@ -252,15 +260,17 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
 export default function SettingsPage() {
   const { tenantId, toast } = useApp()
   const [settings, setSettings] = useState<any>(null)
-  const [tab, setTab] = useState<'llm' | 'general' | 'members'>('llm')
+  const [tab, setTab] = useState<'llm' | 'general' | 'members' | 'custom_models' | 'knowledge_infra' | 'system'>('llm')
   const [loadingSettings, setLoadingSettings] = useState(true)
   const [loadingMembers, setLoadingMembers] = useState(true)
   const [members, setMembers] = useState<any[]>([])
-  const [inviteForm, setInviteForm] = useState({ email: '', role: 'BUILDER' })
+  const [inviteForm, setInviteForm] = useState({ email: '', role: 'BUILDER', password: '' })
+  const [showInvitePassword, setShowInvitePassword] = useState(false)
   const [inviting, setInviting] = useState(false)
   const [generalForm, setGeneralForm] = useState({ name: '' })
   const [savingGeneral, setSavingGeneral] = useState(false)
   const [isLocalEnv, setIsLocalEnv] = useState(false)
+  const [savingSystemLlm, setSavingSystemLlm] = useState(false)
 
   // Custom Models state
   const { confirm, ConfirmDialog } = useConfirm()
@@ -275,6 +285,89 @@ export default function SettingsPage() {
   const [activeStream, setActiveStream] = useState<string | null>(null)
   const [testingDb, setTestingDb] = useState(false)
   const [dbTestResult, setDbTestResult] = useState<any>(null)
+
+  // System Scan state
+  const [scanResults, setScanResults] = useState<any>(null)
+  const [scanning, setScanning] = useState(false)
+  const [installingId, setInstallingId] = useState<string | null>(null)
+
+  // Knowledge Infrastructure state
+  const [infraStatus, setInfraStatus] = useState<any>(null)
+  const [infraLoading, setInfraLoading] = useState(false)
+  const [infraStarting, setInfraStarting] = useState<string | null>(null)
+  const [infraCreating, setInfraCreating] = useState<string | null>(null)
+
+  async function runScan() {
+    if (!tenantId) return
+    setScanning(true); setScanResults(null)
+    try {
+      const scanData = await api.systemScan(tenantId)
+      // api.systemScan already unwraps the envelope — scanData is { os, hostname, results }
+      setScanResults(scanData)
+    } catch (err: any) {
+      toast('error', 'Scan failed', err.message)
+    } finally { setScanning(false) }
+  }
+
+  async function installDep(depId: string, depName: string) {
+    if (!tenantId) return
+    setInstallingId(depId)
+    try {
+      const result = await api.systemInstall(tenantId, depId)
+      if (result?.alreadyInstalled) {
+        toast('info', `${depName} already installed`, '')
+      } else if (result?.success) {
+        toast('success', `${depName} installed`, result?.output || '')
+      } else {
+        toast('error', `Install failed`, result?.output || '')
+      }
+      // Re-scan after install attempt
+      await runScan()
+    } catch (err: any) {
+      toast('error', `Install failed`, err.message)
+    } finally { setInstallingId(null) }
+  }
+
+  async function loadInfraStatus() {
+    if (!tenantId) return
+    setInfraLoading(true)
+    try {
+      const data = await api.getKnowledgeInfraStatus(tenantId)
+      setInfraStatus(data)
+    } catch (err: any) {
+      toast('error', 'Failed to check infrastructure status', err.message)
+    } finally { setInfraLoading(false) }
+  }
+
+  async function startInfra(service: string, label: string) {
+    if (!tenantId) return
+    setInfraStarting(service)
+    try {
+      const result = await api.startKnowledgeService(tenantId, service)
+      if (result.success) {
+        toast('success', `${label} started`, result.output || 'Service is now running.')
+      } else if (result.alreadyRunning) {
+        toast('info', `${label} already running`, '')
+      } else {
+        toast('error', 'Failed to start', result.output || 'Unknown error')
+      }
+      await loadInfraStatus()
+    } catch (err: any) {
+      toast('error', `Failed to start ${label}`, err.message)
+    } finally { setInfraStarting(null) }
+  }
+
+  async function createConnector(service: string, label: string) {
+    if (!tenantId) return
+    setInfraCreating(service)
+    try {
+      const result = await api.createInfraConnector(tenantId, service)
+      toast('success', `${label} backend registered!`, result.alreadyExisted ? 'Backend was already registered and is ready to use.' : 'Your Knowledge Bases & Graphs can now use this backend.')
+      await loadInfraStatus()
+    } catch (err: any) {
+      toast('error', 'Failed to register backend', err.message)
+    } finally { setInfraCreating(null) }
+  }
 
   async function testDbConnection() {
     if (!modelForm.dbConnectionString) {
@@ -330,17 +423,19 @@ export default function SettingsPage() {
       .catch(() => {})
 
     // Load locally available Ollama models for base model picker
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tid}/custom-models/ollama/available`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('kuvalam_access_token')}` }
-    })
-      .then(r => r.json())
-      .then(r => { if (r.data?.models) setOllamaModels(r.data.models) })
+    api.getOllamaAvailableModels(tid)
+      .then(r => { const models = r?.data?.models || r?.models || []; if (models.length) setOllamaModels(models) })
       .catch(() => {})
   }, [toast])
 
   useEffect(() => {
     if (tenantId) load(tenantId)
   }, [tenantId, load])
+
+  // Auto-load knowledge infra status when that tab is selected
+  useEffect(() => {
+    if (tenantId && tab === 'knowledge_infra') loadInfraStatus()
+  }, [tenantId, tab])
 
   // Show message if sysadmin without tenant
   if (!tenantId) {
@@ -370,9 +465,10 @@ export default function SettingsPage() {
     e.preventDefault(); setInviting(true)
     try {
       await api.inviteMember(tenantId, inviteForm)
-      setInviteForm({ email: '', role: 'BUILDER' })
+      setInviteForm({ email: '', role: 'BUILDER', password: '' })
       await load(tenantId)
-      toast('success', 'Invitation sent', `${inviteForm.email} has been invited.`)
+      const action = inviteForm.password ? 'created' : 'invited'
+      toast('success', `Member ${action}`, `${inviteForm.email} has been ${action}.`)
     } catch (err: any) { toast('error', 'Invite failed', err.message) } finally { setInviting(false) }
   }
 
@@ -386,8 +482,34 @@ export default function SettingsPage() {
   }
 
   async function setDefault(provider: string) {
-    try { await api.saveLLMConfig(tenantId, { provider, model: providers[provider]?.model }); await load(tenantId); toast('success', 'Default provider updated', '') }
-    catch (err: any) { toast('error', 'Update failed', err.message) }
+    // Don't allow setting an unconfigured provider as default
+    if (!providers[provider]) {
+      toast('error', 'Provider not configured', `Configure "${PROVIDERS.find(p => p.id === provider)?.name || provider}" first before setting as default.`)
+      return
+    }
+    try {
+      const result = await api.saveLLMConfig(tenantId, { provider })
+      if (result?.llm_config) {
+        setSettings((s: any) => ({ ...s, llm_config: result.llm_config }))
+      } else {
+        await load(tenantId)
+      }
+      toast('success', 'Default provider updated', `${PROVIDERS.find(p => p.id === provider)?.name || provider} is now the default`)
+    } catch (err: any) { toast('error', 'Update failed', err.message) }
+  }
+
+  async function saveSystemLlm(systemProvider: string | null, systemModel: string | null) {
+    setSavingSystemLlm(true)
+    try {
+      const result = await api.saveSystemLLMConfig(tenantId, { systemProvider, systemModel })
+      if (result?.llm_config) {
+        setSettings((s: any) => ({ ...s, llm_config: result.llm_config }))
+      } else {
+        await load(tenantId)
+      }
+      toast('success', 'System AI updated', 'Platform AI features will use this provider.')
+    } catch (err: any) { toast('error', 'Update failed', err.message) }
+    finally { setSavingSystemLlm(false) }
   }
 
   const TABS = [
@@ -397,6 +519,8 @@ export default function SettingsPage() {
   ]
   if (isLocalEnv) {
     TABS.push({ id: 'custom_models', label: 'Custom Models (Local)' })
+    TABS.push({ id: 'knowledge_infra', label: 'Knowledge Backends' })
+    TABS.push({ id: 'system', label: 'System Scan' })
   }
 
   async function startTraining(e: any) {
@@ -454,13 +578,7 @@ export default function SettingsPage() {
   async function activateModel(modelId: string, modelName: string) {
     setActivatingId(modelId)
     try {
-      const token = localStorage.getItem('kuvalam_access_token')
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/custom-models/${modelId}/activate`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      const data = await res.json()
-      if (!data.success) throw new Error(data.error?.message || 'Activation failed')
+      await api.activateCustomModel(tenantId, modelId)
       await load(tenantId)
       toast('success', `✅ "${modelName}" activated!`, 'All agents will now use this model via Ollama.')
     } catch (err: any) {
@@ -480,13 +598,7 @@ export default function SettingsPage() {
     })
     if (!ok) return
     try {
-      const token = localStorage.getItem('kuvalam_access_token')
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/custom-models/${modelId}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      const data = await res.json()
-      if (!data.success) throw new Error(data.error?.message || 'Delete failed')
+      await api.deleteCustomModel(tenantId, modelId)
       setCustomModels(prev => prev.filter(m => m.id !== modelId))
       if (selectedLog === modelId) { setSelectedLog(null); setActiveStream(null) }
       toast('success', `Model deleted`, `"${modelName}" was removed from your jobs.`)
@@ -497,13 +609,7 @@ export default function SettingsPage() {
 
   async function pushModelToOllama(modelId: string, modelName: string) {
     try {
-      const token = localStorage.getItem('kuvalam_access_token')
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/custom-models/${modelId}/push-to-ollama`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      const data = await res.json()
-      if (!data.success) throw new Error(data.error?.message || 'Push failed')
+      await api.pushToOllama(tenantId, modelId)
       setCustomModels(prev => prev.map(m => m.id === modelId ? { ...m, status: 'COMPLETED' } : m))
       toast('success', `Added to Ollama!`, `"${modelName}" is now available in your local registry.`)
     } catch (err: any) {
@@ -538,22 +644,68 @@ export default function SettingsPage() {
     if (!isTraining) return // static stored log shown in drawer
     setActiveStream(modelId)
     setStreamingLogs(prev => ({ ...prev, [modelId]: [] }))
-    const token = localStorage.getItem('kuvalam_access_token')
-    const es = new EventSource(`${process.env.NEXT_PUBLIC_API_URL}/tenants/${tenantId}/custom-models/${modelId}/log-stream?token=${token}`)
-    es.addEventListener('log', (e: any) => {
-      const { line } = JSON.parse(e.data)
-      setStreamingLogs(prev => ({ ...prev, [modelId]: [...(prev[modelId] || []), line] }))
-    })
-    es.addEventListener('done', (e: any) => {
-      const { status } = JSON.parse(e.data)
-      let msg = ''
-      if (status === 'COMPLETED') msg = '✅ Setup complete!'
-      else if (status === 'TRAINED') msg = '⏳ Training phase complete. Waiting for approval...'
-      else msg = '❌ Job failed.'
-      setStreamingLogs(prev => ({ ...prev, [modelId]: [...(prev[modelId] || []), msg] }))
-      es.close(); setActiveStream(null); load(tenantId)
-    })
-    es.onerror = () => { es.close(); setActiveStream(null) }
+
+    let es: EventSource | null = null
+    let doneReceived = false
+    let retryCount = 0
+    const maxRetries = 10
+    let cachedStreamToken: string | null = null // set from SSE 'connected' event
+
+    async function connect() {
+      if (doneReceived) return
+
+      // Use cached stream_token (from SSE 'connected' event) or fetch it via api client
+      let streamToken = cachedStreamToken
+      if (!streamToken) {
+        try {
+          const res = await api.getCustomModel(tenantId, modelId)
+          const token = res?.data?.customModel?.stream_token || res?.stream_token
+          if (token) streamToken = token
+        } catch { /* proceed without token if fetch fails */ }
+      }
+
+      // Build URL: prefer stream_token; without it, SSE cannot authenticate
+      if (!streamToken) { setActiveStream(null); return }
+      const url = `${API}/tenants/${tenantId}/custom-models/${modelId}/log-stream?stream_token=${encodeURIComponent(streamToken)}`
+      es = new EventSource(url)
+
+      // Capture stream_token from 'connected' event for future reconnections
+      es.addEventListener('connected', (e: any) => {
+        const data = JSON.parse(e.data)
+        if (data.streamToken) cachedStreamToken = data.streamToken
+      })
+      
+      es.addEventListener('log', (e: any) => {
+        const { line } = JSON.parse(e.data)
+        retryCount = 0 // reset retry on successful data
+        setStreamingLogs(prev => ({ ...prev, [modelId]: [...(prev[modelId] || []), line] }))
+      })
+      
+      es.addEventListener('done', (e: any) => {
+        if (doneReceived) return
+        doneReceived = true
+        const { status } = JSON.parse(e.data)
+        let msg = ''
+        if (status === 'COMPLETED') msg = '✅ Setup complete!'
+        else if (status === 'TRAINED') msg = '⏳ Training phase complete. Waiting for approval...'
+        else msg = '❌ Job failed.'
+        setStreamingLogs(prev => ({ ...prev, [modelId]: [...(prev[modelId] || []), msg] }))
+        es?.close()
+        setActiveStream(null)
+        load(tenantId)
+      })
+      
+      es.onerror = () => {
+        if (doneReceived) { es?.close(); return }
+        // Retry with exponential backoff — re-fetches stream_token or JWT each time
+        es?.close()
+        retryCount++
+        if (retryCount > maxRetries) { setActiveStream(null); return }
+        setTimeout(connect, Math.min(1000 * Math.pow(1.5, retryCount), 15000))
+      }
+    }
+
+    connect()
   }
 
   return (
@@ -576,7 +728,7 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      <div className="page-body" style={{ maxWidth: 860 }}>
+      <div className="page-body">
 
       {tab === 'llm' ? (
         loadingSettings ? (
@@ -585,25 +737,145 @@ export default function SettingsPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {/* Default provider banner */}
             {defaultProvider && (
-              <div style={{ padding: '14px 18px', borderRadius: 10, background: 'var(--green-bg)', border: '1px solid var(--green-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ padding: '14px 18px', borderRadius: 10, background: 'var(--green-bg)', border: '1px solid var(--green-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
                 <div>
                   <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Default Provider: </span>
                   <span style={{ fontWeight: 700, color: 'var(--green-dark)' }}>{defaultProvider}</span>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 12 }}>Used by all agents unless overridden per-agent</span>
+                </div>
+                {Object.keys(providers).length > 1 && (
+                  <select
+                    className="select"
+                    style={{ minWidth: 140, fontSize: 13 }}
+                    value={defaultProvider}
+                    onChange={e => setDefault(e.target.value)}
+                  >
+                    {Object.keys(providers).map(pid => (
+                      <option key={pid} value={pid}>{PROVIDERS.find(p => p.id === pid)?.name || pid}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+
+            {/* System AI selector — controls which LLM powers platform features */}
+            {Object.keys(providers).length > 0 && (
+              <div className="card" style={{ padding: 18 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>🤖 System AI</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                      Powers platform features like workflow generation, agent creation, and AI assistants.
+                      {!settings?.llm_config?.systemProvider && (
+                        <span style={{ color: 'var(--yellow-dark)' }}> Currently using agent default.</span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <select
+                      className="select"
+                      style={{ minWidth: 130, fontSize: 13 }}
+                      value={settings?.llm_config?.systemProvider || ''}
+                      onChange={async e => {
+                        const sp = e.target.value || null
+                        const providers = settings?.llm_config?.providers || {}
+                        await saveSystemLlm(sp, sp ? (providers[sp]?.model || null) : null)
+                      }}
+                      disabled={savingSystemLlm}
+                    >
+                      <option value="">Use Agent Default</option>
+                      {Object.keys(providers).map(pid => (
+                        <option key={pid} value={pid}>{PROVIDERS.find(p => p.id === pid)?.name || pid}</option>
+                      ))}
+                    </select>
+                    {settings?.llm_config?.systemProvider && providers[settings.llm_config.systemProvider] && (
+                      <select
+                        className="select"
+                        style={{ minWidth: 180, fontSize: 13 }}
+                        value={settings?.llm_config?.systemModel || ''}
+                        onChange={e => {
+                          const sm = e.target.value || null
+                          saveSystemLlm(settings?.llm_config?.systemProvider, sm)
+                        }}
+                        disabled={savingSystemLlm}
+                      >
+                        <option value="">Provider default model</option>
+                        {(() => {
+                          const sp = settings?.llm_config?.systemProvider
+                          const pm = providers[sp]?.model
+                          if (pm) return <option key={`cfg-${pm}`} value={pm}>{pm}</option>
+                          return null
+                        })()}
+                        {(() => {
+                          // Show models relevant to the selected system provider
+                          const sp = settings?.llm_config?.systemProvider
+                          if (sp === 'ollama') {
+                            // Ollama: show locally available models (objects with .name)
+                            return ollamaModels
+                              .filter((m: any) => m?.name)
+                              .map((m: any) => (
+                                <option key={`ollama-${m.name}`} value={m.name}>{m.name}</option>
+                              ))
+                          }
+                          // Cloud providers: show common models
+                          const CLOUD_MODELS: Record<string, string[]> = {
+                            openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o3-mini', 'o1'],
+                            anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'],
+                            openrouter: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct'],
+                            opencode: ['deepseek-v4-pro', 'minimax-m3', 'qwen3.7-max', 'mimo-v2-pro'],
+                            deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+                            kimi: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-auto'],
+                            groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+                            mistral: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest'],
+                          }
+                          const models = CLOUD_MODELS[sp]
+                          if (models) {
+                            return models.map(m => {
+                              const isDuplicate = m === providers[sp]?.model
+                              if (isDuplicate) return null // already shown above
+                              return <option key={`cloud-${m}`} value={m}>{m}</option>
+                            })
+                          }
+                          return null
+                        })()}
+                        {/* Always show Ollama models at the bottom as fallback, deduped */}
+                        {(() => {
+                          const sp = settings?.llm_config?.systemProvider
+                          if (sp !== 'ollama') {
+                            return ollamaModels
+                              .filter((m: any) => m?.name)
+                              .map((m: any) => (
+                                <option key={`extra-${m.name}`} value={m.name}>{m.name} (Ollama)</option>
+                              ))
+                          }
+                          return null
+                        })()}
+                      </select>
+                    )}
+                    {savingSystemLlm && (
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>⟳ Saving…</span>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
 
             {/* Provider cards */}
             {PROVIDERS.filter(p => p.kind !== 'local' || isLocalEnv).map(p => (
-              <div key={p.id}>
-                <ProviderCard provider={p} config={providers[p.id]} tenantId={tenantId} onSaved={() => load(tenantId)} toast={toast} />
-                {providers[p.id] && defaultProvider !== p.id && (
-                  <button className="btn btn-secondary btn-sm" onClick={() => setDefault(p.id)} style={{ marginTop: 6, fontSize: 11 }}>
-                    Set as Default
-                  </button>
-                )}
-              </div>
+              <ProviderCard
+                key={p.id}
+                provider={p}
+                config={providers[p.id]}
+                tenantId={tenantId}
+                onSaved={(updatedConfig?: any) => {
+                  if (updatedConfig) {
+                    setSettings((s: any) => ({ ...s, llm_config: updatedConfig }))
+                  } else {
+                    load(tenantId)
+                  }
+                }}
+                toast={toast}
+              />
             ))}
 
             <div className="card" style={{ padding: 18, background: 'rgba(255,255,255,0.02)' }}>
@@ -632,9 +904,8 @@ export default function SettingsPage() {
                 </div>
                 <div>
                   <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Plan</label>
-                  <div style={{ padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontWeight: 600 }}>{settings?.plan} Plan</span>
-                    <a href="#" style={{ fontSize: 13, color: 'var(--green-dark)', fontWeight: 600 }}>Upgrade →</a>
+                  <div style={{ padding: '10px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 8 }}>
+                    <span style={{ fontWeight: 600 }}>{settings?.plan || 'FREE'} Plan</span>
                   </div>
                 </div>
                 <button className="btn btn-primary btn-sm" type="submit" disabled={savingGeneral} style={{ alignSelf: 'flex-start' }}>
@@ -655,17 +926,49 @@ export default function SettingsPage() {
           <div className="skeleton" style={{ height: 400, borderRadius: 12 }} />
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {/* Invite form */}
+            {/* Invite / Create form */}
             <div className="card" style={{ padding: 24 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Invite Team Member</h2>
-              <form onSubmit={invite} style={{ display: 'flex', gap: 10 }}>
-                <input className="input" type="email" placeholder="colleague@company.com" value={inviteForm.email} onChange={e => setInviteForm(f => ({ ...f, email: e.target.value }))} required style={{ flex: 2 }} />
-                <select className="input" value={inviteForm.role} onChange={e => setInviteForm(f => ({ ...f, role: e.target.value }))} style={{ flex: 1 }}>
-                  {['ADMIN', 'BUILDER', 'VIEWER'].map(r => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <button className="btn btn-primary btn-sm" type="submit" disabled={inviting} style={{ flexShrink: 0 }}>
-                  {inviting ? '⟳' : '+ Invite'}
-                </button>
+              <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
+                {inviteForm.password ? 'Create Team Member' : 'Invite Team Member'}
+              </h2>
+              <form onSubmit={invite} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <input className="input" type="email" placeholder="colleague@company.com" value={inviteForm.email} onChange={e => setInviteForm(f => ({ ...f, email: e.target.value }))} required style={{ flex: 2 }} />
+                  <select className="input" value={inviteForm.role} onChange={e => setInviteForm(f => ({ ...f, role: e.target.value }))} style={{ flex: 1 }}>
+                    {['ADMIN', 'BUILDER', 'VIEWER'].map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <div style={{ position: 'relative', flex: 1 }}>
+                    <input
+                      className="input"
+                      type={showInvitePassword ? 'text' : 'password'}
+                      placeholder="Set password (optional — leave blank to send invite)"
+                      value={inviteForm.password}
+                      onChange={e => setInviteForm(f => ({ ...f, password: e.target.value }))}
+                      minLength={8}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-sm btn-secondary"
+                    onClick={() => setShowInvitePassword(p => !p)}
+                    style={{ fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 }}
+                  >
+                    {showInvitePassword ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {inviteForm.password
+                      ? '✓ Member will be created with direct password access'
+                      : 'Member will receive an email invitation to join'}
+                  </span>
+                  <button className="btn btn-primary btn-sm" type="submit" disabled={inviting} style={{ flexShrink: 0 }}>
+                    {inviting ? '⟳' : inviteForm.password ? 'Create Member' : '+ Invite'}
+                  </button>
+                </div>
               </form>
             </div>
 
@@ -950,14 +1253,31 @@ export default function SettingsPage() {
                           </>
                         )}
                         {m.status === 'TRAINING' && (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => openLogStream(m.id, true)}
-                            style={{ fontSize: 12, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', display: 'flex', alignItems: 'center', gap: 6 }}
-                          >
-                            <span style={{ display: 'inline-block', width: 6, height: 6, background: '#10b981', borderRadius: '50%' }}></span>
-                            {selectedLog === m.id ? 'Close Stream' : 'Live Stream'}
-                          </button>
+                          <>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => openLogStream(m.id, true)}
+                              style={{ fontSize: 12, background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)', display: 'flex', alignItems: 'center', gap: 6 }}
+                            >
+                              <span style={{ display: 'inline-block', width: 6, height: 6, background: '#10b981', borderRadius: '50%' }}></span>
+                              {selectedLog === m.id ? 'Close Stream' : 'Live Stream'}
+                            </button>
+                            <button
+                              className="btn btn-sm"
+                              onClick={async () => {
+                                try {
+                                  await api.cancelTraining(tenantId, m.id)
+                                  toast('info', 'Training cancelled', 'The job was stopped.')
+                                  load(tenantId)
+                                } catch (err: any) {
+                                  toast('error', 'Failed to cancel', err.message)
+                                }
+                              }}
+                              style={{ fontSize: 12, color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', background: 'rgba(239,68,68,0.08)' }}
+                            >
+                              ■ Cancel
+                            </button>
+                          </>
                         )}
 
                         <div style={{ width: 1, height: 24, background: 'var(--border)', margin: '0 4px' }} />
@@ -1031,7 +1351,318 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
+      ) : tab === 'knowledge_infra' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {/* Header card */}
+          <div className="card" style={{ padding: 28, background: 'linear-gradient(to right, rgba(16, 185, 129, 0.08), rgba(99, 102, 241, 0.04))' }}>
+            <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>🧬🕸️</span> Knowledge Backends
+            </h2>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+              These are the underlying database services that power your Knowledge Bases (vector search) and Knowledge Graphs (entity traversal). Start them here, then manage your actual collections and graphs on the <strong>Knowledge</strong> page.
+            </p>
+            <div style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 8, padding: '12px 16px', marginBottom: 12, fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              💡 <strong>Tip:</strong> Go to <a href="/dashboard/knowledge" style={{ color: 'var(--green)', fontWeight: 600 }}>Knowledge →</a> to create and manage your Knowledge Bases & Graphs. This page only handles the backend database services that store the data.
+            </div>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={loadInfraStatus}
+              disabled={infraLoading}
+              style={{ fontSize: 13 }}
+            >
+              {infraLoading ? '⟳ Checking...' : '🔄 Refresh Status'}
+            </button>
+          </div>
+
+          {/* ── pgvector (Vector DB) card ──────────────────────────────────── */}
+          <div className="card" style={{ padding: 24, border: infraStatus?.pgvector?.running ? '1px solid rgba(16,185,129,0.3)' : '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 16 }}>
+              <div style={{ flex: 1, minWidth: 250 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                  <div style={{ fontSize: 32 }}>🧬</div>
+                  <div>
+                    <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Vector Database (pgvector)</h3>
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                      PostgreSQL + pgvector extension — powers semantic search & RAG for your agents.
+                    </p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 13 }}>
+                  {infraStatus ? (
+                    <>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: infraStatus.pgvector?.running ? '#10b981' : '#ef4444', display: 'inline-block' }}></span>
+                        <strong>{infraStatus.pgvector?.running ? 'Running' : 'Stopped'}</strong>
+                      </span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {infraStatus.pgvector?.host}:{infraStatus.pgvector?.port}
+                      </span>
+                      {infraStatus.pgvector?.connectorId && (
+                        <span style={{ color: '#10b981', background: 'rgba(16,185,129,0.1)', padding: '2px 8px', borderRadius: 20, fontSize: 11, border: '1px solid rgba(16,185,129,0.2)' }}>
+                          ✓ Backend ready (auto-connected)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>Click <strong>Refresh Status</strong> to check</span>
+                  )}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                {infraStatus && !infraStatus.pgvector?.running && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => startInfra('pgvector', 'pgvector')}
+                    disabled={infraStarting === 'pgvector'}
+                    style={{ fontSize: 12 }}
+                  >
+                    {infraStarting === 'pgvector' ? '⟳ Starting...' : '▶ Start pgvector'}
+                  </button>
+                )}
+                {infraStatus && infraStatus.pgvector?.running && !infraStatus.pgvector?.connectorId && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => createConnector('pgvector', 'pgvector')}
+                    disabled={infraCreating === 'pgvector'}
+                    style={{ fontSize: 12, background: '#10b981', borderColor: '#059669' }}
+                  >
+                    {infraCreating === 'pgvector' ? '⟳ Creating...' : '🔌 Create Connector'}
+                  </button>
+                )}
+                {infraStatus?.pgvector?.connectorId && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => window.location.href = '/dashboard/connectors'}
+                    style={{ fontSize: 12 }}
+                  >
+                    View in Integrations →
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Neo4j (Graph DB) card ──────────────────────────────────────── */}
+          <div className="card" style={{ padding: 24, border: infraStatus?.neo4j?.running ? '1px solid rgba(99,102,241,0.3)' : '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 16 }}>
+              <div style={{ flex: 1, minWidth: 250 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                  <div style={{ fontSize: 32 }}>🕸️</div>
+                  <div>
+                    <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Knowledge Graph (Neo4j)</h3>
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                      Graph database for entity-relationship traversal. Agents can navigate structured knowledge.
+                    </p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 13 }}>
+                  {infraStatus ? (
+                    <>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: infraStatus.neo4j?.running ? '#10b981' : '#ef4444', display: 'inline-block' }}></span>
+                        <strong>{infraStatus.neo4j?.running ? 'Running' : 'Stopped'}</strong>
+                      </span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {infraStatus.neo4j?.host}:{infraStatus.neo4j?.boltPort}
+                      </span>
+                      {infraStatus.neo4j?.connectorId && (
+                        <span style={{ color: '#8b5cf6', background: 'rgba(139,92,246,0.1)', padding: '2px 8px', borderRadius: 20, fontSize: 11, border: '1px solid rgba(139,92,246,0.2)' }}>
+                          ✓ Backend ready (auto-connected)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>Click <strong>Refresh Status</strong> to check</span>
+                  )}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                {infraStatus && !infraStatus.neo4j?.running && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => startInfra('neo4j', 'Neo4j')}
+                    disabled={infraStarting === 'neo4j'}
+                    style={{ fontSize: 12 }}
+                  >
+                    {infraStarting === 'neo4j' ? '⟳ Starting...' : '▶ Start Neo4j'}
+                  </button>
+                )}
+                {infraStatus && infraStatus.neo4j?.running && !infraStatus.neo4j?.connectorId && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => createConnector('neo4j', 'Neo4j')}
+                    disabled={infraCreating === 'neo4j'}
+                    style={{ fontSize: 12, background: '#8b5cf6', borderColor: '#7c3aed' }}
+                  >
+                    {infraCreating === 'neo4j' ? '⟳ Creating...' : '🔌 Create Connector'}
+                  </button>
+                )}
+                {infraStatus?.neo4j?.connectorId && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => window.location.href = '/dashboard/connectors'}
+                    style={{ fontSize: 12 }}
+                  >
+                    View in Integrations →
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Docker not available warning ───────────────────────────────── */}
+          {infraStatus && !infraStatus.docker?.available && (
+            <div className="card" style={{ padding: 18, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)' }}>
+              <p style={{ fontSize: 13, color: '#f59e0b', margin: 0 }}>
+                ⚠️ <strong>Docker is not available.</strong> Knowledge infrastructure requires Docker to run local services. Install Docker Desktop or run <code>brew install --cask docker</code> on macOS.
+              </p>
+            </div>
+          )}
+
+          {/* ── Info footer ────────────────────────────────────────────────── */}
+          <div className="card" style={{ padding: 18, background: 'rgba(255,255,255,0.02)' }}>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+              💡 <strong>How it works:</strong> These are the database services that run locally in Docker. Once started, they auto-register so your Knowledge Bases (vector search) and Knowledge Graphs (entity traversal) can store data. Go to <a href="/dashboard/knowledge" style={{ color: 'var(--green)', fontWeight: 600 }}>Knowledge →</a> to create collections and graphs on top of these backends.
+            </p>
+          </div>
+        </div>
+      ) : tab === 'system' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {/* Header card */}
+          <div className="card" style={{ padding: 28, background: 'linear-gradient(to right, rgba(99, 102, 241, 0.08), transparent)' }}>
+            <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>🔍</span> System Dependency Scan
+            </h2>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+              Scan your system for required and optional software dependencies. Missing packages can be installed automatically on macOS and Linux.
+            </p>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={runScan}
+              disabled={scanning}
+              style={{ fontSize: 13 }}
+            >
+              {scanning ? '⟳ Scanning...' : '🔍 Run System Scan'}
+            </button>
+          </div>
+
+          {/* Results */}
+          {scanResults && (
+            <>
+              {/* Summary banner */}
+              <div className="card" style={{ padding: 16, background: 'rgba(255,255,255,0.02)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                  <div>
+                    <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                      <strong>{scanResults.os}</strong> · {scanResults.hostname}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 16, fontSize: 13 }}>
+                    <span style={{ color: '#10b981' }}>
+                      ✓ {scanResults.results.filter((r: any) => r.installed).length} installed
+                    </span>
+                    <span style={{ color: '#ef4444' }}>
+                      ✗ {scanResults.results.filter((r: any) => !r.installed).length} missing
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Category sections */}
+              {['runtime', 'devtools', 'infra', 'ml', 'services'].map(cat => {
+                const items = scanResults.results.filter((r: any) => r.category === cat)
+                if (items.length === 0) return null
+                const catLabel = cat === 'runtime' ? 'Runtime (Required)' : cat === 'devtools' ? 'Developer Tools' : cat === 'infra' ? 'Infrastructure' : cat === 'ml' ? 'ML / AI' : 'Runtime Services'
+                const catIcon = cat === 'runtime' ? '⚙️' : cat === 'devtools' ? '🛠️' : cat === 'infra' ? '🏗️' : cat === 'ml' ? '🧠' : '📡'
+                return (
+                  <div key={cat} className="card" style={{ padding: 20 }}>
+                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>{catIcon}</span> {catLabel}
+                    </h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {items.map((r: any) => (
+                        <div
+                          key={r.id}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            padding: '12px 16px', borderRadius: 8,
+                            background: r.installed ? 'rgba(16,185,129,0.04)' : r.required ? 'rgba(239,68,68,0.06)' : 'rgba(245,158,11,0.04)',
+                            border: r.installed ? '1px solid rgba(16,185,129,0.12)' : r.required ? '1px solid rgba(239,68,68,0.18)' : '1px solid rgba(245,158,11,0.12)',
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <span style={{
+                                fontSize: 14,
+                                color: r.installed ? '#10b981' : r.required ? '#ef4444' : '#f59e0b'
+                              }}>
+                                {r.installed ? '✓' : '✗'}
+                              </span>
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: 14 }}>
+                                  {r.name}
+                                  {r.required && (
+                                    <span style={{ fontSize: 10, marginLeft: 8, padding: '1px 6px', borderRadius: 20, background: 'rgba(239,68,68,0.12)', color: '#ef4444', fontWeight: 600 }}>
+                                      REQUIRED
+                                    </span>
+                                  )}
+                                </div>
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                                  {r.installed && r.version ? (
+                                    <code style={{ fontSize: 11, color: '#10b981' }}>v{r.version}</code>
+                                  ) : null}
+                                  <span style={{ marginLeft: r.installed && r.version ? 8 : 0 }}>{r.description}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{ flexShrink: 0, marginLeft: 16, display: 'flex', gap: 8 }}>
+                            {!r.installed && r.installUrl && (
+                              <a
+                                href={r.installUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="btn btn-secondary btn-sm"
+                                style={{ fontSize: 11, textDecoration: 'none' }}
+                              >
+                                📥 Download
+                              </a>
+                            )}
+                            {!r.installed && r.installHint && cat !== 'services' && (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => installDep(r.id, r.name)}
+                                disabled={installingId === r.id}
+                                style={{ fontSize: 11 }}
+                              >
+                                {installingId === r.id ? '⟳ Installing...' : '🔧 Install'}
+                              </button>
+                            )}
+                            {!r.installed && r.installHint && cat === 'services' && (
+                              <code style={{ fontSize: 10, color: 'var(--text-muted)', padding: '2px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.05)' }}>
+                                {r.installHint}
+                              </code>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+
+              {/* Install hint footer */}
+              <div className="card" style={{ padding: 18, background: 'rgba(255,255,255,0.02)' }}>
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                  💡 <strong>Tip:</strong> Install <a href="https://brew.sh" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--green)' }}>Homebrew</a> first — it simplifies installing all other dependencies on macOS and Linux with a single <code>brew install</code> command.
+                </p>
+              </div>
+            </>
+          )}
+        </div>
       ) : null}
+
+
       </div>
       {ConfirmDialog}
     </div>

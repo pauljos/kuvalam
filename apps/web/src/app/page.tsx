@@ -366,6 +366,9 @@ export default function LoginPage() {
         @keyframes kv-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .kv-landing .kv-cta:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
         .kv-landing .kv-cta:active:not(:disabled) { transform: translateY(0); filter: brightness(0.98); }
+        .kv-landing .form-label { color: ${BRAND.text}; }
+        .kv-landing .input { background: ${BRAND.surface}; border-color: ${BRAND.greenBorder}; color: ${BRAND.text}; }
+        .kv-landing .input::placeholder { color: ${BRAND.textMuted}; }
         .kv-landing .input:focus { outline: none; border-color: ${BRAND.green}; box-shadow: 0 0 0 3px rgba(63,138,67,0.18); }
         @media (max-width: 900px) {
           .kv-landing { flex-direction: column; }

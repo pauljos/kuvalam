@@ -5,12 +5,14 @@ version: '3.8'
 services:
   # Database Layer (PostgreSQL 16 + pgvector)
   postgres:
-    image: pgvector/pgvector:16-pgdg
+    image: pgvector/pgvector:pg16
     container_name: kuvalam-postgres
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-kuvalam}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      # No default password — must be explicitly set. Use: export POSTGRES_PASSWORD=...
+      # or add to .env file. Failing loudly prevents accidental use of weak dev passwords.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env or environment}
       POSTGRES_DB: ${POSTGRES_DB:-kuvalam_db}
     ports:
       - "5434:5432"
@@ -46,6 +48,31 @@ services:
       - "1025:1025" # SMTP Port
       - "1080:1080" # Web UI Port
 
+  # ───────────────────────────────────────────────
+  # Knowledge Graph (Neo4j) — OPTIONAL
+  # Start with: docker compose --profile graph up
+  # ───────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5
+    container_name: kuvalam-neo4j
+    restart: unless-stopped
+    profiles: ["graph"]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-kuvalam123}
+      NEO4J_dbms_memory_heap_initial__size: 256m
+      NEO4J_dbms_memory_heap_max__size: 512m
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-kuvalam123} 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
 volumes:
   postgres_data:
   redis_data:
+  neo4j_data:

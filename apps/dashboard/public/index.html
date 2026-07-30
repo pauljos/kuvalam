@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Global Agent Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
       --bg: #0f1117;
@@ -13,6 +14,10 @@
       --text-muted: #94a3b8;
       --border: #1e293b;
       --primary: #10b981;
+      --blue: #3b82f6;
+      --purple: #8b5cf6;
+      --orange: #f59e0b;
+      --pink: #ec4899;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -81,6 +86,29 @@
       height: 350px;
       position: relative;
     }
+    .format-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .badge-chart { background: rgba(59,130,246,0.15); color: var(--blue); }
+    .badge-svg { background: rgba(139,92,246,0.15); color: var(--purple); }
+    .badge-d3 { background: rgba(236,72,153,0.15); color: var(--pink); }
+    .badge-html { background: rgba(245,158,11,0.15); color: var(--orange); }
+    .badge-mixed { background: rgba(16,185,129,0.15); color: var(--primary); }
+    .artifact-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--blue); color: #fff; padding: 6px 14px;
+      border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600;
+      margin-top: 12px; transition: background 0.2s;
+    }
+    .artifact-link:hover { background: #2563eb; }
+    .svg-inline-container { overflow-x: auto; padding: 12px 0; }
+    .svg-inline-container svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
     .empty-state {
       text-align: center;
       padding: 60px 20px;
@@ -189,64 +217,129 @@
         const id = reportData.id;
         const time = new Date(reportData.timestamp).toLocaleTimeString();
         const data = reportData.data;
+        const fmt = data.output_format || (data.html ? 'html' : (data.chart ? 'chart' : 'text'));
+        
+        const formatLabels = { chart: '📊 Chart', svg: '🎨 SVG', d3: '🔮 D3', html: '📄 HTML', mixed: '🧩 Mixed', text: '📝 Text' };
+        const formatBadgeClass = `badge-${['chart','svg','d3','html','mixed'].includes(fmt) ? fmt : 'html'}`;
         
         const card = document.createElement('div');
         card.className = 'report-card';
         
         let contentHtml = '';
         
+        // Title with format badge
+        const titleText = data.title || data.chart?.title || '';
+        const titleHtml = titleText ? `<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><h2 class="report-title" style="margin:0">${titleText}</h2><span class="format-badge ${formatBadgeClass}">${formatLabels[fmt] || fmt}</span></div>` : '';
+        
         if (data.summary) {
           contentHtml += `<div class="report-summary">${data.summary}</div>`;
         }
         
-        if (data.html) {
+        // SVG inline content
+        if (data.svg || data.svg_content) {
+          contentHtml += `<div class="svg-inline-container" id="svg-inline-${id}"></div>`;
+        }
+        
+        // D3 script
+        if (data.d3_script) {
+          contentHtml += `<div id="d3-container-${id}" style="min-height:300px;background:rgba(255,255,255,0.02);border-radius:8px;padding:16px;margin:12px 0"></div>`;
+        }
+        
+        // HTML iframe content
+        if (data.html || data.html_content) {
           contentHtml += `<div id="html-container-${id}" style="margin-top: 16px;"></div>`;
         }
         
+        // Chart.js
         if (data.chart) {
-          contentHtml += `
-            <div class="chart-container">
-              <canvas id="chart-${id}"></canvas>
-            </div>
-          `;
-        } else if (!data.html && typeof data === 'string') {
-           contentHtml += `<pre style="white-space: pre-wrap; font-family: inherit;">${data}</pre>`;
-        } else if (!data.html && Object.keys(data).length > 0 && !data.summary) {
-           contentHtml += `<pre style="white-space: pre-wrap; font-family: monospace; background: #000; padding: 12px; border-radius: 6px;">${JSON.stringify(data, null, 2)}</pre>`;
+          contentHtml += `<div class="chart-container"><canvas id="chart-${id}"></canvas></div>`;
+        }
+        
+        // Artifact download links
+        if (data.download_url) {
+          const urls = Array.isArray(data.download_url) ? data.download_url : [data.download_url];
+          const artifactNames = Array.isArray(data.artifact_names) ? data.artifact_names : (data.artifact_name ? [data.artifact_name] : urls.map((_,i) => `Download ${i+1}`));
+          contentHtml += urls.map((url, i) => {
+            const name = artifactNames[i] || 'Download';
+            const ext = (url.split('.').pop() || '').toLowerCase();
+            const icon = { svg:'🎨', csv:'📊', json:'📋', png:'🖼️', pdf:'📕', html:'🌐', zip:'📦' }[ext] || '📎';
+            return `<a class="artifact-link" href="${url}" target="_blank" download>${icon} ${name} (${ext.toUpperCase()})</a>`;
+          }).join(' ');
+        }
+        
+        // Fallback for unknown data
+        if (!data.html && !data.chart && !data.svg && !data.d3_script && !data.summary && !data.download_url && typeof data !== 'string') {
+          if (Object.keys(data).length > 0) {
+            contentHtml += `<pre style="white-space:pre-wrap;font-family:monospace;background:#000;padding:12px;border-radius:6px;">${JSON.stringify(data, null, 2)}</pre>`;
+          }
+        } else if (typeof data === 'string' && !data.html) {
+          contentHtml += `<pre style="white-space:pre-wrap;font-family:inherit;">${data}</pre>`;
         }
         
         card.innerHTML = `
           <div class="report-header">
-            <span>Report ID: ${id}</span>
+            <span>Report #${id.slice(-6)}</span>
             <span>${time}</span>
           </div>
-          ${data.chart?.title ? `<h2 class="report-title">${data.chart.title}</h2>` : ''}
+          ${titleHtml}
           ${contentHtml}
         `;
         
         container.appendChild(card);
         
-        // Render dynamic HTML
-        if (data.html) {
+        // ── Render dynamic content ──
+        
+        // HTML content in iframe
+        const htmlContent = data.html || data.html_content;
+        if (htmlContent) {
           const htmlContainer = document.getElementById(`html-container-${id}`);
-          if (data.html.includes('<html') || data.html.includes('<script')) {
-            const iframe = document.createElement('iframe');
-            iframe.style.width = '100%';
-            iframe.style.height = '600px';
-            iframe.style.border = '1px solid var(--border)';
-            iframe.style.borderRadius = '8px';
-            iframe.style.backgroundColor = '#fff'; // White bg for iframes so default text is visible
-            iframe.srcdoc = data.html;
-            htmlContainer.appendChild(iframe);
-          } else {
-            htmlContainer.innerHTML = data.html;
+          if (htmlContainer) {
+            if (htmlContent.includes('<html') || htmlContent.includes('<script') || htmlContent.includes('<svg')) {
+              const iframe = document.createElement('iframe');
+              iframe.style.width = '100%';
+              // Auto-size: taller for SVG/D3 reports
+              const isSvg = htmlContent.includes('<svg');
+              const isD3 = htmlContent.includes('d3js.org') || htmlContent.includes('d3.v7');
+              iframe.style.height = (isSvg || isD3) ? '700px' : '600px';
+              iframe.style.border = '1px solid var(--border)';
+              iframe.style.borderRadius = '8px';
+              iframe.style.backgroundColor = '#fff';
+              iframe.srcdoc = htmlContent;
+              // Allow fullscreen for interactive D3
+              if (isD3) iframe.allow = 'fullscreen';
+              htmlContainer.appendChild(iframe);
+            } else {
+              htmlContainer.innerHTML = htmlContent;
+            }
+          }
+        }
+        
+        // SVG inline
+        const svgContent = data.svg || data.svg_content;
+        if (svgContent) {
+          const svgContainer = document.getElementById(`svg-inline-${id}`);
+          if (svgContainer) {
+            svgContainer.innerHTML = svgContent;
+          }
+        }
+        
+        // D3 rendering
+        if (data.d3_script) {
+          const d3Container = document.getElementById(`d3-container-${id}`);
+          if (d3Container) {
+            try {
+              const fn = new Function('container', 'data', 'd3', data.d3_script);
+              fn(d3Container, data.d3_data || {}, d3);
+            } catch(e) {
+              d3Container.innerHTML = `<p style="color:#ef4444">D3 Error: ${e.message}</p>`;
+            }
           }
         }
         
         // Render chart if it exists
         if (data.chart) {
           const ctx = document.getElementById(`chart-${id}`);
-          renderChart(ctx, data.chart);
+          if (ctx) renderChart(ctx, data.chart);
         }
       });
     }

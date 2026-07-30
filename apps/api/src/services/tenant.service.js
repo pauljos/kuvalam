@@ -1,15 +1,11 @@
 // apps/api/src/services/tenant.service.js
+import bcrypt from 'bcryptjs'
 import { query, transaction } from '../db/pool.js'
 import { auditLog } from '../utils/audit.js'
 import { sendEmail } from '../utils/email.js'
 import { randomBytes } from 'crypto'
 import { AppError } from '../utils/errors.js'
-
-const PLAN_LIMITS = {
-  TRIAL:      { agents: 5,         kbs: 2,   workflows: 5,    members: 3 },
-  PRO:        { agents: 25,        kbs: 20,  workflows: 50,   members: 25 },
-  ENTERPRISE: { agents: Infinity,  kbs: Infinity, workflows: Infinity, members: Infinity }
-}
+import { checkPlanLimit } from './plan-limits.service.js'
 
 export async function createTenant({ name, slug, userId }) {
   // Validate slug format
@@ -56,6 +52,12 @@ export async function getTenant(tenantId) {
 }
 
 export async function updateTenant(tenantId, updates, userId) {
+  // Fetch current state BEFORE update for audit trail
+  const { rows: [before] } = await query(
+    'SELECT name FROM tenants WHERE id = $1', [tenantId]
+  )
+  if (!before) throw new AppError('TENANT_NOT_FOUND', 'Tenant not found', 404)
+
   const allowed = ['name', 'settings', 'llm_config']
   const fields = Object.keys(updates).filter(k => allowed.includes(k))
   if (fields.length === 0) throw new AppError('NO_VALID_FIELDS', 'No valid fields to update', 400)
@@ -68,27 +70,23 @@ export async function updateTenant(tenantId, updates, userId) {
     [tenantId, ...values]
   )
 
-  await auditLog({ eventType: 'tenant.updated', tenantId, actorId: userId, actorType: 'USER', action: 'UPDATE_TENANT', afterState: updates })
+  await auditLog({
+    eventType: 'tenant.updated', tenantId, actorId: userId, actorType: 'USER',
+    action: 'UPDATE_TENANT',
+    beforeState: { name: before.name },
+    afterState: updates
+  })
   return rows[0]
 }
 
-export async function inviteMember({ tenantId, email, role, invitedBy }) {
+export async function inviteMember({ tenantId, email, role, invitedBy, password }) {
   // Check plan limits
   const { rows: [countRow] } = await query(
-    `SELECT COUNT(*) as count, t.plan FROM tenant_members tm
-     JOIN tenants t ON t.id = tm.tenant_id
-     WHERE tm.tenant_id = $1 AND tm.status IN ('ACTIVE','INVITED')
-     GROUP BY t.plan`,
+    `SELECT COUNT(*) as count FROM tenant_members
+     WHERE tenant_id = $1 AND status IN ('ACTIVE','INVITED')`,
     [tenantId]
   )
-
-  const plan = countRow?.plan || 'TRIAL'
-  const limit = PLAN_LIMITS[plan]?.members || 3
-  if (parseInt(countRow?.count || 0) >= limit) {
-    throw new AppError('MEMBER_LIMIT_REACHED', `Your ${plan} plan allows max ${limit} members`, 402)
-  }
-
-  const inviteToken = randomBytes(32).toString('hex')
+  await checkPlanLimit(tenantId, 'members', parseInt(countRow?.count || 0))
 
   // Check if user exists
   const { rows: [existingUser] } = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()])
@@ -100,39 +98,71 @@ export async function inviteMember({ tenantId, email, role, invitedBy }) {
       [tenantId, existingUser.id]
     )
     if (member) throw new AppError('ALREADY_MEMBER', 'This user is already a member', 409)
-
-    // Add directly
-    await query(
-      `INSERT INTO tenant_members (tenant_id, user_id, role, status, invited_by, invite_token)
-       VALUES ($1, $2, $3, 'INVITED', $4, $5)`,
-      [tenantId, existingUser.id, role, invitedBy, inviteToken]
-    )
-  } else {
-    // Create placeholder (they'll complete signup via invite link)
-    await query(
-      `INSERT INTO tenant_members (tenant_id, user_id, role, status, invited_by, invite_token)
-       SELECT $1, id, $2, 'INVITED', $3, $4 FROM users WHERE email = $5
-       ON CONFLICT DO NOTHING`,
-      [tenantId, role, invitedBy, inviteToken, email.toLowerCase()]
-    )
   }
 
-  // Get tenant name for email
+  let userId = existingUser?.id
+  let isNewUser = false
+
+  if (!existingUser) {
+    if (password) {
+      // Create user with direct password (skip invite)
+      const passwordHash = await bcrypt.hash(password, 12)
+      const { rows: [newUser] } = await query(
+        `INSERT INTO users (email, name, password_hash, email_verified)
+         VALUES ($1, $2, $3, true)
+         RETURNING id`,
+        [email.toLowerCase(), email.split('@')[0], passwordHash]
+      )
+      userId = newUser.id
+      isNewUser = true
+    } else {
+      // Create user placeholder for invite flow
+      const { rows: [newUser] } = await query(
+        `INSERT INTO users (email, name, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [email.toLowerCase(), email.split('@')[0], 'PENDING_SETUP']
+      )
+      userId = newUser.id
+    }
+  }
+
+  const memberStatus = password ? 'ACTIVE' : 'INVITED'
+  const inviteToken = !password ? randomBytes(32).toString('hex') : null
+
+  await query(
+    `INSERT INTO tenant_members (tenant_id, user_id, role, status, invited_by, invite_token)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (tenant_id, user_id) DO UPDATE SET status = EXCLUDED.status`,
+    [tenantId, userId, role, memberStatus, invitedBy, inviteToken]
+  )
+
+  // Get tenant name
   const { rows: [tenant] } = await query('SELECT name FROM tenants WHERE id = $1', [tenantId])
 
-  await sendEmail({
-    to: email,
-    subject: `You've been invited to join ${tenant.name} on Kuvalam`,
-    html: `
-      <h2>You've been invited to ${tenant.name}</h2>
-      <p>You've been invited as a <strong>${role}</strong>.</p>
-      <a href="${process.env.FRONTEND_URL}/invite?token=${inviteToken}">Accept Invitation</a>
-    `
+  if (!password) {
+    // Send invite email
+    await sendEmail({
+      to: email,
+      subject: `You've been invited to join ${tenant.name} on Kuvalam`,
+      html: `
+        <h2>You've been invited to ${tenant.name}</h2>
+        <p>You've been invited as a <strong>${role}</strong>.</p>
+        <a href="${process.env.FRONTEND_URL}/invite?token=${inviteToken}">Accept Invitation</a>
+      `
+    })
+  }
+
+  await auditLog({
+    eventType: isNewUser ? 'tenant.member_created' : 'tenant.member_invited',
+    tenantId,
+    actorId: invitedBy,
+    actorType: 'USER',
+    action: password ? 'CREATE_MEMBER' : 'INVITE_MEMBER',
+    afterState: { email, role, status: memberStatus }
   })
 
-  await auditLog({ eventType: 'tenant.member_invited', tenantId, actorId: invitedBy, actorType: 'USER', action: 'INVITE_MEMBER', afterState: { email, role } })
-
-  return { email, role, status: 'INVITED' }
+  return { email, role, status: memberStatus }
 }
 
 export async function getMembers(tenantId) {

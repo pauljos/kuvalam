@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import dynamic from 'next/dynamic'
@@ -26,6 +27,8 @@ export default function WorkflowsPage() {
 
   // Live Execution Trace Modal
   const [selectedExec, setSelectedExec] = useState<any>(null)
+  const [deleteConfirmWf, setDeleteConfirmWf] = useState<any>(null)
+  const [deleting, setDeleting] = useState(false)
   const pollRef = useRef<any>(null)
 
   useEffect(() => {
@@ -43,6 +46,7 @@ export default function WorkflowsPage() {
       setAgents(aRes.agents || [])
     } catch (err) {
       console.error(err)
+      toast('error', 'Failed to load workflows', (err as any)?.message || '')
     } finally {
       setLoading(false)
     }
@@ -126,6 +130,25 @@ export default function WorkflowsPage() {
       toast('success', 'Workflow duplicated', `Created "${clone.name}".`)
     } catch (err: any) {
       toast('error', 'Duplicate failed', err.message)
+    }
+  }
+
+  async function deleteWorkflow(wfId: string) {
+    setDeleteConfirmWf(workflows.find(w => w.id === wfId) || null)
+  }
+
+  async function confirmDeleteWorkflow() {
+    if (!deleteConfirmWf) return
+    setDeleting(true)
+    try {
+      await api.deleteWorkflow(tenantId, deleteConfirmWf.id)
+      setWorkflows(prev => prev.filter(w => w.id !== deleteConfirmWf.id))
+      setDeleteConfirmWf(null)
+      toast('success', 'Workflow deleted')
+    } catch (err: any) {
+      toast('error', 'Delete failed', err.message)
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -237,6 +260,7 @@ export default function WorkflowsPage() {
                     <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => triggerWorkflow(wf.id)}>🚀 Execute</button>
                     <button className="btn btn-secondary btn-sm" onClick={() => openCanvasEdit(wf)}>Edit</button>
                     <button className="btn btn-secondary btn-sm" onClick={() => duplicateWorkflow(wf.id)} title="Duplicate workflow" style={{ padding: '0 10px' }}>⧉</button>
+                    <button className="btn btn-danger btn-sm" onClick={() => deleteWorkflow(wf.id)} title="Delete workflow" style={{ padding: '0 10px' }}>🗑</button>
                   </div>
                 </div>
               ))}
@@ -280,8 +304,8 @@ export default function WorkflowsPage() {
         )}
       </div>
 
-      {/* Canvas Builder (fullscreen) */}
-      {showCanvas && canvasInitial && (
+      {/* Canvas Builder (fullscreen) — portalled to body to escape layout stacking context */}
+      {showCanvas && canvasInitial && typeof document !== 'undefined' && createPortal(
         <WorkflowCanvas
           initialSteps={canvasInitial.steps}
           initialMeta={canvasInitial.meta}
@@ -291,7 +315,8 @@ export default function WorkflowsPage() {
           saving={creating}
           title={editingWfId ? 'Edit Workflow' : 'New Workflow'}
           tenantId={tenantId || undefined}
-        />
+        />,
+        document.body
       )}
 
       {/* Trace / Execution Log Modal */}
@@ -348,6 +373,32 @@ export default function WorkflowsPage() {
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => { setSelectedExec(null); if (pollRef.current) clearInterval(pollRef.current) }}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmWf && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: 420 }}>
+            <div className="modal-header">
+              <h2 className="modal-title">Delete Workflow</h2>
+              <button onClick={() => setDeleteConfirmWf(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 18 }}>✕</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ margin: 0, lineHeight: 1.6 }}>
+                Are you sure you want to delete <strong>{deleteConfirmWf.name}</strong>?
+              </p>
+              <p style={{ margin: '12px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                This will permanently remove the workflow and all its execution history. This action cannot be undone.
+              </p>
+            </div>
+            <div className="modal-footer" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setDeleteConfirmWf(null)} disabled={deleting}>Cancel</button>
+              <button className="btn btn-danger" onClick={confirmDeleteWorkflow} disabled={deleting}>
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
             </div>
           </div>
         </div>

@@ -5,6 +5,7 @@ import { auditLog } from '../utils/audit.js'
 import { dispatchTask } from './task.service.js'
 import { enqueueWorkflowStep } from './queue.service.js'
 import { broadcastTelemetry } from './telemetry.service.js'
+import { checkPlanLimit } from './plan-limits.service.js'
 
 // Maximum time to wait for an agent task inside a workflow step (10 minutes)
 const AGENT_TASK_TIMEOUT_MS = 10 * 60 * 1000
@@ -154,21 +155,56 @@ function resolveNextStepIdx(steps, stepIdx, stepOutput, context) {
 }
 
 // ─── Crew task awaiter ────────────────────────────────────────────────────────
-async function awaitTask(taskId, timeoutMs = AGENT_TASK_TIMEOUT_MS) {
+// ── L3 Circuit Breaker: prevents indefinite blocking when an agent is unavailable ──
+// If a task stays QUEUED (never starts) for more than maxStallMs, we treat it
+// as a stalled/unresponsive agent and abort early with a clear error.
+// Also applies adaptive poll backoff: starts at 1.5s, backs off to 5s after 30s
+// to reduce DB load during long-running tasks.
+async function awaitTask(taskId, timeoutMs = AGENT_TASK_TIMEOUT_MS, maxStallMs = 5 * 60_000) {
   const deadline = Date.now() + timeoutMs
+  const startTime = Date.now()
+  let firstRunAt = null
+  let pollIntervalMs = 1500
+
   while (true) {
     if (Date.now() > deadline) throw new Error(`Task ${taskId} timed out after ${timeoutMs / 60000} min`)
-    await new Promise(r => setTimeout(r, 1500))
+
+    await new Promise(r => setTimeout(r, pollIntervalMs))
+
+    // Back off to 5s poll after 30s to reduce DB load
+    if (pollIntervalMs < 5000 && (Date.now() - startTime) > 30_000) {
+      pollIntervalMs = 5000
+    }
+
     const { rows: [t] } = await query(
-      'SELECT status, result, error FROM agent_tasks WHERE id = $1', [taskId]
+      'SELECT status, result, error, started_at FROM agent_tasks WHERE id = $1', [taskId]
     )
     if (!t) throw new Error(`Task ${taskId} not found`)
     if (t.status === 'COMPLETED') return t.result
     if (t.status === 'FAILED') throw new Error(t.error || `Task ${taskId} failed`)
+    if (t.status === 'CANCELLED') throw new Error(`Task ${taskId} was cancelled`)
+
+    // Track when the task first entered RUNNING state
+    if (t.status === 'RUNNING' && !firstRunAt) firstRunAt = Date.now()
+
+    // Circuit breaker: task has been QUEUED for too long — worker likely died
+    if (t.status === 'QUEUED' && (Date.now() - startTime) > maxStallMs) {
+      throw new Error(
+        `Task ${taskId} stalled: remained QUEUED for ${Math.round(maxStallMs / 60000)} min without starting. ` +
+        'The worker may be unavailable or overloaded. Check queue health.'
+      )
+    }
   }
 }
 
+
 export async function createWorkflow(tenantId, { name, description, trigger = { type: 'MANUAL' }, steps = [], onFailure = 'STOP', userId }) {
+  // Plan limit check
+  const { rows: [countRow] } = await query(
+    'SELECT COUNT(*) as count FROM workflows WHERE tenant_id = $1',
+    [tenantId]
+  )
+  await checkPlanLimit(tenantId, 'workflows', parseInt(countRow?.count || 0))
   const { rows: [wf] } = await query(
     `INSERT INTO workflows (tenant_id, name, description, trigger, steps, on_failure, status, created_by)
      VALUES ($1, $2, $3, $4, $5, $6, 'DRAFT', $7) RETURNING *`,
@@ -208,6 +244,26 @@ export async function getWorkflow(tenantId, id) {
   return wf
 }
 
+export async function deleteWorkflow(tenantId, id) {
+  // ── L2 Soft Delete: archive instead of hard DELETE ────────────────────────
+  // Preserves execution history and prevents reference errors on in-flight runs.
+  // The scheduler detects ARCHIVED workflows and removes their timers.
+  const { rowCount } = await query(
+    `UPDATE workflows
+     SET status = 'ARCHIVED', deleted_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND status != 'ARCHIVED'`,
+    [id, tenantId]
+  )
+  if (rowCount === 0) return false
+  // Clear any active scheduler timer for this workflow
+  try {
+    const { clearWorkflowTimer } = await import('./scheduler.service.js')
+    clearWorkflowTimer(id)
+  } catch { /* scheduler not available in test env */ }
+  return true
+}
+
+
 export async function updateWorkflow(tenantId, id, { name, description, trigger, steps, onFailure, status, userId }) {
   const wf = await getWorkflow(tenantId, id)
   const fields = []
@@ -236,7 +292,9 @@ export async function updateWorkflow(tenantId, id, { name, description, trigger,
 
   await auditLog({
     eventType: 'workflow.updated', tenantId, actorId: userId, actorType: 'USER',
-    resourceType: 'Workflow', resourceId: id, action: 'UPDATE_WORKFLOW'
+    resourceType: 'Workflow', resourceId: id, action: 'UPDATE_WORKFLOW',
+    beforeState: { name: wf.name, status: wf.status, description: wf.description?.slice(0, 200) },
+    afterState: { name: updated.name, status: updated.status, description: updated.description?.slice(0, 200) }
   })
 
   return updated
@@ -289,8 +347,33 @@ export async function startWorkflowExecution(tenantId, workflowId, { context = {
 
   await auditLog({
     eventType: 'workflow.execution_started', tenantId, actorId: exec.id, actorType: 'SYSTEM',
-    resourceType: 'WorkflowExecution', resourceId: exec.id, action: 'START_EXECUTION'
+    resourceType: 'WorkflowExecution', resourceId: exec.id, action: 'START_EXECUTION',
+    metadata: { workflowId, workflowName: wf.name }
   })
+
+  // If this execution was triggered by a trigger (test fire or webhook/schedule),
+  // also log a trigger.fired event and update the trigger's fire count
+  if (context?.triggerId && context?.triggerType) {
+    try {
+      await auditLog({
+        eventType: 'trigger.fired', tenantId,
+        actorType: 'SYSTEM', actorId: context.triggerId,
+        resourceType: 'WorkflowTrigger', resourceId: context.triggerId,
+        action: `${context.triggerType}_FIRED`,
+        metadata: {
+          workflowId,
+          workflowName: wf.name,
+          triggerType: context.triggerType,
+          executionId: exec.id,
+          test: context.test === true
+        }
+      })
+      await query(
+        `UPDATE workflow_triggers SET last_fired_at = NOW(), fire_count = fire_count + 1 WHERE id = $1`,
+        [context.triggerId]
+      )
+    } catch { /* non-critical */ }
+  }
 
   // Enqueue the first step via BullMQ (falls back to setImmediate if Redis unavailable)
   await enqueueWorkflowStep(exec.id, wf.steps, 0, context, runWorkflowStep)
@@ -346,13 +429,23 @@ async function runNextStep(execId, steps, stepIdx, context) {
   if (stepIdx >= steps.length) {
     // Look up the tenant first so downstream updates + telemetry can scope
     // themselves defensively (worker context has no RLS).
-    const { rows: [exec] } = await query('SELECT tenant_id FROM workflow_executions WHERE id = $1', [execId])
+    const { rows: [exec] } = await query('SELECT tenant_id, id, workflow_id, started_at FROM workflow_executions WHERE id = $1', [execId])
     if (!exec) return
     await query(
       `UPDATE workflow_executions SET status = 'COMPLETED', completed_at = NOW() WHERE id = $1 AND tenant_id = $2`,
       [execId, exec.tenant_id]
     )
     broadcastTelemetry(exec.tenant_id, 'workflow.completed', { execId })
+    try {
+      const durationMs = Date.now() - (new Date(exec.started_at).getTime())
+      await auditLog({
+        eventType: 'workflow.execution_completed', tenantId: exec.tenant_id,
+        actorId: exec.id, actorType: 'SYSTEM',
+        resourceType: 'WorkflowExecution', resourceId: exec.id,
+        action: 'COMPLETE_EXECUTION',
+        metadata: { workflowId: exec.workflow_id, stepCount: steps.length, durationMs }
+      })
+    } catch { /* non-critical */ }
     return
   }
 
@@ -433,6 +526,15 @@ async function runNextStep(execId, steps, stepIdx, context) {
     await query(`UPDATE workflow_executions SET context = $1 WHERE id = $2 AND tenant_id = $3`, [updatedContext, execId, tenantId])
 
     broadcastTelemetry(tenantId, 'workflow.step_completed', { execId, stepIdx, stepId: step.id, duration })
+    try {
+      await auditLog({
+        eventType: 'workflow.step_completed', tenantId,
+        actorId: execId, actorType: 'SYSTEM',
+        resourceType: 'StepExecution', resourceId: stepExec.id,
+        action: step.type,
+        metadata: { stepId: step.id, stepIdx, stepType: step.type, durationMs: duration, execId }
+      })
+    } catch { /* non-critical */ }
 
     // Resolve next step (conditional routing)
     const nextIdx = resolveNextStepIdx(steps, stepIdx, output, updatedContext)
@@ -445,6 +547,29 @@ async function runNextStep(execId, steps, stepIdx, context) {
       [JSON.stringify({ message: err.message }), duration, stepExec.id, tenantId]
     )
     broadcastTelemetry(tenantId, 'workflow.step_failed', { execId, stepIdx, error: err.message })
+    try {
+      await auditLog({
+        eventType: 'workflow.step_failed', tenantId,
+        actorId: execId, actorType: 'SYSTEM',
+        resourceType: 'StepExecution', resourceId: stepExec.id,
+        action: step.type,
+        metadata: { stepId: step.id, stepIdx, stepType: step.type, durationMs: duration, execId, error: err.message.slice(0, 300) }
+      })
+    } catch { /* non-critical */ }
+    // Mark the workflow execution as FAILED
+    try {
+      await query(
+        `UPDATE workflow_executions SET status = 'FAILED', error = $1, completed_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+        [JSON.stringify({ message: err.message, stepIdx, stepId: step.id }), execId, tenantId]
+      )
+      await auditLog({
+        eventType: 'workflow.execution_failed', tenantId,
+        actorId: execId, actorType: 'SYSTEM',
+        resourceType: 'WorkflowExecution', resourceId: execId,
+        action: 'FAIL_EXECUTION',
+        metadata: { stepIdx, stepId: step.id, stepType: step.type, error: err.message.slice(0, 300) }
+      }).catch(() => {})
+    } catch { /* non-critical */ }
     throw err
   }
 }
@@ -476,14 +601,26 @@ export async function executeStepBody(step, context, { tenantId, execId } = {}) 
         context
       })
 
-      const deadline = Date.now() + AGENT_TASK_TIMEOUT_MS
+      // ── Configurable timeout: read step.timeoutMinutes first, then constant ──
+      // Long-running analytics/research agents often need more than 10 minutes.
+      const stepTimeoutMs = step.timeoutMinutes
+        ? Math.min(step.timeoutMinutes, 120) * 60_000  // cap at 2 hours
+        : AGENT_TASK_TIMEOUT_MS
+
+      const deadline = Date.now() + stepTimeoutMs
+      let pollIntervalMs = 1500  // start at 1.5s
+
       while (true) {
         if (Date.now() > deadline) {
           await query(`UPDATE agent_tasks SET status = 'FAILED', error = $1 WHERE id = $2`,
             ['Timed out waiting for workflow step', result.taskId])
-          throw new Error(`Agent task ${result.taskId} timed out after ${AGENT_TASK_TIMEOUT_MS / 60000} minutes`)
+          throw new Error(`Agent task ${result.taskId} timed out after ${stepTimeoutMs / 60000} minutes`)
         }
-        await new Promise(r => setTimeout(r, 1500))
+        await new Promise(r => setTimeout(r, pollIntervalMs))
+        // Back off to 5s after 30s to reduce DB load on long-running tasks
+        if (pollIntervalMs < 5000 && (Date.now() - (deadline - stepTimeoutMs)) > 30_000) {
+          pollIntervalMs = 5000
+        }
         const { rows: [task] } = await query(
           'SELECT status, result, error FROM agent_tasks WHERE id = $1', [result.taskId]
         )
@@ -641,16 +778,31 @@ export async function executeStepBody(step, context, { tenantId, execId } = {}) 
       output = interpolateDeep(step.input?.template ?? {}, context)
 
     // ── NOTIFY step ──────────────────────────────────────────────────────────
-    // Convenience shortcut for the most common tool call: post a message to
-    // Slack. Uses the tenant's active Slack connector. Equivalent to TOOL step
-    // with slack__post_message, but pre-canned so builders don't need to know
-    // the tool naming scheme.
+    // Multi-provider notification shortcut. `input.provider` defaults to
+    // 'slack' for backward compatibility. Supported providers:
+    //   slack, gmail, discord, sendgrid, twilio
+    // Maps to the corresponding connector tool automatically so builders
+    // don't need to know the tool naming scheme.
     } else if (step.type === 'NOTIFY') {
+      const provider = (step.input?.provider || 'slack').toLowerCase()
       const channel = interpolateTemplate(step.input?.channel || '', context)
       const message = interpolateTemplate(step.input?.message || '', context)
+      const subject = interpolateTemplate(step.input?.subject || '', context)
       const { executeConnectorTool } = await import('./connector-tools.service.js')
-      const result = await executeConnectorTool('slack__post_message', { channel, text: message }, tenantId)
-      if (!result?.success) throw new Error(result?.error || 'Slack notify failed')
+
+      const NOTIFY_PROVIDERS = {
+        slack:    { tool: 'slack__post_message',   args: { channel, text: message } },
+        gmail:    { tool: 'gmail__send_email',     args: { to: channel, subject: subject || message.slice(0, 78), body: message } },
+        discord:  { tool: 'discord__send',          args: { channelId: channel, content: message } },
+        sendgrid: { tool: 'sendgrid__send',         args: { to: channel, subject: subject || message.slice(0, 78), body: message } },
+        twilio:   { tool: 'twilio__send_sms',       args: { to: channel, body: message } },
+      }
+
+      const mapping = NOTIFY_PROVIDERS[provider]
+      if (!mapping) throw new Error(`Unknown NOTIFY provider "${provider}". Supported: ${Object.keys(NOTIFY_PROVIDERS).join(', ')}`)
+
+      const result = await executeConnectorTool(mapping.tool, mapping.args, tenantId)
+      if (!result?.success) throw new Error(result?.error || `${provider} notify failed`)
       output = result
 
     // ── TOOL step ────────────────────────────────────────────────────────────

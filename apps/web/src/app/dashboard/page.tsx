@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   Bot, Library, RefreshCw, CheckCircle2, Plus, Activity, ArrowRight
 } from 'lucide-react'
@@ -41,6 +42,7 @@ function humaniseEvent(ev: string): string {
 
 export default function DashboardPage() {
   const { tenantId, user } = useApp()
+  const router = useRouter()
   const [agents, setAgents] = useState<any[]>([])
   const [kbs, setKbs] = useState<any[]>([])
   const [tenant, setTenant] = useState<any>(null)
@@ -52,11 +54,12 @@ export default function DashboardPage() {
   // Redirect sysadmins without tenant to admin portal
   useEffect(() => {
     if (!tenantId && user?.isSystemAdmin && typeof window !== 'undefined') {
-      window.location.href = '/dashboard/admin'
+      router.push('/dashboard/admin')
     }
   }, [tenantId, user])
   const [workflowCount, setWorkflowCount] = useState(0)
   const [activity, setActivity] = useState<AuditEntry[]>([])
+  const [showAllAgents, setShowAllAgents] = useState(false)
 
   useEffect(() => {
     const tid = tenantId
@@ -175,11 +178,29 @@ export default function DashboardPage() {
           )
         })()}
 
+        {/* ── Quick Actions ─────────────────────────────────────────────────── */}
+        {!loading && agents.length > 0 && (
+          <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+            <Link href="/dashboard/agents" className="btn btn-primary btn-sm">
+              <Plus size={14} strokeWidth={2.5} /> Create Agent
+            </Link>
+            <Link href="/dashboard/knowledge" className="btn btn-secondary btn-sm">
+              📚 Upload Document
+            </Link>
+            <Link href="/dashboard/workflows" className="btn btn-secondary btn-sm">
+              🔧 Build Workflow
+            </Link>
+            <Link href="/dashboard/triggers" className="btn btn-secondary btn-sm">
+              ⚡ New Trigger
+            </Link>
+          </div>
+        )}
+
         {/* ── Agents table + Recent Activity ────────────────────────────────── */}
         <div className="overview-grid">
           <div className="card" style={{ padding: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ fontSize: 15, fontWeight: 800 }}>Agents</h2>
+              <h2 style={{ fontSize: 15, fontWeight: 800 }}>Agents ({agents.length})</h2>
               <Link href="/dashboard/agents" style={{ color: 'var(--green-dark)', fontWeight: 700, textDecoration: 'none', fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 View all <ArrowRight size={13} strokeWidth={2.5} />
               </Link>
@@ -196,26 +217,37 @@ export default function DashboardPage() {
                 <Link href="/dashboard/agents" className="btn btn-primary">Create First Agent</Link>
               </div>
             ) : (
-              <table className="table">
-                <thead>
-                  <tr><th>Agent</th><th>Model</th><th>Status</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {agents.slice(0, 6).map(agent => (
-                    <tr key={agent.id}>
-                      <td style={{ fontWeight: 700 }}>
-                        <Link href={`/dashboard/agents/${agent.id}`} style={{ textDecoration: 'none', color: 'var(--text)' }}>
-                          {agent.name}
-                        </Link>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>{agent.archetype}</div>
-                      </td>
-                      <td><span className="tag" style={{ fontSize: 11 }}>{agent.llm_model}</span></td>
-                      <td><span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span></td>
-                      <td><Link href={`/dashboard/agents/${agent.id}`} className="btn btn-secondary btn-sm">Open</Link></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <>
+                <table className="table">
+                  <thead>
+                    <tr><th>Agent</th><th>Model</th><th>Status</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    {(showAllAgents ? agents : agents.slice(0, 6)).map(agent => (
+                      <tr key={agent.id}>
+                        <td style={{ fontWeight: 700 }}>
+                          <Link href={`/dashboard/agents/${agent.id}`} style={{ textDecoration: 'none', color: 'var(--text)' }}>
+                            {agent.name}
+                          </Link>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>{agent.archetype}</div>
+                        </td>
+                        <td><span className="tag" style={{ fontSize: 11 }}>{agent.llm_model}</span></td>
+                        <td><span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span></td>
+                        <td><Link href={`/dashboard/agents/${agent.id}`} className="btn btn-secondary btn-sm">Open</Link></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {agents.length > 6 && (
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setShowAllAgents(!showAllAgents)}
+                    style={{ marginTop: 12, width: '100%', justifyContent: 'center', fontSize: 13 }}
+                  >
+                    {showAllAgents ? `Show less (${6})` : `Show all (${agents.length})`}
+                  </button>
+                )}
+              </>
             )}
           </div>
 

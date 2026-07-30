@@ -5,7 +5,7 @@ import { errorResponse, AppError } from '../utils/errors.js'
 import { encrypt, decrypt } from '../services/crypto.service.js'
 import { cached, del as cacheDel } from '../services/cache.service.js'
 
-const SUPPORTED_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'ollama', 'groq', 'mistral', 'opencode', 'lmstudio', 'localai', 'custom']
+const SUPPORTED_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'ollama', 'groq', 'mistral', 'opencode', 'deepseek', 'kimi', 'lmstudio', 'localai', 'custom']
 
 export default async function settingsRoutes(fastify) {
   const auth = { preHandler: [fastify.authenticate] }
@@ -46,7 +46,8 @@ export default async function settingsRoutes(fastify) {
   // PUT /tenants/:tenantId/settings/llm  — save LLM provider config
   fastify.put('/tenants/:tenantId/settings/llm', ownerAdmin, async (req, reply) => {
     try {
-      const { provider, apiKey, model, baseUrl, enabled } = req.body
+      const { provider, apiKey, model, baseUrl, enabled,
+              systemProvider, systemModel } = req.body
 
       if (provider && !SUPPORTED_PROVIDERS.includes(provider)) {
         throw new AppError('UNSUPPORTED_PROVIDER', `Provider must be one of: ${SUPPORTED_PROVIDERS.join(', ')}`, 400)
@@ -58,24 +59,45 @@ export default async function settingsRoutes(fastify) {
 
       const existing = tenant.llm_config || {}
 
-      // Merge — support multiple providers stored per provider key.
-      // API keys are encrypted at rest with AES-256-GCM via crypto.service.
-      const targetProvider = provider || existing.defaultProvider || 'openai'
-      const existingProvider = existing.providers?.[targetProvider] || {}
-      // Preserve the previously-stored encrypted key if the caller didn't supply a new one
-      const encryptedKey = apiKey ? encrypt(apiKey) : existingProvider.apiKey
-      const updatedConfig = {
-        ...existing,
-        defaultProvider: targetProvider,
-        providers: {
-          ...(existing.providers || {}),
-          [targetProvider]: {
-            apiKey: encryptedKey,
-            model: model || existingProvider.model || getDefaultModel(targetProvider),
-            baseUrl: baseUrl || existingProvider.baseUrl || getDefaultBaseUrl(targetProvider),
-            enabled: enabled !== undefined ? enabled : (existingProvider.enabled !== undefined ? existingProvider.enabled : true),
-            updatedAt: new Date().toISOString()
+      // Determine whether the caller is updating a provider config, or
+      // only changing system-level LLM settings (systemProvider/systemModel).
+      const isProviderUpdate = provider !== undefined || apiKey !== undefined ||
+        model !== undefined || baseUrl !== undefined || enabled !== undefined
+
+      let updatedConfig
+
+      if (isProviderUpdate) {
+        // Merge — support multiple providers stored per provider key.
+        // API keys are encrypted at rest with AES-256-GCM via crypto.service.
+        const targetProvider = provider || existing.defaultProvider || 'openai'
+        const existingProvider = existing.providers?.[targetProvider] || {}
+        // Preserve the previously-stored encrypted key if the caller didn't supply a new one
+        const encryptedKey = apiKey ? encrypt(apiKey) : existingProvider.apiKey
+        updatedConfig = {
+          ...existing,
+          defaultProvider: targetProvider,
+          // System LLM — used for platform-level AI features (workflow gen, agent creation, etc.)
+          // Falls back to defaultProvider if not explicitly set.
+          ...(systemProvider !== undefined ? { systemProvider: systemProvider || null } : {}),
+          ...(systemModel !== undefined ? { systemModel: systemModel || null } : {}),
+          providers: {
+            ...(existing.providers || {}),
+            [targetProvider]: {
+              apiKey: encryptedKey,
+              model: model || existingProvider.model || getDefaultModel(targetProvider),
+              baseUrl: baseUrl || existingProvider.baseUrl || getDefaultBaseUrl(targetProvider),
+              enabled: enabled !== undefined ? enabled : (existingProvider.enabled !== undefined ? existingProvider.enabled : true),
+              updatedAt: new Date().toISOString()
+            }
           }
+        }
+      } else {
+        // System-only update — don't touch provider configs, just
+        // set/clear systemProvider and systemModel at the top level.
+        updatedConfig = {
+          ...existing,
+          ...(systemProvider !== undefined ? { systemProvider: systemProvider || null } : {}),
+          ...(systemModel !== undefined ? { systemModel: systemModel || null } : {})
         }
       }
 
@@ -138,7 +160,7 @@ export default async function settingsRoutes(fastify) {
       let testResult = { success: false, message: '', latency: 0 }
       const start = Date.now()
 
-      if (provider === 'openai' || provider === 'openrouter' || provider === 'groq' || provider === 'mistral' || provider === 'opencode' || provider === 'lmstudio' || provider === 'localai' || provider === 'custom') {
+      if (provider === 'openai' || provider === 'openrouter' || provider === 'groq' || provider === 'mistral' || provider === 'opencode' || provider === 'deepseek' || provider === 'kimi' || provider === 'lmstudio' || provider === 'localai' || provider === 'custom') {
         const baseUrl = req.body.baseUrl || getDefaultBaseUrl(provider)
         const testModel = model || getDefaultModel(provider)
         try {
@@ -226,6 +248,9 @@ export default async function settingsRoutes(fastify) {
         [req.params.tenantId, ...Object.values(updates)]
       )
       await auditLog({ eventType: 'tenant.settings_updated', tenantId: req.params.tenantId, actorId: req.user.sub, actorType: 'USER', action: 'UPDATE_SETTINGS' })
+      // Invalidate caches so the frontend sees name/settings changes immediately
+      await cacheDel(`tenant:${req.params.tenantId}:settings`)
+      await cacheDel(`tenant:${req.params.tenantId}:info`)
       return reply.send({ success: true, data: tenant, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
@@ -253,6 +278,8 @@ function getDefaultModel(provider) {
     mistral: 'mistral-large-latest',
     ollama: 'llama3.2',
     opencode: 'deepseek-v4-pro',
+    deepseek: 'deepseek-chat',
+    kimi: 'moonshot-v1-auto',
     lmstudio: 'local-model',
     localai: 'gpt-3.5-turbo',
     custom: 'local-model'
@@ -268,6 +295,8 @@ function getDefaultBaseUrl(provider) {
     mistral: 'https://api.mistral.ai/v1',
     ollama: 'http://localhost:11434/v1',
     opencode: 'https://opencode.ai/zen/go/v1',
+    deepseek: 'https://api.deepseek.com/v1',
+    kimi: 'https://api.moonshot.cn/v1',
     lmstudio: 'http://localhost:1234/v1',
     localai: 'http://localhost:8080/v1',
     custom: null

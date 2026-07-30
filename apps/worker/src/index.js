@@ -20,6 +20,19 @@ connection.on('connect', () => console.log('[Worker] Redis connected'))
 connection.on('error', (err) => console.error('[Worker] Redis error:', err.message))
 
 // ─── Agent Task Worker ────────────────────────────────────────────────────────
+//
+// ARCHITECTURAL NOTE — Worker/API coupling (review item #7):
+// This worker currently imports task execution logic directly from
+// apps/api/src/services/. This is intentional for the initial architecture
+// but means the worker cannot be deployed as a fully-independent image.
+//
+// Migration path:
+//   1. Extract shared business logic into packages/shared/
+//   2. Both the API and worker import from @kuvalam/shared
+//   3. Worker only needs the job schema, not the full service implementation
+//
+// The coupling is safe in the current single-monorepo deployment but should
+// be addressed before horizontally scaling the worker independently.
 const taskWorker = new Worker(
   'agent-tasks',
   async (job) => {
@@ -62,7 +75,11 @@ workflowWorker.on('failed', (job, err) =>
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal) {
   console.log(`[Worker] ${signal} received — draining queues...`)
+  // Close workers first so BullMQ can finish any in-flight job acks before
+  // we close the underlying Redis connection. Calling connection.quit() while
+  // workers are still finalising their state causes unhandled errors.
   await Promise.all([taskWorker.close(), workflowWorker.close()])
+  // Now it's safe to close the connection — all workers have fully stopped.
   await connection.quit()
   console.log('[Worker] Clean shutdown complete')
   process.exit(0)

@@ -70,7 +70,7 @@ export default function ProfilePage() {
         </div>
       </div>
 
-      <div className="page-body" style={{ maxWidth: 720 }}>
+      <div className="page-body">
         {loading ? (
           <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>Loading…</div>
         ) : (

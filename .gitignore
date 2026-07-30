@@ -72,3 +72,21 @@ scratch/
 
 # Render
 .render/
+
+# Root-level development artefacts (test scripts, debug screenshots, dev logs)
+# These should live in apps/*/tests/ or scripts/ — not the project root.
+test_*.mjs
+test_*.js
+test_*.py
+debug_*.mjs
+run_*.mjs
+execute_*.mjs
+create_and_run_*.mjs
+*.png
+*.db
+*.sqlite
+scratch.js
+scratch.mjs
+dev_server.log
+dev_web.log
+dev_*.log

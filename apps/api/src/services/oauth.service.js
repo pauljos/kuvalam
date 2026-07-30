@@ -11,12 +11,15 @@ import { randomUUID, createHmac, timingSafeEqual } from 'crypto'
 // Attackers otherwise could craft their own state and hijack the OAuth callback
 // to bind an external account to a tenant they don't control.
 function stateSecret() {
+  // Prefer OAUTH_STATE_SECRET. Fall back to JWT_SECRET (already enforced as 32+ chars).
+  // Never use a hardcoded fallback — a predictable secret allows OAuth state forgery
+  // and callback hijacking in ANY environment (dev included).
   const s = process.env.OAUTH_STATE_SECRET || process.env.JWT_SECRET
   if (!s || s.length < 32) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('OAUTH_STATE_SECRET (or JWT_SECRET) must be set to a 32+ char secret in production')
-    }
-    return 'kuvalam-dev-oauth-state-secret-min-32-chars'
+    throw new Error(
+      'OAUTH_STATE_SECRET must be set (or JWT_SECRET must be 32+ characters). ' +
+      'Generate one with: openssl rand -hex 32'
+    )
   }
   return s
 }

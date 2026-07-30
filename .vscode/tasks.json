@@ -1,0 +1,26 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "start-web",
+			"type": "shell",
+			"command": "cd apps/web && npx next dev --port 3000",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "restart-api",
+			"type": "shell",
+			"command": "kill $(lsof -ti :3001) 2>/dev/null; sleep 1; cd apps/api && node --env-file=.env src/index.js",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "restart-api-now",
+			"type": "shell",
+			"command": "kill $(lsof -ti :3001) 2>/dev/null; sleep 1; cd apps/api && node --env-file=.env src/index.js",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

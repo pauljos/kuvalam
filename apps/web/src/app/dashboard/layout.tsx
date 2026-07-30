@@ -4,10 +4,11 @@ import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
   LayoutGrid, Bot, Workflow, CheckCircle2, Library, Plug, BarChart3,
-  ScrollText, Settings, Shield, Zap, Search, Menu, X, LogOut, Building2
+  ScrollText, Settings, Shield, Zap, Search, Menu, X, LogOut, Building2, MessageSquare, Sparkles
 } from 'lucide-react'
 import { AppProvider, useApp } from '@/lib/context'
 import { CommandPalette } from '@/components/CommandPalette'
+import BuilderBot from '@/components/BuilderBot'
 
 type NavItem = {
   href: string
@@ -25,6 +26,8 @@ const primaryNav: NavItem[] = [
   { href: '/dashboard/triggers',   label: 'Triggers',      icon: Zap },
   { href: '/dashboard/approvals',  label: 'Approvals',     icon: CheckCircle2 },
   { href: '/dashboard/knowledge',  label: 'Knowledge',     icon: Library },
+  { href: '/dashboard/chat',       label: 'Chat',          icon: MessageSquare },
+  { href: '#builder-bot',        label: 'Builder',       icon: Sparkles },
   {
     href: '/dashboard/connectors',
     label: 'Integrations',
@@ -97,6 +100,20 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
             {group.label && <div className="sidebar-group-label">{group.label}</div>}
             {group.items.map(item => {
               const Icon = item.icon
+              // Builder opens the popup bot, not a page
+              if (item.href === '#builder-bot') {
+                return (
+                  <button
+                    key={item.href}
+                    className="sidebar-item"
+                    onClick={() => { window.dispatchEvent(new CustomEvent('kuvalam:open-builder')); onClose?.() }}
+                    style={{ width: '100%', border: 'none', background: 'none', font: 'inherit', cursor: 'pointer' }}
+                  >
+                    <Icon size={17} strokeWidth={2} />
+                    <span>{item.label}</span>
+                  </button>
+                )
+              }
               return (
                 <Link
                   key={item.href}
@@ -151,6 +168,7 @@ function pageTitleFromPath(pathname: string): string {
     triggers: 'Triggers',
     approvals: 'Approvals',
     knowledge: 'Knowledge',
+    chat: 'Chat',
     connectors: 'Integrations',
     tools: 'Integrations',
     analytics: 'Analytics',
@@ -249,6 +267,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
         {children}
       </main>
       <CommandPalette />
+      <BuilderBot />
     </div>
   )
 }

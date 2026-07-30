@@ -1,4 +1,4 @@
-import { listCustomModels, getCustomModel, createCustomModel, activateCustomModel, retrainCustomModel, deleteCustomModel, pushToOllama } from '../services/custom-models.service.js'
+import { listCustomModels, getCustomModel, createCustomModel, activateCustomModel, retrainCustomModel, deleteCustomModel, pushToOllama, cancelTraining } from '../services/custom-models.service.js'
 import { query } from '../db/pool.js'
 
 export default async function (fastify, opts) {
@@ -15,23 +15,32 @@ export default async function (fastify, opts) {
   // ── SSE: stream live training log to the browser ───────────────────────────
   // Exactly how HuggingFace AutoTrain / W&B stream training progress.
   // The client opens an EventSource; we push new log lines every 600ms until done.
+  // Auth: accepts either a JWT accessToken (query: ?token=) or a dedicated
+  //       stream_token (query: ?stream_token=) that never expires for this model.
   fastify.get('/tenants/:tenantId/custom-models/:modelId/log-stream', async (request, reply) => {
     const { tenantId, modelId } = request.params
     const token = request.query.token
-
-    if (!token) return reply.status(401).send('Unauthorized: No token provided')
-    try {
-      fastify.jwt.verify(token)
-    } catch {
-      return reply.status(401).send('Unauthorized: Invalid token')
-    }
+    const streamToken = request.query.stream_token
 
     // Verify model belongs to this tenant
     const { rows: [model] } = await query(
-      'SELECT id, status FROM custom_models WHERE id = $1 AND tenant_id = $2',
+      'SELECT id, status, stream_token FROM custom_models WHERE id = $1 AND tenant_id = $2',
       [modelId, tenantId]
     )
     if (!model) return reply.status(404).send('Not found')
+
+    // Authenticate: accept either JWT accessToken or dedicated stream_token
+    let authenticated = false
+    if (token) {
+      try {
+        fastify.jwt.verify(token)
+        authenticated = true
+      } catch {}
+    }
+    if (!authenticated && streamToken && model.stream_token) {
+      authenticated = (streamToken === model.stream_token)
+    }
+    if (!authenticated) return reply.status(401).send('Unauthorized: Valid token or stream_token required')
 
     // Set SSE headers, explicitly including CORS since raw.writeHead bypasses Fastify plugins
     const origin = request.headers.origin || '*'
@@ -46,43 +55,77 @@ export default async function (fastify, opts) {
     reply.raw.flushHeaders()
 
     let sentLength = 0
+    let closed = false
 
     const send = (event, data) => {
-      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      try { reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`) } catch {}
     }
 
-    send('connected', { modelId, message: 'Log stream connected.' })
+    const close = () => {
+      if (closed) return
+      closed = true
+      clearInterval(interval)
+      try { reply.raw.end() } catch {}
+    }
 
+    send('connected', { modelId, message: 'Log stream connected.', streamToken: model.stream_token })
+
+    // Polling interval — checks for new log lines and terminal status
     const interval = setInterval(async () => {
       try {
         const { rows: [row] } = await query(
           'SELECT train_log, status FROM custom_models WHERE id = $1',
           [modelId]
         )
-        if (!row) { clearInterval(interval); reply.raw.end(); return }
+        if (!row) { close(); return }
 
         const fullLog = row.train_log || ''
         if (fullLog.length > sentLength) {
           const newContent = fullLog.slice(sentLength)
           sentLength = fullLog.length
-          // Send each new line as a separate event
           const lines = newContent.split('\n').filter(l => l.trim())
           for (const line of lines) {
             send('log', { line })
           }
         }
 
-        // Close stream when training finishes or pauses for approval
-        if (row.status === 'TRAINED' || row.status === 'COMPLETED' || row.status === 'FAILED') {
+        // Close stream when training finishes / pauses / fails
+        const terminal = ['TRAINED', 'COMPLETED', 'FAILED']
+        if (terminal.includes(row.status)) {
           send('done', { status: row.status })
-          clearInterval(interval)
-          reply.raw.end()
+          close()
         }
-      } catch { clearInterval(interval); reply.raw.end() }
+      } catch { close() }
     }, 600)
 
+    // Run the first check immediately (don't wait 600ms)
+    ;(async () => {
+      try {
+        const { rows: [row] } = await query(
+          'SELECT train_log, status FROM custom_models WHERE id = $1',
+          [modelId]
+        )
+        if (!row) { close(); return }
+
+        const fullLog = row.train_log || ''
+        if (fullLog.length > sentLength) {
+          sentLength = fullLog.length
+          const lines = fullLog.split('\n').filter(l => l.trim())
+          for (const line of lines) {
+            send('log', { line })
+          }
+        }
+
+        const terminal = ['TRAINED', 'COMPLETED', 'FAILED']
+        if (terminal.includes(row.status)) {
+          send('done', { status: row.status })
+          close()
+        }
+      } catch {}
+    })()
+
     // Clean up if client disconnects
-    request.raw.on('close', () => clearInterval(interval))
+    request.raw.on('close', () => close())
   })
 
 
@@ -115,6 +158,20 @@ export default async function (fastify, opts) {
     } catch {
       return reply.send({ success: true, data: { models: [] } })
     }
+  })
+
+  // Cancel a running training job
+  fastify.post('/tenants/:tenantId/custom-models/:modelId/cancel', {
+    preValidation: [fastify.authenticate]
+  }, async (request, reply) => {
+    const { tenantId, modelId } = request.params
+    try {
+      cancelTraining(tenantId, modelId)
+    } catch (err) {
+      // Process may have already exited — still update DB status
+    }
+    await query(`UPDATE custom_models SET status = 'FAILED', error_message = 'Cancelled by user' WHERE id = $1 AND tenant_id = $2`, [modelId, tenantId])
+    return { success: true, data: { message: 'Training cancelled.' } }
   })
 
   // NEW: Activate a completed custom model (set it as the default LLM provider)
@@ -230,7 +287,7 @@ export default async function (fastify, opts) {
     const { tenantId, modelId } = request.params
     try {
       await deleteCustomModel(tenantId, modelId)
-      return { success: true }
+      return { success: true, data: { message: 'Model deleted.' } }
     } catch (err) {
       return reply.status(400).send({ success: false, error: { message: err.message } })
     }
@@ -243,7 +300,7 @@ export default async function (fastify, opts) {
     const { tenantId, modelId } = request.params
     try {
       await pushToOllama(tenantId, modelId)
-      return { success: true }
+      return { success: true, data: { message: 'Model pushed to Ollama.' } }
     } catch (err) {
       return reply.status(400).send({ success: false, error: { message: err.message } })
     }

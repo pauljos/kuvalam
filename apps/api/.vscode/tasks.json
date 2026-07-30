@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Restart API Server",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti:3001) 2>/dev/null; sleep 1; node src/index.js",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

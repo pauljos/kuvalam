@@ -36,6 +36,15 @@ export async function extractText(buffer, mimeType, filename = '') {
     return buffer.toString('utf8')
   }
 
+  // --- XLSX / XLS (Excel spreadsheets) ---
+  if (
+    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    mimeType === 'application/vnd.ms-excel' ||
+    ext === 'xlsx' || ext === 'xls'
+  ) {
+    return extractXLSX(buffer)
+  }
+
   // Fallback: attempt UTF-8 decode (unknown type)
   return buffer.toString('utf8')
 }
@@ -74,4 +83,23 @@ function extractLegacyDoc(buffer) {
   const cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ')
   // Collapse whitespace
   return cleaned.replace(/\s{3,}/g, '\n\n').trim()
+}
+
+// ─── XLSX / XLS extraction ────────────────────────────────────────────────
+async function extractXLSX(buffer) {
+  try {
+    const XLSX = await import('xlsx')
+    const workbook = XLSX.read(buffer, { type: 'buffer' })
+    const parts = []
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName]
+      const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false, strip: true })
+      if (csv.trim()) {
+        parts.push(`--- Sheet: ${sheetName} ---\n${csv}`)
+      }
+    }
+    return parts.join('\n\n') || ''
+  } catch (err) {
+    throw new Error(`XLSX_EXTRACTION_FAILED: ${err.message}`)
+  }
 }

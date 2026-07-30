@@ -11,6 +11,11 @@ if (!process.env.NODE_ENV) {
 
 const isProduction = process.env.NODE_ENV === 'production'
 
+// Module-level interval handles so gracefulShutdown can clear them (fix #14)
+let _staleTaskCleanupInterval = null
+let _auditRetentionInterval = null
+
+
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import cookie from '@fastify/cookie'
@@ -39,10 +44,23 @@ import feedbackRoutes from './routes/feedback.routes.js'
 import profileRoutes from './routes/profile.routes.js'
 import customModelsRoutes from './routes/custom-models.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
+import taskOutputsRoutes from './routes/task-outputs.routes.js'
+import artifactsRoutes from './routes/artifacts.routes.js'
+import chatRoutes from './routes/chat.routes.js'
+import webhookReceiverRoutes from './routes/webhook-receiver.routes.js'
+import whatsappRoutes from './routes/whatsapp.routes.js'
+import telegramRoutes from './routes/telegram.routes.js'
+import builderRoutes from './routes/builder.routes.js'
+import systemRoutes from './routes/system.routes.js'
+import knowledgeInfraRoutes from './routes/knowledge-infra.routes.js'
+import knowledgeGraphRoutes from './routes/knowledge-graph.routes.js'
 import { initQueues, getQueueStats, shutdownQueues } from './services/queue.service.js'
 import { startScheduler, stopScheduler, getSchedulerStatus } from './services/scheduler.service.js'
 import { initTelemetry } from './services/telemetry.service.js'
 import { initCache, shutdownCache } from './services/cache.service.js'
+import { recoverOrphanedTraining } from './services/custom-models.service.js'
+import { autoProvisionKnowledgeInfra } from './services/startup-provision.service.js'
+import { validateOrigin } from './middleware/csrf.js'
 
 const fastify = Fastify({
   logger: {
@@ -86,8 +104,10 @@ await fastify.register(cookie, {
   secret: (() => {
     const s = process.env.COOKIE_SECRET
     if (!s || s.length < 32) {
-      if (isProduction) throw new Error('COOKIE_SECRET must be set to a 32+ char secret in production')
-      return 'kuvalam-dev-cookie-secret-min-32-chars'
+      // Always require COOKIE_SECRET — never fall back to a hardcoded secret,
+      // even in development. A weak secret in any environment allows cookie
+      // forgery and session hijacking.
+      throw new Error('COOKIE_SECRET must be set to a secure random string (min 32 characters). Generate one with: openssl rand -hex 32')
     }
     return s
   })(),
@@ -96,10 +116,13 @@ await fastify.register(cookie, {
 
 await fastify.register(jwt, {
   secret: (() => {
-    if (!process.env.JWT_SECRET && isProduction) {
-      throw new Error('JWT_SECRET environment variable must be set in production')
+    if (!process.env.JWT_SECRET) {
+      throw new Error('JWT_SECRET environment variable is required. Please set it to a secure random string (min 32 characters).')
     }
-    return process.env.JWT_SECRET || 'kuvalam-dev-secret-min-32-chars-change-in-prod'
+    if (process.env.JWT_SECRET.length < 32) {
+      throw new Error('JWT_SECRET must be at least 32 characters long for security.')
+    }
+    return process.env.JWT_SECRET
   })(),
   // Read JWT from cookie (httpOnly) as well as Authorization header
   cookie: {
@@ -120,7 +143,7 @@ await fastify.register(rateLimit, {
 })
 
 // ─── RLS Context Hook ──────────────────────────────────────────────────────
-import { tenantContextStore } from './db/pool.js'
+import { tenantContextStore, releaseTenantClient, query as _q } from './db/pool.js'
 
 const TENANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -129,11 +152,23 @@ fastify.addHook('onRequest', (request, reply, done) => {
   const tenantId = match ? match[1] : request.headers['x-tenant-id']
 
   if (tenantId && TENANT_UUID_RE.test(tenantId)) {
-    tenantContextStore.run(tenantId, done)
+    // Store an object so we can cache a per-request DB client on it.
+    // tenantContextStore.getStore() is now { tenantId, client? }
+    tenantContextStore.run({ tenantId }, done)
   } else {
     done()
   }
 })
+
+// Release the per-request tenant DB client when the response is sent.
+// This is the complement to the lazy-acquire in pool.js → query().
+fastify.addHook('onResponse', (request, reply, done) => {
+  releaseTenantClient()
+  done()
+})
+
+// CSRF protection — validate Origin/Referer on state-changing requests
+fastify.addHook('onRequest', validateOrigin)
 
 // ─── Auth decorator ────────────────────────────────────────────────────────
 fastify.decorate('authenticate', async function (request, reply) {
@@ -159,19 +194,28 @@ fastify.decorate('authenticate', async function (request, reply) {
 
 // Tenant IDOR guard — for any route with :tenantId in the URL, ensure the
 // authenticated user is a member of that tenant. System admins bypass this check.
-// Membership is loaded lazily and cached in-request.
-import { query as _q } from './db/pool.js'
-const _tenantMembershipCache = new Map() // key = `${userId}:${tenantId}` → boolean; LRU-evicted
+//
+// ── Fix #3: TTL-based cache expiry ────────────────────────────────────────
+// The original LRU-only cache had no time dimension: a revoked membership
+// would be served from cache until LRU eviction — indefinitely in a busy
+// system. Each entry now stores { value, expiresAt } with a 60-second TTL.
+// This limits the stale-access window to at most 60s per instance.
+
+const _tenantMembershipCache = new Map() // key = `${userId}:${tenantId}` → { value, expiresAt }
 const MEMBERSHIP_CACHE_MAX = 5000
+const MEMBERSHIP_CACHE_TTL_MS = 60_000 // 60 seconds
+
 async function _isTenantMember(userId, tenantId) {
   const key = `${userId}:${tenantId}`
-  if (_tenantMembershipCache.has(key)) {
+  const now = Date.now()
+  const cached = _tenantMembershipCache.get(key)
+  if (cached && cached.expiresAt > now) {
     // LRU touch — delete and re-insert so recent accesses stay alive
-    const val = _tenantMembershipCache.get(key)
     _tenantMembershipCache.delete(key)
-    _tenantMembershipCache.set(key, val)
-    return val
+    _tenantMembershipCache.set(key, cached)
+    return cached.value
   }
+  // Entry missing or expired — query DB
   const { rows } = await _q(
     `SELECT 1 FROM tenant_members WHERE user_id = $1 AND tenant_id = $2 AND status = 'ACTIVE' LIMIT 1`,
     [userId, tenantId]
@@ -182,9 +226,10 @@ async function _isTenantMember(userId, tenantId) {
     const oldest = _tenantMembershipCache.keys().next().value
     if (oldest !== undefined) _tenantMembershipCache.delete(oldest)
   }
-  _tenantMembershipCache.set(key, ok)
+  _tenantMembershipCache.set(key, { value: ok, expiresAt: now + MEMBERSHIP_CACHE_TTL_MS })
   return ok
 }
+
 
 fastify.decorate('validateTenantAccess', async function (request, reply) {
   const urlTenantId = request.params?.tenantId
@@ -239,7 +284,48 @@ fastify.get('/', async () => ({
   docs: '/api/v1'
 }))
 
+// Allow empty JSON bodies so POST endpoints without a required body (activate, cancel, link, etc.)
+// don't throw FST_ERR_CTP_EMPTY_JSON_BODY. The route handler still validates content.
+fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  if (body === '' || body === undefined || body === null) {
+    done(null, {})
+  } else {
+    try { done(null, JSON.parse(body)) } catch (err) { done(err) }
+  }
+
+})
+
+// ─── ETag Conditional GET ──────────────────────────────────────────────────
+// ── L4 Fix: ETag-based conditional GET reduces bandwidth for unchanged data ──
+// For GET/HEAD requests, compute a lightweight ETag from the response body
+// and return 304 Not Modified if the client's If-None-Match matches.
+// This saves bandwidth for agent lists, analytics, audit logs, etc.
+import { createHash } from 'crypto'
+
+fastify.addHook('onSend', async (request, reply, payload) => {
+  // Only apply to GET/HEAD with 200 responses that have a body
+  if (request.method !== 'GET' && request.method !== 'HEAD') return payload
+  if (reply.statusCode !== 200) return payload
+  if (!payload || typeof payload !== 'string') return payload
+
+  // Compute a weak ETag (W/"<first16chars>") from the response body
+  const hash = createHash('sha1').update(payload).digest('base64url').slice(0, 16)
+  const etag = `W/"${hash}"`
+
+  reply.header('ETag', etag)
+
+  // Check If-None-Match: if client already has this version, send 304
+  const ifNoneMatch = request.headers['if-none-match']
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    reply.status(304)
+    return '' // empty body for 304
+  }
+
+  return payload
+})
+
 // ─── Routes ───────────────────────────────────────────────────────────────
+
 await fastify.register(authRoutes, { prefix: '/api/v1' })
 await fastify.register(tenantRoutes, { prefix: '/api/v1' })
 await fastify.register(agentRoutes, { prefix: '/api/v1' })
@@ -259,6 +345,16 @@ await fastify.register(feedbackRoutes, { prefix: '/api/v1' })
 await fastify.register(profileRoutes, { prefix: '/api/v1' })
 await fastify.register(customModelsRoutes, { prefix: '/api/v1' })
 await fastify.register(reportsRoutes, { prefix: '/api/v1' })
+await fastify.register(taskOutputsRoutes, { prefix: '/api/v1' })
+await fastify.register(artifactsRoutes, { prefix: '/api/v1' })
+await fastify.register(chatRoutes, { prefix: '/api/v1' })
+await fastify.register(webhookReceiverRoutes, { prefix: '/api/v1' })
+await fastify.register(whatsappRoutes, { prefix: '/api/v1' })
+await fastify.register(telegramRoutes, { prefix: '/api/v1' })
+await fastify.register(builderRoutes, { prefix: '/api/v1' })
+await fastify.register(systemRoutes, { prefix: '/api/v1' })
+await fastify.register(knowledgeInfraRoutes, { prefix: '/api/v1' })
+await fastify.register(knowledgeGraphRoutes, { prefix: '/api/v1' })
 
 // ─── Global error handler ──────────────────────────────────────────────────
 fastify.setErrorHandler(async (error, request, reply) => {
@@ -287,6 +383,105 @@ try {
   fastify.log.info(`🚀 Kuvalam API running on http://localhost:${PORT}`)
   fastify.log.info(`📧 MailHog UI: http://localhost:8025`)
   fastify.log.info(`🗄️  Database: ${process.env.DATABASE_URL?.split('@')[1] || 'localhost:5432'}`)
+  fastify.log.info(`🌐 Browser agent: ${process.env.BROWSER_AGENT_URL || 'NOT CONFIGURED'}`)
+
+  // ── Orphan recovery: mark any RUNNING tasks as FAILED on startup ────────
+  // When the API process restarts, any tasks that were RUNNING in the previous
+  // process are orphaned. They need to be marked FAILED so they don't stay
+  // stuck forever and users can retry them.
+  try {
+    const pg = await import('pg')
+    const client = new pg.default.Client({ connectionString: process.env.DATABASE_URL })
+    await client.connect()
+    const { rowCount } = await client.query(
+      `UPDATE agent_tasks SET status = 'FAILED', error = $1, completed_at = NOW()
+       WHERE status = 'RUNNING'`,
+      ['Server restarted during execution — please retry']
+    )
+    if (rowCount > 0) {
+      fastify.log.info(`🔄 Orphan recovery: marked ${rowCount} stuck RUNNING task(s) as FAILED`)
+    }
+    // Also recover orphaned workflow executions
+    const { rowCount: wfCount } = await client.query(
+      `UPDATE workflow_executions SET status = 'FAILED', error = $1::jsonb, completed_at = NOW()
+       WHERE status = 'RUNNING'`,
+      [JSON.stringify({ message: 'Server restarted during execution — please retry' })]
+    )
+    if (wfCount > 0) {
+      fastify.log.info(`🔄 Orphan recovery: marked ${wfCount} stuck RUNNING workflow execution(s) as FAILED`)
+    }
+    await client.end()
+
+    // ── Periodic stale task cleanup: every 30s, fail RUNNING tasks that
+    // exceed TASK_TIMEOUT_MS. Uses the pool (not the raw client, which is
+    // already closed after orphan recovery). Handles tasks stuck mid-execution
+    // (e.g. hanging Ollama calls that outlive the AbortController).
+    const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS || '600000') // 10 min
+    const CLEANUP_INTERVAL_MS = 30_000
+    // Store handle so gracefulShutdown can clear it (fix #14)
+    _staleTaskCleanupInterval = setInterval(async () => {
+      try {
+        const cutoff = new Date(Date.now() - TASK_TIMEOUT_MS).toISOString()
+        // Stale agent tasks
+        const { rowCount: staleCount } = await _q(
+          `UPDATE agent_tasks SET status = 'FAILED', error = $1, completed_at = NOW()
+           WHERE status = 'RUNNING' AND started_at IS NOT NULL AND started_at < $2`,
+          [`Task timed out — no heartbeat for ${TASK_TIMEOUT_MS / 1000}s`, cutoff]
+        )
+        if (staleCount > 0) {
+          fastify.log.warn(`⏰ Stale task cleanup: marked ${staleCount} timed-out RUNNING task(s) as FAILED`)
+        }
+        // Stale workflow executions
+        const { rowCount: staleWf } = await _q(
+          `UPDATE workflow_executions SET status = 'FAILED', error = $1::jsonb, completed_at = NOW()
+           WHERE status = 'RUNNING' AND started_at IS NOT NULL AND started_at < $2`,
+          [JSON.stringify({ message: `Workflow timed out after ${TASK_TIMEOUT_MS / 1000}s` }), cutoff]
+        )
+        if (staleWf > 0) {
+          fastify.log.warn(`⏰ Stale workflow cleanup: marked ${staleWf} timed-out RUNNING execution(s) as FAILED`)
+        }
+      } catch (e) { /* silently ignore — orphan recovery on next restart catches it */ }
+    }, CLEANUP_INTERVAL_MS)
+    fastify.log.info(`⏱️  Stale task cleaner: every ${CLEANUP_INTERVAL_MS / 1000}s (timeout: ${TASK_TIMEOUT_MS / 1000}s)`)
+
+    // ── Periodic audit log retention: every 6 hours, delete records older
+    // than AUDIT_RETENTION_DAYS (default 90 days). Keeps the table from
+    // growing indefinitely — audit_log gets heavy with every LLM token usage.
+    const AUDIT_RETENTION_DAYS = parseInt(process.env.AUDIT_RETENTION_DAYS || '90')
+    const AUDIT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000 // every 6 hours
+    // Store handle so gracefulShutdown can clear it (fix #14)
+    _auditRetentionInterval = setInterval(async () => {
+      try {
+        const cutoff = new Date(Date.now() - AUDIT_RETENTION_DAYS * 86400_000).toISOString()
+        const { rowCount: deleted } = await _q(
+          `DELETE FROM audit_log WHERE created_at < $1`, [cutoff]
+        )
+        if (deleted > 0) {
+          fastify.log.info(`🗄️  Audit retention: deleted ${deleted} records older than ${AUDIT_RETENTION_DAYS} days`)
+        }
+      } catch (e) {
+        fastify.log.warn(`[AuditRetention] Cleanup failed: ${e.message}`)
+      }
+    }, AUDIT_CLEANUP_INTERVAL_MS)
+    fastify.log.info(`🗄️  Audit retention: ${AUDIT_RETENTION_DAYS}d (cleanup every ${AUDIT_CLEANUP_INTERVAL_MS / 3600000}h)`)
+  } catch (err) {
+    fastify.log.warn(`[OrphanRecovery] Could not recover orphaned tasks: ${err.message}`)
+  }
+
+  // ── Training orphan recovery ────────────────────────────────────────────
+  // If the server restarted while training was in progress, Python processes
+  // are dead. Mark TRAINING models as FAILED so users can retry.
+  recoverOrphanedTraining().then(rowCount => {
+    if (rowCount > 0) fastify.log.info(`🔄 Training recovery: marked ${rowCount} stuck TRAINING model(s) as FAILED`)
+  }).catch(err => fastify.log.warn(`[TrainingRecovery] ${err.message}`))
+
+  // ── Auto-provision knowledge infra (Docker containers + connectors) ────
+  // On first startup (or any restart), this ensures pgvector & Neo4j containers
+  // are running and tool_connections exist. No manual button clicks needed.
+  // Set K8_AUTO_PROVISION=false to disable. Skipped in production.
+  autoProvisionKnowledgeInfra(fastify.log).catch(err =>
+    fastify.log.warn(`[AutoProvision] Knowledge infra auto-provision failed: ${err.message}`)
+  )
 
   // Initialise BullMQ queue workers (non-blocking — degrades to in-process if no Redis)
   initQueues(fastify.log).then(ready => {
@@ -311,6 +506,9 @@ try {
 // ─── Graceful Shutdown ─────────────────────────────────────────────────────
 async function gracefulShutdown(signal) {
   fastify.log.info(`Received ${signal} — shutting down`)
+  // Clear background intervals so they don't fire against a closing pool
+  if (_staleTaskCleanupInterval) clearInterval(_staleTaskCleanupInterval)
+  if (_auditRetentionInterval) clearInterval(_auditRetentionInterval)
   stopScheduler()
   await shutdownQueues(fastify.log).catch(() => {})
   await shutdownCache().catch(() => {})

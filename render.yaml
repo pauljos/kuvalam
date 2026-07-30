@@ -22,6 +22,7 @@ services:
     region: oregon
     healthCheckPath: /health
     maxShutdownDelaySeconds: 30
+    preDeployCommand: node src/db/migrate.js
     # Only rebuild API when relevant files change (monorepo optimisation)
     buildFilter:
       paths:
@@ -97,6 +98,23 @@ services:
         sync: false
       - key: SALESFORCE_CLIENT_SECRET
         sync: false
+      # Browser agent URL for web automation (browser_use tool)
+      - key: BROWSER_AGENT_URL
+        fromService:
+          name: kuvalam-browser-agent
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      # Neo4j knowledge graph — leave blank if not using graph features
+      - key: NEO4J_HOST
+        sync: false
+      - key: NEO4J_HTTP_PORT
+        sync: false
+      - key: NEO4J_BOLT_PORT
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: NEO4J_DATABASE
+        value: neo4j
 
   # ── BullMQ Worker ───────────────────────────────────────────────────────────
   - type: worker
@@ -146,6 +164,38 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
+      # Neo4j knowledge graph — leave blank if not using graph features
+      - key: NEO4J_HOST
+        sync: false
+      - key: NEO4J_HTTP_PORT
+        sync: false
+      - key: NEO4J_BOLT_PORT
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: NEO4J_DATABASE
+        value: neo4j
+      # Browser agent URL for web automation (browser_use tool)
+      - key: BROWSER_AGENT_URL
+        fromService:
+          name: kuvalam-browser-agent
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  # ── Browser Agent (Playwright) ──────────────────────────────────────────────
+  - type: web
+    name: kuvalam-browser-agent
+    runtime: docker
+    dockerfilePath: apps/browser-agent/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    buildFilter:
+      paths:
+        - apps/browser-agent/**
+        - package.json
+        - package-lock.json
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web

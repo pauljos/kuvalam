@@ -19,13 +19,20 @@ export default async function triggersRoutes(fastify) {
   fastify.post('/tenants/:tenantId/triggers', auth, async (req, reply) => {
     try {
       const { tenantId } = req.params
-      const { workflowId, triggerType, name, config = {} } = req.body
+      const { workflowId, triggerType, name, config = {}, targetType, agentId, agentPrompt } = req.body
+      const tType = targetType || 'WORKFLOW'
 
-      if (!workflowId || !triggerType || !name) {
-        throw new AppError('MISSING_FIELDS', 'workflowId, triggerType, and name are required', 400)
+      if (!triggerType || !name) {
+        throw new AppError('MISSING_FIELDS', 'triggerType and name are required', 400)
+      }
+      if (tType === 'WORKFLOW' && !workflowId) {
+        throw new AppError('MISSING_FIELDS', 'workflowId is required for workflow triggers', 400)
+      }
+      if (tType === 'AGENT' && !agentId) {
+        throw new AppError('MISSING_FIELDS', 'agentId is required for agent triggers', 400)
       }
 
-      const VALID_TYPES = ['WEBHOOK', 'SCHEDULE', 'CONDITION', 'EVENT']
+      const VALID_TYPES = ['WEBHOOK', 'SCHEDULE', 'CONDITION', 'EVENT', 'AGENT_SCHEDULE']
       if (!VALID_TYPES.includes(triggerType)) {
         throw new AppError('INVALID_TYPE', `triggerType must be one of: ${VALID_TYPES.join(', ')}`, 400)
       }
@@ -36,9 +43,9 @@ export default async function triggersRoutes(fastify) {
         : config
 
       const { rows: [trigger] } = await query(
-        `INSERT INTO workflow_triggers (tenant_id, workflow_id, trigger_type, name, config)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [tenantId, workflowId, triggerType, name, finalConfig]
+        `INSERT INTO workflow_triggers (tenant_id, workflow_id, trigger_type, name, config, target_type, agent_id, agent_prompt)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [tenantId, tType === 'WORKFLOW' ? workflowId : null, triggerType, name, finalConfig, tType, tType === 'AGENT' ? agentId : null, tType === 'AGENT' ? (agentPrompt || null) : null]
       )
 
       await auditLog({ eventType: 'trigger.created', tenantId, actorId: req.user.sub, actorType: 'USER', resourceType: 'WorkflowTrigger', resourceId: trigger.id, action: 'CREATE_TRIGGER' })
@@ -51,8 +58,10 @@ export default async function triggersRoutes(fastify) {
   fastify.get('/tenants/:tenantId/triggers', auth, async (req, reply) => {
     try {
       const { rows } = await query(
-        `SELECT t.*, w.name as workflow_name FROM workflow_triggers t
-         JOIN workflows w ON w.id = t.workflow_id
+        `SELECT t.*, w.name as workflow_name, a.name as agent_name
+         FROM workflow_triggers t
+         LEFT JOIN workflows w ON w.id = t.workflow_id
+         LEFT JOIN agents a ON a.id = t.agent_id
          WHERE t.tenant_id = $1 ORDER BY t.created_at DESC`,
         [req.params.tenantId]
       )
@@ -65,7 +74,7 @@ export default async function triggersRoutes(fastify) {
     try {
       const { tenantId, id } = req.params
       const updates = req.body
-      const allowed = ['name', 'config', 'is_active']
+      const allowed = ['name', 'config', 'is_active', 'target_type', 'agent_id', 'agent_prompt', 'workflow_id']
       const fields = []
       const params = [tenantId, id]
 
@@ -173,6 +182,15 @@ export default async function triggersRoutes(fastify) {
         `UPDATE workflow_triggers SET last_fired_at = NOW(), fire_count = fire_count + 1 WHERE id = $1`,
         [triggerId]
       )
+      try {
+        await auditLog({
+          eventType: 'trigger.fired', tenantId,
+          actorType: 'SYSTEM', actorId: triggerId,
+          resourceType: 'WorkflowTrigger', resourceId: triggerId,
+          action: 'WEBHOOK_FIRED',
+          metadata: { workflowId: trigger.wf_id, triggerName: trigger.name, triggerType: 'WEBHOOK' }
+        })
+      } catch { /* non-critical */ }
 
       return reply.send({ success: true, data: { fired: true }, meta: { timestamp: new Date().toISOString() } })
     } catch (err) { return errorResponse(reply, err) }

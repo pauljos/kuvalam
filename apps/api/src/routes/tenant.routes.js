@@ -59,13 +59,28 @@ export default async function tenantRoutes(fastify) {
   })
 
   // POST /tenants/:tenantId/members/invite
-  fastify.post('/tenants/:tenantId/members/invite', requireRole(['OWNER', 'ADMIN']), async (request, reply) => {
+  fastify.post('/tenants/:tenantId/members/invite', {
+    ...requireRole(['OWNER', 'ADMIN']),
+    schema: {
+      body: {
+        type: 'object',
+        required: ['email', 'role'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          role: { type: 'string', enum: ['ADMIN', 'BUILDER', 'VIEWER'] },
+          password: { type: 'string', minLength: 8, maxLength: 128 }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
       const result = await tenantService.inviteMember({
         tenantId: request.params.tenantId,
         ...request.body,
         invitedBy: request.user.sub
       })
+      // Invalidate members cache so the UI reflects the change immediately
+      await cacheDel(`tenant:${request.params.tenantId}:members`)
       return reply.status(201).send({ success: true, data: result, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
@@ -74,6 +89,7 @@ export default async function tenantRoutes(fastify) {
   fastify.patch('/tenants/:tenantId/members/:memberId', requireRole(['OWNER', 'ADMIN']), async (request, reply) => {
     try {
       const result = await tenantService.updateMemberRole(request.params.tenantId, request.params.memberId, request.body.role, request.user.sub)
+      await cacheDel(`tenant:${request.params.tenantId}:members`)
       return reply.send({ success: true, data: result, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
@@ -82,6 +98,7 @@ export default async function tenantRoutes(fastify) {
   fastify.delete('/tenants/:tenantId/members/:memberId', requireRole(['OWNER', 'ADMIN']), async (request, reply) => {
     try {
       await tenantService.removeMember(request.params.tenantId, request.params.memberId, request.user.sub)
+      await cacheDel(`tenant:${request.params.tenantId}:members`)
       return reply.status(204).send()
     } catch (err) { return errorResponse(reply, err) }
   })

@@ -233,7 +233,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunk_embeddings (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   chunk_id    UUID NOT NULL UNIQUE REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
   tenant_id   UUID NOT NULL,
-  embedding   vector(1536) NOT NULL,
+  embedding   vector(768) NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

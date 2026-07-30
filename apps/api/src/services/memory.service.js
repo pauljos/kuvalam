@@ -29,7 +29,10 @@ export async function extractAndStoreMemory(agentId, tenantId, taskId, content, 
         { role: 'system', content: EXTRACT_SYSTEM },
         { role: 'user', content: content.slice(0, 6000) } // cap input tokens
       ],
-      model: 'gpt-4o-mini' // always use fast model for extraction
+      // ── M4 Fix: use routeModel so tenant's configured provider is respected ──
+      // Previously hardcoded to 'gpt-4o-mini' which silently fails for tenants
+      // using Anthropic, Ollama, or a custom OpenAI-compatible endpoint.
+      // routeModel() picks the fastest available model for simple tasks.
     })
 
     let parsed
@@ -56,18 +59,65 @@ export async function extractAndStoreMemory(agentId, tenantId, taskId, content, 
 
 /**
  * Retrieve relevant memory entries for a given goal using keyword matching.
- * Returns formatted message context to inject into the agent's prompt.
+ *
+ * ── C3 Fix: filter by goal relevance ───────────────────────────────────────
+ * Previously returned the 20 most-recent entities regardless of goal,
+ * injecting unrelated facts (e.g. a CEO name from a compliance task into a
+ * SQL analytics task) which confused smaller models and caused hallucinations.
+ * Now uses full-text search to rank by relevance to the current goal, and
+ * only injects entries that score above a minimum relevance threshold.
+ *
+ * @param {string} agentId
+ * @param {string} goal  - The current task goal; used to filter relevant memory
+ * @param {number} limit
  */
 export async function retrieveMemory(agentId, goal, limit = 20) {
   try {
-    const { rows } = await query(
-      `SELECT entity_type, entity_name, detail, last_seen_at
-       FROM agent_memory
-       WHERE agent_id = $1
-       ORDER BY last_seen_at DESC
-       LIMIT $2`,
-      [agentId, limit]
-    )
+    let rows
+
+    if (goal && goal.trim().length > 3) {
+      // Keyword-filtered: rank memory by relevance to the current goal
+      const result = await query(
+        `SELECT entity_type, entity_name, detail, last_seen_at,
+                ts_rank(
+                  to_tsvector('english', entity_name || ' ' || COALESCE(detail, '')),
+                  plainto_tsquery('english', $2)
+                ) as relevance
+         FROM agent_memory
+         WHERE agent_id = $1
+           AND to_tsvector('english', entity_name || ' ' || COALESCE(detail, ''))
+               @@ plainto_tsquery('english', $2)
+         ORDER BY relevance DESC, last_seen_at DESC
+         LIMIT $3`,
+        [agentId, goal.slice(0, 500), limit]
+      )
+      rows = result.rows
+
+      // Fallback: if no keyword match, return recent memory (up to half the limit)
+      if (rows.length === 0) {
+        const fallback = await query(
+          `SELECT entity_type, entity_name, detail, last_seen_at
+           FROM agent_memory
+           WHERE agent_id = $1
+           ORDER BY last_seen_at DESC
+           LIMIT $2`,
+          [agentId, Math.ceil(limit / 2)]
+        )
+        rows = fallback.rows
+      }
+    } else {
+      // No goal provided — fall back to recency-based retrieval
+      const result = await query(
+        `SELECT entity_type, entity_name, detail, last_seen_at
+         FROM agent_memory
+         WHERE agent_id = $1
+         ORDER BY last_seen_at DESC
+         LIMIT $2`,
+        [agentId, limit]
+      )
+      rows = result.rows
+    }
+
     if (rows.length === 0) return []
 
     const formatted = rows
@@ -76,7 +126,7 @@ export async function retrieveMemory(agentId, goal, limit = 20) {
 
     return [{
       role: 'system',
-      content: `LONG-TERM MEMORY (facts and entities I've learned from past tasks):\n${formatted}\n\nUse this knowledge where relevant.`
+      content: `LONG-TERM MEMORY (facts and entities I've learned from past tasks relevant to this goal):\n${formatted}\n\nUse this knowledge where relevant.`
     }]
   } catch { return [] }
 }

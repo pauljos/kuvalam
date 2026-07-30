@@ -30,18 +30,21 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import dagre from 'dagre'
+import { API_BASE } from '@/lib/api'
 import {
   Bot, Users, Globe, ShieldCheck, GitBranch, Trash2, Plus, Save, X,
   Timer, Wand2, Repeat, MessageSquare, Wrench, Settings2,
   Sparkles, FileCode, HelpCircle, Copy, Play, Maximize2,
   Undo2, Redo2, LayoutGrid, Loader2, CheckCircle2, AlertTriangle, RefreshCw,
-  Split, FlaskConical,
+  Split, FlaskConical, Database, Layers,
+  Mail, Bug, GitPullRequestArrow, Siren, Radio, FileCheck,
+  Cpu, Cloud, Terminal, CreditCard, Headset, UserPlus, Container,
 } from 'lucide-react'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 export type StepType =
   | 'AGENT' | 'CREW' | 'HTTP' | 'APPROVAL' | 'CONDITION'
-  | 'TOOL' | 'TRANSFORM' | 'DELAY' | 'SET' | 'LOOP' | 'NOTIFY' | 'PARALLEL'
+  | 'TOOL' | 'TRANSFORM' | 'DELAY' | 'SET' | 'LOOP' | 'NOTIFY' | 'PARALLEL' | 'SCRIPT'
 
 // Retry policy: bounded to prevent runaway backoffs on the server side.
 // Mirrors the backend normaliser in workflow.service.js.
@@ -106,6 +109,7 @@ const NODE_META: Record<StepType, NodeMeta> = {
   PARALLEL:  { label: 'Parallel',  color: '#db2777', bg: '#fce7f3', icon: Split,        group: 'Flow' },
   TRANSFORM: { label: 'Transform', color: '#0369a1', bg: '#e0f2fe', icon: Wand2,        group: 'Data' },
   SET:       { label: 'Set Vars',  color: '#0891b2', bg: '#cffafe', icon: Settings2,    group: 'Data' },
+  SCRIPT:    { label: 'Script',    color: '#6d28d9', bg: '#f5f3ff', icon: FileCode,     group: 'Data' },
   HTTP:      { label: 'HTTP',      color: '#5b7cd6', bg: '#e9eefc', icon: Globe,        group: 'Integration' },
   TOOL:      { label: 'Tool',      color: '#dc2626', bg: '#fee2e2', icon: Wrench,       group: 'Integration' },
   NOTIFY:    { label: 'Notify',    color: '#e11d48', bg: '#ffe4e6', icon: MessageSquare, group: 'Integration' },
@@ -114,7 +118,7 @@ const NODE_META: Record<StepType, NodeMeta> = {
 const PALETTE_GROUPS: Array<{ title: string; hint: string; group: NodeMeta['group']; types: StepType[] }> = [
   { title: 'AI',          hint: 'Agents & crews',                group: 'AI',          types: ['AGENT', 'CREW', 'LOOP'] },
   { title: 'Flow',        hint: 'Branching · pauses · fan-out',  group: 'Flow',        types: ['CONDITION', 'APPROVAL', 'DELAY', 'PARALLEL'] },
-  { title: 'Data',        hint: 'Transform / set variables',     group: 'Data',        types: ['TRANSFORM', 'SET'] },
+  { title: 'Data',        hint: 'Transform / set / script',    group: 'Data',        types: ['TRANSFORM', 'SET', 'SCRIPT'] },
   { title: 'Integration', hint: 'External APIs & tools',         group: 'Integration', types: ['HTTP', 'TOOL', 'NOTIFY'] },
 ]
 
@@ -123,27 +127,45 @@ const NODE_W = 220
 const NODE_H = 84
 
 // ── Templates (starter workflows) ──────────────────────────────────────────
-type Template = { id: string; name: string; description: string; icon: any; build: () => Step[] }
+type Template = { id: string; name: string; description: string; icon: any; domain?: string; build: () => Step[] }
+
+// Domain colour resolver — gives each template card a distinctive accent colour
+// instead of every icon being green.
+const DOMAIN_COLORS: Record<string, { color: string; bg: string }> = {
+  communication: { color: '#3f8a43', bg: '#edf7ee' },   // green — Slack, email, SMS
+  devops:        { color: '#7c3aed', bg: '#f5f3ff' },   // purple — infra, CI/CD
+  iot:           { color: '#0891b2', bg: '#ecfeff' },   // cyan — sensors, MQTT
+  finance:       { color: '#d97706', bg: '#fffbeb' },   // amber — Stripe, QuickBooks
+  crm:           { color: '#2563eb', bg: '#eff6ff' },   // blue — Salesforce, HubSpot
+  itsm:          { color: '#dc2626', bg: '#fef2f2' },   // red — ServiceNow, Zendesk
+  compliance:    { color: '#9333ea', bg: '#faf5ff' },   // violet — audit, approvals
+  monitoring:    { color: '#ea580c', bg: '#fff7ed' },   // orange — Prometheus, Datadog
+  default:       { color: '#3f8a43', bg: '#edf7ee' },
+}
+function domainStyle(d: string | undefined) {
+  const dc = DOMAIN_COLORS[d || ''] || DOMAIN_COLORS.default
+  return dc
+}
 
 const TEMPLATES: Template[] = [
   {
     id: 'blank', name: 'Blank canvas', description: 'Start with an empty board.',
-    icon: FileCode,
+    icon: FileCode, domain: 'default',
     build: () => [],
   },
   {
     id: 'agent-notify', name: 'Agent → Slack notification',
     description: 'Run an agent, then post the result to Slack.',
-    icon: MessageSquare,
+    icon: MessageSquare, domain: 'communication',
     build: () => [
       { id: 'research', type: 'AGENT', input: { goal: 'Summarise today’s top news in 3 bullets.' }, _ui: { position: { x: 100, y: 160 } } },
-      { id: 'notify',   type: 'NOTIFY', input: { channel: '#general', message: '{{research}}' }, _ui: { position: { x: 420, y: 160 } } },
+      { id: 'notify',   type: 'NOTIFY', input: { provider: 'slack', channel: '#general', message: '{{research}}' }, _ui: { position: { x: 420, y: 160 } } },
     ],
   },
   {
     id: 'agent-approval-tool', name: 'Agent → Approval → Tool',
     description: 'Human-in-the-loop guard between an agent decision and a tool action.',
-    icon: ShieldCheck,
+    icon: ShieldCheck, domain: 'compliance',
     build: () => [
       { id: 'plan',     type: 'AGENT',    input: { goal: 'Draft an action plan.' }, _ui: { position: { x: 80,  y: 160 } } },
       { id: 'review',   type: 'APPROVAL', input: {},                                 _ui: { position: { x: 380, y: 160 } } },
@@ -153,15 +175,29 @@ const TEMPLATES: Template[] = [
   {
     id: 'lookup-branch', name: 'Fetch → Condition → Two paths',
     description: 'HTTP lookup, then branch on the response with a Condition node.',
-    icon: GitBranch,
+    icon: GitBranch, domain: 'devops',
     build: () => [
       { id: 'lookup',   type: 'HTTP',      input: { method: 'GET', url: 'https://api.example.com/status' }, _ui: { position: { x: 80,  y: 160 } } },
       { id: 'check',    type: 'CONDITION', input: {}, routes: [
           { when: 'context.lookup.ok === true', goto: 'happy' },
           { goto: 'sad' },
         ], _ui: { position: { x: 380, y: 160 } } },
-      { id: 'happy',    type: 'NOTIFY',    input: { channel: '#ops', message: 'All good' }, _ui: { position: { x: 700, y: 80  } } },
-      { id: 'sad',      type: 'NOTIFY',    input: { channel: '#ops', message: '⚠️ Attention needed' }, _ui: { position: { x: 700, y: 260 } } },
+      { id: 'happy',    type: 'NOTIFY',    input: { provider: 'slack', channel: '#ops', message: 'All good' }, _ui: { position: { x: 700, y: 80  } } },
+      { id: 'sad',      type: 'NOTIFY',    input: { provider: 'slack', channel: '#ops', message: '⚠️ Attention needed' }, _ui: { position: { x: 700, y: 260 } } },
+    ],
+  },
+  {
+    id: 'end-to-end', name: '🔁 End-to-End Pipeline (Agent → HTTP → Branch → Approve → Notify)',
+    description: 'Complete pipeline: research agent, fetch external data, branch on status, human approval, then notify.',
+    icon: Sparkles, domain: 'default',
+    build: () => [
+      { id: 'research',  type: 'AGENT',     input: { goal: 'Research the current status and draft a brief summary.' }, _ui: { position: { x: 40,  y: 120 } } },
+      { id: 'fetch',     type: 'HTTP',      input: { method: 'GET', url: 'https://api.example.com/data' }, _ui: { position: { x: 300, y: 120 } } },
+      { id: 'transform', type: 'TRANSFORM', input: { template: { summary: '{{research}}', ok: '{{fetch.ok}}', count: '{{fetch.data.length}}' } }, _ui: { position: { x: 560, y: 120 } } },
+      { id: 'check',     type: 'CONDITION', input: {}, routes: [{ when: 'context.transform.ok === true', goto: 'approve' }, { goto: 'alert' }], _ui: { position: { x: 820, y: 120 } } },
+      { id: 'approve',   type: 'APPROVAL',  input: {}, goto: 'execute', _ui: { position: { x: 1080, y: 50 } } },
+      { id: 'execute',   type: 'TOOL',      input: { tool: 'slack__post_message', args: { channel: '#ops', text: '✅ Approved: {{transform.summary}}' } }, _ui: { position: { x: 1340, y: 50 } } },
+      { id: 'alert',     type: 'NOTIFY',    input: { provider: 'slack', channel: '#alerts', message: '⚠️ Pipeline failed at transform step. Research: {{research}}' }, _ui: { position: { x: 1080, y: 200 } } },
     ],
   },
   {
@@ -171,7 +207,288 @@ const TEMPLATES: Template[] = [
     build: () => [
       { id: 'fetch',    type: 'HTTP', input: { method: 'GET', url: 'https://api.example.com/tickets' }, _ui: { position: { x: 80, y: 160 } } },
       { id: 'each',     type: 'LOOP', input: { itemsFrom: 'fetch.results', agentId: '', goalTemplate: 'Summarise ticket {{item.title}}' }, _ui: { position: { x: 380, y: 160 } } },
-      { id: 'notify',   type: 'NOTIFY', input: { channel: '#support', message: '{{each.results}}' }, _ui: { position: { x: 700, y: 160 } } },
+      { id: 'notify',   type: 'NOTIFY', input: { provider: 'slack', channel: '#support', message: '{{each.results}}' }, _ui: { position: { x: 700, y: 160 } } },
+    ],
+  },
+  {
+    id: 'multi-agent-branch', name: '🔀 Multi-Agent Branch (Agent → Condition → Two Agents)',
+    description: 'First agent analyses intent, then routes to one of two specialist agents based on the result, transforms and notifies.',
+    icon: GitBranch,
+    build: () => [
+      { id: 'classify',    type: 'AGENT',     input: { goal: 'Classify the user request as either "urgent" or "normal". Reply with just the word.' }, _ui: { position: { x: 40,  y: 120 } } },
+      { id: 'router',      type: 'CONDITION', input: {}, routes: [
+        { when: 'context.classify.includes("urgent")', goto: 'urgent_agent' },
+        { goto: 'normal_agent' },
+      ], _ui: { position: { x: 320, y: 120 } } },
+      { id: 'urgent_agent',  type: 'AGENT', input: { goal: 'Provide a high-priority response to: {{classify}}' }, _ui: { position: { x: 600, y: 40  } } },
+      { id: 'normal_agent',  type: 'AGENT', input: { goal: 'Provide a standard response to: {{classify}}' }, _ui: { position: { x: 600, y: 210 } } },
+      { id: 'merge',       type: 'TRANSFORM', input: { template: { urgent: '{{urgent_agent}}', normal: '{{normal_agent}}', decided: '{{classify}}' } }, _ui: { position: { x: 880, y: 120 } } },
+      { id: 'notify',      type: 'NOTIFY',   input: { provider: 'slack', channel: '#ops', message: 'Agent decision: {{merge.decided}}. Response: {{merge.urgent}}{{merge.normal}}' }, _ui: { position: { x: 1160, y: 120 } } },
+    ],
+  },
+  {
+    id: 'data-etl', name: '📊 Data ETL Pipeline (HTTP → Transform → Set → Notify)',
+    description: 'Fetch JSON from an API, reshape it, persist key values into context variables, then send a summary notification.',
+    icon: Database,
+    build: () => [
+      { id: 'fetch',      type: 'HTTP',      input: { method: 'GET', url: 'https://api.example.com/metrics' }, _ui: { position: { x: 40,  y: 160 } } },
+      { id: 'reshape',    type: 'TRANSFORM', input: { template: { total: '{{fetch.total}}', active: '{{fetch.active}}', pct: '{{fetch.active / fetch.total * 100}}' } }, _ui: { position: { x: 320, y: 160 } } },
+      { id: 'persist',    type: 'SET',       input: { vars: { totalUsers: '{{reshape.total}}', activeUsers: '{{reshape.active}}', activePct: '{{reshape.pct}}' } }, _ui: { position: { x: 600, y: 160 } } },
+      { id: 'notify',     type: 'NOTIFY',    input: { provider: 'slack', channel: '#analytics', message: '📈 {{activeUsers}}/{{totalUsers}} active ({{activePct}}%)' }, _ui: { position: { x: 880, y: 160 } } },
+    ],
+  },
+  {
+    id: 'fan-out-parallel', name: '⚡ Parallel Fan-Out (HTTP → 3 parallel tasks → Merge)',
+    description: 'Fetch data, then simultaneously notify Slack, call a webhook, and run a tool. Merge all results.',
+    icon: Layers,
+    build: () => [
+      { id: 'fetch',      type: 'HTTP',    input: { method: 'GET', url: 'https://api.example.com/events' }, _ui: { position: { x: 40,  y: 160 } } },
+      { id: 'fanout',     type: 'PARALLEL', input: { tasks: [
+        { id: 'alert',      type: 'NOTIFY', input: { provider: 'slack', channel: '#alerts', message: 'New event batch: {{fetch.count}} items' } },
+        { id: 'webhook',    type: 'HTTP',   input: { method: 'POST', url: 'https://hooks.example.com/ingest', body: { events: '{{fetch}}' } } },
+        { id: 'log',        type: 'TOOL',   input: { tool: 'slack__post_message', args: { channel: '#audit', text: 'ETL kickoff for {{fetch.count}} records' } } },
+      ] }, _ui: { position: { x: 320, y: 160 } } },
+      { id: 'merge',      type: 'TRANSFORM', input: { template: { alertOk: '{{fanout.tasks.alert.ok}}', webhookOk: '{{fanout.tasks.webhook.ok}}', logOk: '{{fanout.tasks.log.ok}}', hasErrors: '{{fanout.hasErrors}}' } }, _ui: { position: { x: 600, y: 160 } } },
+      { id: 'summary',    type: 'NOTIFY',   input: { provider: 'slack', channel: '#ops', message: 'Fan-out done. Errors: {{merge.hasErrors}}. Slack:{{merge.alertOk}} Webhook:{{merge.webhookOk}} Log:{{merge.logOk}}' }, _ui: { position: { x: 880, y: 160 } } },
+    ],
+  },
+  {
+    id: 'approval-chain', name: '🛡️ Multi-Stage Approval Chain',
+    description: 'Agent drafts content, then passes through two sequential human approvals before publishing via HTTP.',
+    icon: ShieldCheck,
+    build: () => [
+      { id: 'draft',       type: 'AGENT',    input: { goal: 'Draft a company-wide announcement about the new policy.' }, _ui: { position: { x: 40,  y: 160 } } },
+      { id: 'legal_review', type: 'APPROVAL', input: {}, goto: 'exec_review', _ui: { position: { x: 340, y: 160 } } },
+      { id: 'exec_review',  type: 'APPROVAL', input: {}, goto: 'publish', _ui: { position: { x: 640, y: 160 } } },
+      { id: 'publish',     type: 'HTTP',     input: { method: 'POST', url: 'https://api.example.com/announcements', body: { content: '{{draft}}' } }, _ui: { position: { x: 940, y: 160 } } },
+      { id: 'confirm',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#general', message: '📢 Announcement published: {{draft}}' }, _ui: { position: { x: 1240, y: 160 } } },
+    ],
+  },
+  {
+    id: 'error-recovery', name: '🔄 Error Handling with Recovery Path',
+    description: 'Agent attempts a task. On failure, a recovery agent retries with a different strategy. Success or failure is always notified.',
+    icon: AlertTriangle,
+    build: () => [
+      { id: 'attempt',     type: 'AGENT',     input: { goal: 'Extract structured data from the provided text. Return valid JSON.' }, retry: { attempts: 1, backoffMs: 0 }, _ui: { position: { x: 40,  y: 120 } } },
+      { id: 'check',       type: 'CONDITION', input: {}, routes: [
+        { when: 'context.attempt && context.attempt.length > 0', goto: 'success' },
+        { goto: 'recovery' },
+      ], _ui: { position: { x: 320, y: 120 } } },
+      { id: 'success',     type: 'NOTIFY',    input: { provider: 'slack', channel: '#ops', message: '✅ Data extracted: {{attempt}}' }, _ui: { position: { x: 600, y: 40  } } },
+      { id: 'recovery',    type: 'AGENT',     input: { goal: 'The extraction failed. Try a different parsing strategy: {{attempt}}' }, _ui: { position: { x: 600, y: 210 } } },
+      { id: 'recovery_notify', type: 'NOTIFY', input: { provider: 'slack', channel: '#alerts', message: '⚠️ Recovery result: {{recovery}}' }, _ui: { position: { x: 900, y: 210 } } },
+    ],
+  },
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🆕 Next-gen templates — multi-provider NOTIFY, connectors beyond Slack
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    id: 'email-approval', name: '📧 Email Approval Pipeline',
+    description: 'Agent drafts → Human approval → Send via Gmail.',
+    icon: Mail, domain: 'communication',
+    build: () => [
+      { id: 'draft',     type: 'AGENT',    input: { goal: 'Draft a professional response to the customer inquiry.' }, _ui: { position: { x: 80,  y: 160 } } },
+      { id: 'approve',   type: 'APPROVAL', input: {}, goto: 'send', _ui: { position: { x: 380, y: 160 } } },
+      { id: 'send',      type: 'NOTIFY',   input: { provider: 'gmail', channel: 'customer@example.com', subject: 'Re: Your inquiry', message: '{{draft}}' }, _ui: { position: { x: 680, y: 160 } } },
+    ],
+  },
+  {
+    id: 'jira-incident', name: '🐛 Jira Incident Response',
+    description: 'Monitor alert → Agent diagnosis → Auto-create Jira ticket → Slack notify.',
+    icon: Bug, domain: 'itsm',
+    build: () => [
+      { id: 'alert',     type: 'HTTP',     input: { method: 'GET', url: 'https://monitoring.example.com/latest-alert' }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'diagnose',  type: 'AGENT',    input: { goal: 'Diagnose this alert and suggest root cause: {{alert}}' }, _ui: { position: { x: 360, y: 120 } } },
+      { id: 'create',    type: 'TOOL',     input: { tool: 'jira__create_issue', args: { projectKey: 'OPS', summary: 'Incident: {{alert.title}}', description: '{{diagnose}}', issueType: 'Bug' } }, _ui: { position: { x: 640, y: 120 } } },
+      { id: 'notify',    type: 'NOTIFY',   input: { provider: 'slack', channel: '#incidents', message: '🚨 Jira {{create.key}} created: {{alert.title}}\\nDiagnosis: {{diagnose}}' }, _ui: { position: { x: 940, y: 120 } } },
+    ],
+  },
+  {
+    id: 'db-query-pipeline', name: '🗄️ Database Query → AI Analysis → Notify',
+    description: 'HTTP trigger → Query DB → Agent analysis → Email summary.',
+    icon: Database, domain: 'default',
+    build: () => [
+      { id: 'trigger',   type: 'HTTP',     input: { method: 'GET', url: 'https://api.example.com/trigger-report' }, _ui: { position: { x: 80,  y: 160 } } },
+      { id: 'query',     type: 'TOOL',     input: { tool: 'db__query', args: { sql: 'SELECT date, revenue FROM daily_sales WHERE date >= CURRENT_DATE - 7' } }, _ui: { position: { x: 360, y: 160 } } },
+      { id: 'analyze',   type: 'AGENT',    input: { goal: 'Analyze these sales figures and write a 3-bullet summary: {{query}}' }, _ui: { position: { x: 640, y: 160 } } },
+      { id: 'notify',    type: 'NOTIFY',   input: { provider: 'gmail', channel: 'team@example.com', subject: 'Weekly Sales Report', message: '{{analyze}}' }, _ui: { position: { x: 940, y: 160 } } },
+    ],
+  },
+  {
+    id: 'github-pr-review', name: '🔎 GitHub PR Review Pipeline',
+    description: 'Fetch PR → AI code review → Branch on issues → Auto-comment or merge.',
+    icon: GitPullRequestArrow, domain: 'devops',
+    build: () => [
+      { id: 'fetch_pr',  type: 'TOOL',     input: { tool: 'github__get_repo', args: { owner: 'myorg', repo: 'backend' } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'review',    type: 'AGENT',    input: { goal: 'Review the latest PR changes for security issues and code quality. Reply APPROVED or NEEDS_WORK with specifics.' }, _ui: { position: { x: 360, y: 120 } } },
+      { id: 'check',     type: 'CONDITION', input: {}, routes: [
+        { when: 'context.review.includes("APPROVED")', goto: 'comment' },
+        { goto: 'alert' },
+      ], _ui: { position: { x: 640, y: 120 } } },
+      { id: 'comment',   type: 'TOOL',     input: { tool: 'github__create_issue', args: { repo: 'myorg/backend', title: '✅ PR Reviewed', body: '{{review}}' } }, _ui: { position: { x: 920, y: 40 } } },
+      { id: 'alert',     type: 'NOTIFY',   input: { provider: 'discord', channel: '7890123456', message: '⚠️ PR review flagged issues: {{review}}' }, _ui: { position: { x: 920, y: 210 } } },
+    ],
+  },
+  {
+    id: 'incident-runbook', name: '🚨 Incident Runbook (Multi-Channel)',
+    description: 'PagerDuty-style runbook: alert → diagnose → remediate → confirm via SMS + Slack.',
+    icon: Siren, domain: 'monitoring',
+    build: () => [
+      { id: 'alert',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#oncall', message: '🚨 Incident detected! Starting runbook…' }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'diagnose',  type: 'AGENT',    input: { goal: 'Run diagnostic checklist and identify root cause. Be thorough.' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'fix',       type: 'TOOL',     input: { tool: 'ssh__exec', args: { host: 'prod-server-1', command: 'sudo systemctl restart api && docker ps' } }, _ui: { position: { x: 680, y: 120 } } },
+      { id: 'confirm',   type: 'NOTIFY',   input: { provider: 'twilio', channel: '+15551234567', message: '✅ Incident resolved. Root cause: {{diagnose}}. Fix output: {{fix}}' }, _ui: { position: { x: 960, y: 120 } } },
+    ],
+  },
+  {
+    id: 'scheduled-scrape-etl', name: '🌐 Scheduled Web Scrape → ETL → Notify',
+    description: 'Fetch URL → Transform data → Insert into DB → Email report.',
+    icon: Globe, domain: 'default',
+    build: () => [
+      { id: 'fetch',      type: 'HTTP',      input: { method: 'GET', url: 'https://news.example.com/top-stories' }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'transform',  type: 'TRANSFORM', input: { template: { titles: '{{fetch.articles.map(a => a.title)}}', count: '{{fetch.articles.length}}' } }, _ui: { position: { x: 360, y: 120 } } },
+      { id: 'store',      type: 'TOOL',      input: { tool: 'db__query', args: { sql: `INSERT INTO news_headlines (titles, count, ingested_at) VALUES ('{{transform.titles}}', {{transform.count}}, NOW())` } }, _ui: { position: { x: 640, y: 120 } } },
+      { id: 'report',     type: 'NOTIFY',    input: { provider: 'sendgrid', channel: 'analytics@example.com', subject: 'Daily News Ingest Report', message: 'Ingested {{transform.count}} articles. Titles: {{transform.titles}}' }, _ui: { position: { x: 940, y: 120 } } },
+      { id: 'confirm',    type: 'NOTIFY',    input: { provider: 'slack', channel: '#data-ops', message: '✅ Daily scrape ETL complete: {{transform.count}} articles stored.' }, _ui: { position: { x: 1240, y: 120 } } },
+    ],
+  },
+  {
+    id: 'multi-channel-fanout', name: '📢 Multi-Channel Broadcast',
+    description: 'Agent creates announcement → Fan out to Slack + Email + Discord simultaneously.',
+    icon: Radio, domain: 'communication',
+    build: () => [
+      { id: 'draft',       type: 'AGENT',    input: { goal: 'Write a 2-sentence product launch announcement. Keep it short and punchy.' }, _ui: { position: { x: 80,  y: 160 } } },
+      { id: 'fanout',      type: 'PARALLEL', input: { tasks: [
+        { id: 'slack',      type: 'NOTIFY', input: { provider: 'slack',    channel: '#announcements', message: '{{draft}}' } },
+        { id: 'email',      type: 'NOTIFY', input: { provider: 'gmail',    channel: 'all@company.com', subject: '🚀 Product Launch', message: '{{draft}}' } },
+        { id: 'discord',    type: 'NOTIFY', input: { provider: 'discord',  channel: '1234567890', message: '{{draft}}' } },
+      ] }, _ui: { position: { x: 380, y: 160 } } },
+      { id: 'merge',       type: 'TRANSFORM', input: { template: { slackOk: '{{fanout.tasks.slack.ok}}', emailOk: '{{fanout.tasks.email.ok}}', discordOk: '{{fanout.tasks.discord.ok}}', errs: '{{fanout.hasErrors}}' } }, _ui: { position: { x: 660, y: 160 } } },
+      { id: 'summary',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#ops', message: '📢 Broadcast results — Slack:{{merge.slackOk}} Email:{{merge.emailOk}} Discord:{{merge.discordOk}} Errors:{{merge.errs}}' }, _ui: { position: { x: 940, y: 160 } } },
+    ],
+  },
+  {
+    id: 'compliance-audit', name: '📋 Compliance Audit Trail',
+    description: 'Agent review → Dual approval → Log to Confluence → Confirm via email.',
+    icon: FileCheck, domain: 'compliance',
+    build: () => [
+      { id: 'review',      type: 'AGENT',    input: { goal: 'Audit the change request for SOX compliance. Flag any violations.' }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'security',    type: 'APPROVAL', input: {}, goto: 'compliance_officer', _ui: { position: { x: 360, y: 120 } } },
+      { id: 'compliance_officer', type: 'APPROVAL', input: {}, goto: 'log', _ui: { position: { x: 640, y: 120 } } },
+      { id: 'log',         type: 'TOOL',     input: { tool: 'confluence__create_page', args: { space: 'AUDIT', title: 'Audit {{DATE}}', body: '{{review}}' } }, _ui: { position: { x: 920, y: 120 } } },
+      { id: 'confirm',     type: 'NOTIFY',   input: { provider: 'gmail', channel: 'compliance@company.com', subject: 'Audit Completed', message: 'Audit trail logged to Confluence.\\n\\nFindings:\\n{{review}}' }, _ui: { position: { x: 1220, y: 120 } } },
+    ],
+  },
+  // ═══════════════════════════════════════════════════════════════════════
+  // 🏭 Industry-specific templates — IoT, infra, CRM, finance, ITSM
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    id: 'iot-sensor-pipeline', name: '🏭 IoT Sensor → Analysis → Alert',
+    description: 'MQTT sensor data → Agent anomaly detection → ThingsBoard telemetry → Slack alert.',
+    icon: Cpu, domain: 'iot',
+    build: () => [
+      { id: 'subscribe',  type: 'TOOL',     input: { tool: 'mqtt__subscribe', args: { topic: 'factory/sensors/+/temperature' } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'analyze',    type: 'AGENT',    input: { goal: 'Analyze this sensor data for anomalies. If any reading exceeds safe thresholds, flag it with severity and sensor ID: {{subscribe}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'check',      type: 'CONDITION', input: {}, routes: [
+        { when: 'context.analyze.includes("CRITICAL")', goto: 'alert' },
+        { goto: 'log' },
+      ], _ui: { position: { x: 680, y: 120 } } },
+      { id: 'alert',      type: 'NOTIFY',   input: { provider: 'slack', channel: '#iot-alerts', message: '🚨 Sensor anomaly detected!\\n{{analyze}}' }, _ui: { position: { x: 960, y: 40 } } },
+      { id: 'log',        type: 'TOOL',     input: { tool: 'thingsboard__telemetry', args: { deviceId: 'factory-sensors', keys: 'temperature,humidity,pressure' } }, _ui: { position: { x: 960, y: 210 } } },
+    ],
+  },
+  {
+    id: 'aws-cost-governance', name: '☁️ AWS Cost Governance',
+    description: 'CloudWatch cost metrics → Agent analysis → Human approval → Slack report.',
+    icon: Cloud, domain: 'devops',
+    build: () => [
+      { id: 'metrics',    type: 'TOOL',     input: { tool: 'aws__cloudwatch_metrics', args: { namespace: 'AWS/Billing', metricName: 'EstimatedCharges' } }, _ui: { position: { x: 80,  y: 160 } } },
+      { id: 'analyze',    type: 'AGENT',    input: { goal: 'Analyze these AWS cost metrics. Identify the top 3 cost drivers and suggest optimizations: {{metrics}}' }, _ui: { position: { x: 380, y: 160 } } },
+      { id: 'approve',    type: 'APPROVAL', input: {}, goto: 'notify', _ui: { position: { x: 680, y: 160 } } },
+      { id: 'notify',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#finops', message: '📊 Monthly AWS cost report:\\n{{analyze}}' }, _ui: { position: { x: 960, y: 160 } } },
+    ],
+  },
+  {
+    id: 'prometheus-incident', name: '📡 Prometheus Alert → Jira → SMS',
+    description: 'Prometheus alert fires → Agent root cause → Auto-create Jira ticket → SMS on-call.',
+    icon: Terminal, domain: 'monitoring',
+    build: () => [
+      { id: 'alert',      type: 'TOOL',     input: { tool: 'prometheus__query_range', args: { query: 'up == 0', duration: '5m' } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'diagnose',   type: 'AGENT',    input: { goal: 'Diagnose the root cause from this Prometheus alert. Be specific about affected services: {{alert}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'ticket',     type: 'TOOL',     input: { tool: 'jira__create_issue', args: { projectKey: 'OPS', summary: 'Incident: {{alert.metric}}', description: '{{diagnose}}', issueType: 'Bug' } }, _ui: { position: { x: 680, y: 120 } } },
+      { id: 'sms',        type: 'NOTIFY',   input: { provider: 'twilio', channel: '+15551234567', message: '🚨 On-call: {{diagnose}}. Jira {{ticket.key}}' }, _ui: { position: { x: 960, y: 120 } } },
+    ],
+  },
+  {
+    id: 'k8s-autoremediation', name: '⚙️ K8s Auto-Remediation',
+    description: 'Prometheus CPU threshold → Agent remediation plan → K8s scale or restart → Slack confirm.',
+    icon: Container, domain: 'devops',
+    build: () => [
+      { id: 'check',      type: 'TOOL',     input: { tool: 'prometheus__query_range', args: { query: 'cpu_usage > 90', duration: '5m' } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'plan',       type: 'AGENT',    input: { goal: 'High CPU detected. Decide: should we scale up replicas or restart? Reply SCALE or RESTART with reasoning. Data: {{check}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'decide',     type: 'CONDITION', input: {}, routes: [
+        { when: 'context.plan.includes("SCALE")', goto: 'scale' },
+        { goto: 'restart' },
+      ], _ui: { position: { x: 680, y: 120 } } },
+      { id: 'scale',      type: 'TOOL',     input: { tool: 'k8s__get', args: { resource: 'deployments', name: 'backend', namespace: 'prod' } }, _ui: { position: { x: 960, y: 40 } } },
+      { id: 'restart',    type: 'TOOL',     input: { tool: 'ssh__exec', args: { host: 'prod-node-1', command: 'kubectl rollout restart deployment/backend -n prod' } }, _ui: { position: { x: 960, y: 210 } } },
+      { id: 'done',       type: 'NOTIFY',   input: { provider: 'slack', channel: '#devops', message: '✅ K8s remediation applied. Plan: {{plan}}' }, _ui: { position: { x: 1260, y: 120 } } },
+    ],
+  },
+  {
+    id: 'stripe-fraud-monitor', name: '💰 Stripe Payment → Fraud Check',
+    description: 'Stripe charge event → Agent fraud analysis → Flag or approve → Discord/Slack alert.',
+    icon: CreditCard, domain: 'finance',
+    build: () => [
+      { id: 'charge',     type: 'HTTP',     input: { method: 'POST', url: 'https://api.example.com/stripe-webhook' }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'analyze',    type: 'AGENT',    input: { goal: 'Analyze this payment for fraud indicators. Consider amount, location, and patterns. Reply CLEAN or FRAUD with reasoning: {{charge}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'check',      type: 'CONDITION', input: {}, routes: [
+        { when: 'context.analyze.includes("FRAUD")', goto: 'fraud_alert' },
+        { goto: 'log' },
+      ], _ui: { position: { x: 680, y: 120 } } },
+      { id: 'fraud_alert',type: 'NOTIFY',   input: { provider: 'discord', channel: 'moderation-channel', message: '🚨 Fraud flagged! Payment: {{charge}}. Analysis: {{analyze}}' }, _ui: { position: { x: 960, y: 40 } } },
+      { id: 'log',        type: 'NOTIFY',   input: { provider: 'slack', channel: '#payments', message: '✅ Payment processed: {{charge.amount}} {{charge.currency}}' }, _ui: { position: { x: 960, y: 210 } } },
+    ],
+  },
+  {
+    id: 'servicenow-triage', name: '🎫 ServiceNow Ticket Triage',
+    description: 'ServiceNow incident → Agent classify priority → Route to Jira or Slack based on urgency.',
+    icon: Headset, domain: 'itsm',
+    build: () => [
+      { id: 'incident',   type: 'TOOL',     input: { tool: 'zendesk__list_tickets', args: { status: 'open' } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'classify',   type: 'AGENT',    input: { goal: 'Classify this ticket by urgency (P1-critical, P2-high, P3-normal). Reply with priority and 1-line summary: {{incident}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'router',     type: 'CONDITION', input: {}, routes: [
+        { when: 'context.classify.includes("P1")', goto: 'jira' },
+        { goto: 'notify' },
+      ], _ui: { position: { x: 680, y: 120 } } },
+      { id: 'jira',       type: 'TOOL',     input: { tool: 'jira__create_issue', args: { projectKey: 'IT', summary: 'P1: ServiceNow incident', description: '{{classify}}', issueType: 'Bug' } }, _ui: { position: { x: 960, y: 40 } } },
+      { id: 'notify',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#it-helpdesk', message: '📋 Ticket classified: {{classify}}' }, _ui: { position: { x: 960, y: 210 } } },
+    ],
+  },
+  {
+    id: 'salesforce-lead-engagement', name: '💼 Salesforce Lead → Outreach',
+    description: 'Query Salesforce leads → Agent enrichment → Gmail personalised outreach.',
+    icon: UserPlus, domain: 'crm',
+    build: () => [
+      { id: 'leads',      type: 'TOOL',     input: { tool: 'salesforce__query', args: { query: `SELECT Name, Email, Company FROM Lead WHERE Status = 'New'` } }, _ui: { position: { x: 80,  y: 160 } } },
+      { id: 'enrich',     type: 'AGENT',    input: { goal: 'Research these leads and write a personalised 2-sentence outreach for each. Mention their company specifically: {{leads}}' }, _ui: { position: { x: 380, y: 160 } } },
+      { id: 'email',      type: 'NOTIFY',   input: { provider: 'gmail', channel: '{{leads.records[0].Email}}', subject: 'Quick question about {{leads.records[0].Company}}', message: '{{enrich}}' }, _ui: { position: { x: 680, y: 160 } } },
+      { id: 'confirm',    type: 'NOTIFY',   input: { provider: 'slack', channel: '#sales', message: '📨 Outreach sent to {{leads.totalSize}} new leads.' }, _ui: { position: { x: 960, y: 160 } } },
+    ],
+  },
+  {
+    id: 'docker-orchestration', name: '🐳 Docker Health Check → Repair',
+    description: 'Docker ps → Agent health analysis → Exec restart unhealthy containers → Slack report.',
+    icon: Container, domain: 'devops',
+    build: () => [
+      { id: 'ps',         type: 'TOOL',     input: { tool: 'docker__ps', args: { all: true } }, _ui: { position: { x: 80,  y: 120 } } },
+      { id: 'health',     type: 'AGENT',    input: { goal: 'Check container health from this docker ps output. Identify any stopped or unhealthy containers. Reply with container names to restart or ALL_CLEAN: {{ps}}' }, _ui: { position: { x: 380, y: 120 } } },
+      { id: 'check',      type: 'CONDITION', input: {}, routes: [
+        { when: 'context.health.includes("ALL_CLEAN")', goto: 'report' },
+        { goto: 'restart' },
+      ], _ui: { position: { x: 680, y: 120 } } },
+      { id: 'restart',    type: 'TOOL',     input: { tool: 'docker__run', args: { image: 'alpine', command: 'echo "restarting..."' } }, _ui: { position: { x: 960, y: 40 } } },
+      { id: 'report',     type: 'NOTIFY',   input: { provider: 'slack', channel: '#infra', message: '🐳 Docker health report: {{health}}' }, _ui: { position: { x: 960, y: 210 } } },
     ],
   },
 ]
@@ -357,6 +674,21 @@ function stepsToGraph(steps: Step[]): { nodes: Node[]; edges: Edge[] } {
   const edges: Edge[] = []
   const stepIds = new Set(steps.map(s => s.id))
 
+  // Gather step IDs that are reachable ONLY via conditional routes.
+  // Those steps sit on branches and should NOT get a default
+  // "next sequential" edge — they only link via the route edges.
+  const conditionalTargets = new Set<string>()
+  for (const s of steps) {
+    if (Array.isArray(s.routes) && s.routes.length > 0) {
+      for (const r of s.routes) {
+        const target = typeof r.goto === 'number' ? steps[r.goto]?.id : r.goto
+        if (target && target !== 'END' && stepIds.has(target)) {
+          conditionalTargets.add(target)
+        }
+      }
+    }
+  }
+
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i]
     const meta = NODE_META[s.type] || NODE_META.AGENT
@@ -373,7 +705,10 @@ function stepsToGraph(steps: Step[]): { nodes: Node[]; edges: Edge[] } {
     let target: string | undefined
     if (s.goto !== undefined) {
       target = typeof s.goto === 'number' ? steps[s.goto]?.id : (s.goto === 'END' ? undefined : s.goto)
-    } else {
+    } else if (!conditionalTargets.has(s.id)) {
+      // Only default to the next sequential step when this step is NOT a
+      // conditional branch target.  Branch targets only connect via the
+      // route edges defined by the parent CONDITION step.
       target = steps[i + 1]?.id
     }
     if (!target || !stepIds.has(target)) continue
@@ -464,6 +799,7 @@ function subtitleFor(step: Step): string {
     case 'TRANSFORM': return 'shape context data'
     case 'DELAY':     return `wait ${i.seconds ? i.seconds + 's' : ((i.ms || 1000) + 'ms')}`
     case 'SET':       { const keys = Object.keys(i.vars || {}); return keys.length ? keys.join(', ') : 'no vars set' }
+    case 'SCRIPT':    return i.code ? `script · ${String(i.code).slice(0, 40)}…` : 'no code'
     case 'LOOP':      return `foreach ${i.itemsFrom || '?'}${i.agentId ? ' · agent set' : ' · no agent'}`
     case 'NOTIFY':    return `${i.channel || '#no-channel'} · ${(i.message || '').slice(0, 40)}`
     case 'PARALLEL':  return `fan-out · ${(i.tasks || []).length} task${(i.tasks || []).length === 1 ? '' : 's'}`
@@ -485,6 +821,7 @@ function invalidReason(step: Step): string | null {
     case 'LOOP':      return i.agentId && i.itemsFrom ? null : 'Set itemsFrom + agent'
     case 'NOTIFY':    return i.channel && i.message ? null : 'Set channel + message'
     case 'SET':       return Object.keys(i.vars || {}).length > 0 ? null : 'Define at least one var'
+    case 'SCRIPT':    return i.code ? null : 'Provide JavaScript code'
     case 'TRANSFORM': return i.template ? null : 'Provide a template'
     case 'PARALLEL': {
       const tasks = i.tasks
@@ -535,8 +872,7 @@ function useLiveExecStatus(
   useEffect(() => {
     setStatusMap({})
     if (!execId || !tenantId) return
-    const apiBase = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1').replace('/api/v1', '')
-    const wsUrl = `${apiBase.replace(/^http/, 'ws')}/ws/tenants/${tenantId}/telemetry`
+    const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws/tenants/${tenantId}/telemetry`
     let ws: WebSocket | null = null
     let cancelled = false
 
@@ -943,6 +1279,20 @@ function CanvasInner({ initialSteps, initialMeta, agents, onSave, onCancel, savi
         borderBottom: '1px solid var(--border)', background: 'var(--bg-white)',
         boxShadow: '0 1px 3px rgba(0,0,0,0.03)'
       }}>
+        <a
+          href="/dashboard"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            padding: '5px 10px', borderRadius: 6, fontSize: 12,
+            border: '1px solid var(--border)', background: 'var(--bg-white)',
+            color: 'var(--text)', textDecoration: 'none', cursor: 'pointer',
+            fontWeight: 600,
+          }}
+          title="Back to dashboard"
+        >
+          ← Home
+        </a>
+
         <strong style={{ fontSize: 15, color: 'var(--text)' }}>{title || 'Workflow Canvas'}</strong>
 
         <button
@@ -1056,7 +1406,7 @@ function CanvasInner({ initialSteps, initialMeta, agents, onSave, onCancel, savi
         <MetaEditor meta={meta} setMeta={setMeta} onClose={() => setShowDetails(false)} />
       )}
       {showTemplates && (
-        <TemplateGallery onPick={loadTemplate} onClose={() => setShowTemplates(false)} />
+        <TemplateGallery onPick={loadTemplate} onClose={() => setShowTemplates(false)} tenantId={tenantId} />
       )}
       {showHelp && (
         <ShortcutsHelp onClose={() => setShowHelp(false)} />
@@ -1070,6 +1420,7 @@ function CanvasInner({ initialSteps, initialMeta, agents, onSave, onCancel, savi
           onToggle={() => setPaletteOpen(v => !v)}
           onAdd={(t) => addStep(t)}
           onDragStart={onPaletteDragStart}
+          agentCount={agents.length}
         />
 
         {/* Canvas */}
@@ -1123,6 +1474,7 @@ function CanvasInner({ initialSteps, initialMeta, agents, onSave, onCancel, savi
             onDelete={deleteSelected}
             onDuplicate={duplicateSelected}
             onTest={tenantId ? () => setTestStepFor(selectedNode.id) : undefined}
+            tenantId={tenantId}
           />
         ) : (
           <InspectorHelp />
@@ -1181,12 +1533,13 @@ function IconToolbarButton({ onClick, disabled, title, children }: {
 }
 
 function Palette({
-  open, onToggle, onAdd, onDragStart,
+  open, onToggle, onAdd, onDragStart, agentCount = 0,
 }: {
   open: boolean
   onToggle: () => void
   onAdd: (t: StepType) => void
   onDragStart: (e: React.DragEvent, t: StepType) => void
+  agentCount?: number
 }) {
   if (!open) {
     return (
@@ -1235,6 +1588,9 @@ function Palette({
               {g.types.map(t => {
                 const meta = NODE_META[t]
                 const Icon = meta.icon
+                const badge =
+                  t === 'AGENT' && agentCount > 0 ? `${agentCount}` :
+                  undefined
                 return (
                   <div
                     key={t}
@@ -1266,6 +1622,13 @@ function Palette({
                       <Icon size={14} />
                     </span>
                     <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{meta.label}</span>
+                    {badge && (
+                      <span style={{
+                        marginLeft: 'auto', fontSize: 10, fontWeight: 700,
+                        background: meta.color + '18', color: meta.color,
+                        padding: '1px 6px', borderRadius: 4, minWidth: 18, textAlign: 'center',
+                      }}>{badge}</span>
+                    )}
                   </div>
                 )
               })}
@@ -1393,7 +1756,35 @@ function MetaEditor({ meta, setMeta, onClose }: { meta: WorkflowMeta; setMeta: (
 }
 
 // ── Template gallery ───────────────────────────────────────────────────────
-function TemplateGallery({ onPick, onClose }: { onPick: (t: Template) => void; onClose: () => void }) {
+function TemplateGallery({ onPick, onClose, tenantId }: { onPick: (t: Template) => void; onClose: () => void; tenantId?: string }) {
+  const [prompt, setPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [genError, setGenError] = useState('')
+
+  async function handleGenerateFromPrompt() {
+    if (!prompt.trim() || generating) return
+    setGenerating(true)
+    setGenError('')
+    try {
+      // Dynamic import to keep the bundle light
+      const { api } = await import('@/lib/api')
+      const result = await api.generateWorkflowFromPrompt(tenantId || '', prompt.trim())
+      const t: Template = {
+        id: `gen-${Date.now()}`,
+        name: result.name || 'AI Generated',
+        description: result.description || 'Generated from your prompt.',
+        icon: Sparkles,
+        domain: 'default',
+        build: () => result.steps || [],
+      }
+      onPick(t)
+    } catch (e: any) {
+      setGenError(e?.message || 'Failed to generate workflow. Try rephrasing your prompt.')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 1100,
@@ -1403,15 +1794,57 @@ function TemplateGallery({ onPick, onClose }: { onPick: (t: Template) => void; o
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
           <div>
             <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 2 }}>Start from a template</h3>
-            <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Common workflow patterns you can customise.</p>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Common workflow patterns or describe one with AI.</p>
           </div>
           <button onClick={onClose} type="button" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
             <X size={18} />
           </button>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginTop: 14 }}>
+
+        {/* ── Generate from prompt (AI) ── */}
+        <div style={{ marginBottom: 14, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <textarea
+            value={prompt}
+            onChange={e => { setPrompt(e.target.value); setGenError('') }}
+            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleGenerateFromPrompt() }}
+            placeholder={'Describe what the workflow should do… e.g. "Poll MQTT sensors every 5 minutes, have an AI agent detect anomalies, and SMS the on-call engineer if something is wrong."'}
+            rows={2}
+            disabled={generating}
+            style={{
+              flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 12,
+              border: '1px solid var(--border)', background: 'var(--bg)',
+              resize: 'none', outline: 'none', fontFamily: 'inherit',
+              lineHeight: 1.4,
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleGenerateFromPrompt}
+            disabled={generating || !prompt.trim()}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5, padding: '8px 14px',
+              borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              background: prompt.trim() ? 'var(--green, #3f8a43)' : 'var(--border)',
+              color: prompt.trim() ? '#fff' : 'var(--text-muted)',
+              border: 'none', whiteSpace: 'nowrap', transition: 'background 150ms',
+            }}
+          >
+            {generating ? (
+              <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <Sparkles size={13} />
+            )}
+            Generate
+          </button>
+        </div>
+        {genError && (
+          <p style={{ fontSize: 11, color: '#dc2626', marginTop: -8, marginBottom: 10 }}>{genError}</p>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
           {TEMPLATES.map(t => {
             const Icon = t.icon
+            const ds = domainStyle(t.domain)
             return (
               <button
                 key={t.id}
@@ -1423,12 +1856,22 @@ function TemplateGallery({ onPick, onClose }: { onPick: (t: Template) => void; o
                   display: 'flex', flexDirection: 'column', gap: 6,
                   transition: 'transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease',
                 }}
-                onMouseEnter={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.borderColor = 'var(--green, #3f8a43)'; el.style.boxShadow = '0 4px 12px rgba(63,138,67,0.14)'; el.style.transform = 'translateY(-1px)' }}
-                onMouseLeave={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.borderColor = 'var(--border)'; el.style.boxShadow = 'none'; el.style.transform = 'none' }}
+                onMouseEnter={(e) => {
+                  const el = e.currentTarget as HTMLButtonElement
+                  el.style.borderColor = ds.color
+                  el.style.boxShadow = `0 4px 12px ${ds.color}22`
+                  el.style.transform = 'translateY(-1px)'
+                }}
+                onMouseLeave={(e) => {
+                  const el = e.currentTarget as HTMLButtonElement
+                  el.style.borderColor = 'var(--border)'
+                  el.style.boxShadow = 'none'
+                  el.style.transform = 'none'
+                }}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ display: 'inline-flex', width: 28, height: 28, borderRadius: 6, background: '#edf7ee', alignItems: 'center', justifyContent: 'center' }}>
-                    <Icon size={15} color="#3f8a43" />
+                  <span style={{ display: 'inline-flex', width: 28, height: 28, borderRadius: 6, background: ds.bg, alignItems: 'center', justifyContent: 'center' }}>
+                    <Icon size={15} color={ds.color} />
                   </span>
                   <strong style={{ fontSize: 13 }}>{t.name}</strong>
                 </span>
@@ -1481,7 +1924,7 @@ function ShortcutsHelp({ onClose }: { onClose: () => void }) {
 }
 
 // ── Node inspector (per-type) ──────────────────────────────────────────────
-function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplicate, onTest }: {
+function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplicate, onTest, tenantId }: {
   node: Node
   agents: Agent[]
   allStepIds: string[]
@@ -1489,6 +1932,7 @@ function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplica
   onDelete: () => void
   onDuplicate: () => void
   onTest?: () => void
+  tenantId?: string
 }) {
   const data = node.data as any
   const type: StepType = data.type
@@ -1505,6 +1949,36 @@ function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplica
     onChange({ retry: { ...(retry || {}), ...patch } })
   }
   const canTest = !!onTest && !['AGENT', 'CREW', 'LOOP', 'APPROVAL'].includes(type)
+
+  // ── Fetch available connector tools for TOOL step autocomplete ─────────
+  const [toolDefs, setToolDefs] = useState<any[]>([])
+  const [toolDefsLoaded, setToolDefsLoaded] = useState(false)
+  useEffect(() => {
+    if (type !== 'TOOL' || !tenantId) { setToolDefs([]); setToolDefsLoaded(false); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const mod = await import('@/lib/api')
+        const r = await mod.api.request(`/tenants/${tenantId}/connectors/tool-definitions`)
+        if (!cancelled && r?.data?.tools) { setToolDefs(r.data.tools); setToolDefsLoaded(true) }
+      } catch { /* keep static fallback */ }
+    })()
+    return () => { cancelled = true }
+  }, [type, tenantId])
+
+  // Group tool definitions by provider prefix for the picker
+  const toolGroups = useMemo(() => {
+    const map = new Map<string, { label: string; color: string; tools: any[] }>()
+    for (const t of toolDefs || []) {
+      const prefix = String(t.name || '').split('__')[0] || 'other'
+      if (!map.has(prefix)) {
+        const providerMeta = NODE_META.TOOL
+        map.set(prefix, { label: prefix, color: providerMeta?.color || '#8b5cf6', tools: [] })
+      }
+      map.get(prefix)!.tools.push(t)
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [toolDefs])
 
   return (
     <div style={{ width: 360, borderLeft: '1px solid var(--border)', background: 'var(--bg-white)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -1646,10 +2120,61 @@ function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplica
           <>
             <div className="form-group">
               <label className="form-label">Tool name</label>
-              <input className="input" placeholder="slack__post_message, jira__create_issue, db__<slug>__query, rest__<slug>__<op>…" value={input.tool || ''} onChange={e => set({ tool: e.target.value })} />
+              <input
+                className="input"
+                placeholder={toolDefs.length > 0 ? 'Type or pick a tool below…' : 'slack__post_message, jira__create_issue…'}
+                value={input.tool || ''}
+                onChange={e => set({ tool: e.target.value })}
+                list="tool-defs-datalist"
+              />
+              {toolDefs.length > 0 && (
+                <datalist id="tool-defs-datalist">
+                  {toolDefs.map((t: any) => (
+                    <option key={t.name} value={t.name}>{t.description || t.name}</option>
+                  ))}
+                </datalist>
+              )}
               <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
-                Any active connector tool. Format: <code>&lt;provider&gt;__&lt;op&gt;</code>.
+                Format: <code>&lt;provider&gt;__&lt;operation&gt;</code>. Must match an <strong>active</strong> connector.
+                {toolDefsLoaded && toolDefs.length === 0 && ' (No active connectors found — configure one first.)'}
               </p>
+              {toolGroups.length > 0 ? (
+                <div style={{ marginTop: 8, padding: '6px 10px', background: 'var(--bg)', borderRadius: 6, fontSize: 11, lineHeight: 1.8, maxHeight: 220, overflowY: 'auto' }}>
+                  {toolGroups.map(([prefix, grp]) => (
+                    <div key={prefix}>
+                      <strong style={{ color: 'var(--text)', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>{prefix}</strong>
+                      {grp.tools.map((t: any) => (
+                        <button
+                          key={t.name}
+                          type="button"
+                          title={t.description || t.name}
+                          onClick={() => set({ tool: t.name })}
+                          style={{
+                            display: 'block', width: '100%', textAlign: 'left',
+                            background: input.tool === t.name ? 'var(--brand-light)' : 'transparent',
+                            border: 'none', borderRadius: 3, padding: '2px 6px',
+                            fontSize: 10, fontFamily: 'monospace', cursor: 'pointer',
+                            color: input.tool === t.name ? 'var(--brand)' : 'var(--text-muted)',
+                          }}
+                        >
+                          {t.name}
+                          {t.description ? <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontFamily: 'inherit' }}>— {t.description}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ) : toolDefsLoaded ? null : (
+                <div style={{ marginTop: 8, padding: 10, background: 'var(--bg)', borderRadius: 6, fontSize: 11, lineHeight: 1.7 }}>
+                  <strong style={{ color: 'var(--text)' }}>Available prefixes:</strong><br />
+                  <code>slack__post_message</code> · <code>slack__list_channels</code><br />
+                  <code>jira__create_issue</code> · <code>jira__search_issues</code> · <code>jira__get_issue</code><br />
+                  <code>github__search_repos</code> · <code>github__create_issue</code><br />
+                  <code>gmail__send</code> · <code>notion__create_page</code> · <code>linear__create_issue</code><br />
+                  <code>db__&lt;slug&gt;__query</code> · <code>rest__&lt;slug&gt;__&lt;method&gt;</code><br />
+                  <code>local_shell__execute</code> · <code>local_dir__list</code> · <code>webhook__send</code>
+                </div>
+              )}
             </div>
             <div className="form-group">
               <label className="form-label">Arguments (JSON)</label>
@@ -1738,9 +2263,40 @@ function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplica
         {type === 'NOTIFY' && (
           <>
             <div className="form-group">
-              <label className="form-label">Slack channel</label>
-              <input className="input" placeholder="#ops or C0123ABC" value={input.channel || ''} onChange={e => set({ channel: e.target.value })} />
+              <label className="form-label">Provider</label>
+              <select
+                className="input"
+                value={input.provider || 'slack'}
+                onChange={e => set({ provider: e.target.value })}
+              >
+                <option value="slack">Slack</option>
+                <option value="gmail">Gmail</option>
+                <option value="discord">Discord</option>
+                <option value="sendgrid">SendGrid</option>
+                <option value="twilio">Twilio (SMS)</option>
+              </select>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                Uses the tenant&apos;s active connector for the chosen provider.
+              </p>
             </div>
+            {(input.provider === 'gmail' || input.provider === 'sendgrid') && (
+              <>
+                <div className="form-group">
+                  <label className="form-label">To</label>
+                  <input className="input" placeholder="user@example.com" value={input.channel || ''} onChange={e => set({ channel: e.target.value })} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Subject</label>
+                  <input className="input" placeholder="Your subject line" value={input.subject || ''} onChange={e => set({ subject: e.target.value })} />
+                </div>
+              </>
+            )}
+            {input.provider !== 'gmail' && input.provider !== 'sendgrid' && (
+              <div className="form-group">
+                <label className="form-label">{input.provider === 'twilio' ? 'Phone number' : input.provider === 'discord' ? 'Channel ID' : 'Slack channel'}</label>
+                <input className="input" placeholder={input.provider === 'twilio' ? '+15551234567' : input.provider === 'discord' ? '1234567890' : '#ops or C0123ABC'} value={input.channel || ''} onChange={e => set({ channel: e.target.value })} />
+              </div>
+            )}
             <div className="form-group">
               <label className="form-label">Message</label>
               <textarea
@@ -1752,7 +2308,40 @@ function NodeInspector({ node, agents, allStepIds, onChange, onDelete, onDuplica
               />
               <VarChips ids={allStepIds} onInsert={(tok) => set({ message: (input.message || '') + tok })} />
             </div>
-            <p style={{ fontSize: 11, color: 'var(--text-muted)' }}>Uses the tenant&apos;s active Slack connector. For other providers use a <strong>Tool</strong> step.</p>
+          </>
+        )}
+
+        {type === 'SCRIPT' && (
+          <>
+            <div className="form-group">
+              <label className="form-label">JavaScript code</label>
+              <textarea
+                className="input"
+                rows={10}
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+                placeholder={`// Access context vars directly:\n// const { research, fetch } = context;\n// Return the step output:\nreturn { processed: true, count: items.length };`}
+                value={input.code || ''}
+                onChange={e => set({ code: e.target.value })}
+              />
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
+                Sandboxed Node.js. Use <code>context</code> to read prior step outputs. <code>return</code> sets this step&apos;s output. Max 30s execution.
+              </p>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Arguments (JSON, optional)</label>
+              <textarea
+                className="input"
+                rows={4}
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+                placeholder='{ "threshold": 0.8 }'
+                value={typeof input.args === 'string' ? input.args : (input.args ? JSON.stringify(input.args, null, 2) : '')}
+                onChange={e => {
+                  const raw = e.target.value
+                  try { set({ args: raw.trim() ? JSON.parse(raw) : undefined }) }
+                  catch { set({ args: raw }) }
+                }}
+              />
+            </div>
           </>
         )}
 

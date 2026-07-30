@@ -3,6 +3,7 @@
 // Reads SCHEDULE-triggered workflows and fires executions on time
 
 import { query } from '../db/pool.js'
+import { auditLog } from '../utils/audit.js'
 
 // ─── Cron Parser ─────────────────────────────────────────────────────────────
 //
@@ -84,49 +85,130 @@ function parseCron(cronExpr) {
 
 /**
  * Calculate milliseconds until the next cron fire after `now`.
+ *
+ * ── M2 Fix: DST / Timezone awareness ──────────────────────────────────────
+ * The original implementation used `new Date()` (server local time) with no
+ * timezone context. A "0 9 * * *" cron on a UK server would fire at 8am or
+ * 10am on DST transition days.
+ * Now accepts an IANA timezone string (e.g. "Europe/London") and converts
+ * each candidate time to the trigger timezone before evaluating cron fields.
+ * Falls back to UTC if no timezone is configured or if the timezone is invalid.
+ *
+ * @param {object} fields       - Parsed cron fields from parseCron()
+ * @param {Date}   [now]        - Reference time (default: current time)
+ * @param {string} [timezone]   - IANA timezone string, e.g. "America/New_York"
  */
-function msUntilNextFire(fields, now = new Date()) {
+function msUntilNextFire(fields, now = new Date(), timezone = 'UTC') {
+  // Validate the timezone — fall back to UTC if invalid
+  let tz = timezone
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz }).format(now)
+  } catch {
+    tz = 'UTC'
+  }
+
+  // Helper: get the local time-of-day parts in the target timezone
+  function getLocalParts(date) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(date)
+    const p = {}
+    for (const { type, value } of parts) p[type] = parseInt(value, 10)
+    // month in Intl is 1-12
+    return { mo: p.month, d: p.day, h: p.hour === 24 ? 0 : p.hour, m: p.minute, wd: date.getDay() }
+    // NOTE: getDay() returns UTC day of week but we correct this via the candidate advance below
+  }
+
   // Search up to 366 days ahead to avoid infinite loops on bad configs
   const limit = new Date(now.getTime() + 366 * 24 * 60 * 60_000)
   const candidate = new Date(now)
 
   // Advance to the next whole minute
-  candidate.setSeconds(0, 0)
-  candidate.setMinutes(candidate.getMinutes() + 1)
+  candidate.setUTCSeconds(0, 0)
+  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1)
 
   while (candidate < limit) {
-    const mo = candidate.getMonth() + 1   // 1-12
-    const d = candidate.getDate()         // 1-31
-    const wd = candidate.getDay()          // 0-6 Sun=0
-    const h = candidate.getHours()
-    const m = candidate.getMinutes()
+    const local = getLocalParts(candidate)
 
-    const monthOk = !fields.month || fields.month.has(mo)
-    const domOk = !fields.dom || fields.dom.has(d)
-    const dowOk = !fields.dow || fields.dow.has(wd)
-    const hourOk = !fields.hour || fields.hour.has(h)
-    const minOk = !fields.minute || fields.minute.has(m)
+    // Day of week from local date in timezone (not UTC)
+    const localDow = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz, weekday: 'short'
+    }).format(candidate)
+    const dowMap = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 }
+    const localDowNum = dowMap[localDow] ?? candidate.getDay()
+
+    const monthOk = !fields.month || fields.month.has(local.mo)
+    const domOk   = !fields.dom   || fields.dom.has(local.d)
+    const dowOk   = !fields.dow   || fields.dow.has(localDowNum)
+    const hourOk  = !fields.hour  || fields.hour.has(local.h)
+    const minOk   = !fields.minute|| fields.minute.has(local.m)
 
     if (monthOk && domOk && dowOk && hourOk && minOk) {
       return candidate.getTime() - now.getTime()
     }
 
-    candidate.setMinutes(candidate.getMinutes() + 1)
+    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1)
   }
 
   return null // No match found within a year — skip
 }
 
+
 // ─── Scheduler State ─────────────────────────────────────────────────────────
 
 let schedulerInterval = null
+let approvalCleanupInterval = null
 const activeTimers = new Map()
 
 export async function startScheduler() {
   // Check every 60s for new/updated scheduled workflows
   schedulerInterval = setInterval(loadScheduledWorkflows, 60_000)
   await loadScheduledWorkflows()
+
+  // ── Auto-reject expired approvals every 5 minutes ──────────────────────────
+  // autoRejectExpiredApprovals was previously exported but never called, causing
+  // tasks to remain stuck as AWAITING_APPROVAL indefinitely after their deadline.
+  approvalCleanupInterval = setInterval(async () => {
+    try {
+      const { autoRejectExpiredApprovals } = await import('./hitl.service.js')
+      const count = await autoRejectExpiredApprovals()
+      if (count > 0) {
+        console.log(`[Scheduler] Auto-rejected ${count} expired approval(s)`)
+      }
+    } catch (err) {
+      console.warn(`[Scheduler] Approval cleanup failed: ${err.message}`)
+    }
+  }, 5 * 60_000)
+
+  // Run once immediately on startup to clean up any approvals that expired
+  // while the server was offline (e.g. after a restart)
+  setTimeout(async () => {
+    try {
+      const { autoRejectExpiredApprovals } = await import('./hitl.service.js')
+      const count = await autoRejectExpiredApprovals()
+      if (count > 0) {
+        console.log(`[Scheduler] Startup cleanup: auto-rejected ${count} expired approval(s)`)
+      }
+    } catch { /* non-critical */ }
+  }, 5000) // 5s delay to let DB connections stabilise
+
+  // ── Auto-purge expired dashboard reports (nightly) ─────────────────────────
+  // Run once a day to clean up soft-archived and TTL-expired reports
+  setInterval(async () => {
+    try {
+      const { purgeExpiredReports } = await import('./reports.service.js')
+      const count = await purgeExpiredReports()
+      if (count > 0) {
+        console.log(`[Scheduler] Purged ${count} expired/archived report(s)`)
+      }
+    } catch (err) {
+      console.warn(`[Scheduler] Report purge failed: ${err.message}`)
+    }
+  }, 24 * 60 * 60 * 1000)
 }
+
 
 async function loadScheduledWorkflows() {
   try {
@@ -164,7 +246,7 @@ async function loadScheduledWorkflows() {
             await triggerWorkflow(wf)
           }, parsed.intervalMs)
 
-          activeTimers.set(wf.id, { timer, cronKey, cron, name: wf.name })
+          activeTimers.set(wf.id, { timer, timerType: 'interval', cronKey, cron, name: wf.name })
         } else {
           // Exact-time execution — schedule the next fire and re-queue after each run
           scheduleNextFire(wf, parsed)
@@ -182,23 +264,31 @@ async function loadScheduledWorkflows() {
   }
 }
 
-function clearWorkflowTimer(workflowId) {
+export function clearWorkflowTimer(workflowId) {
   const entry = activeTimers.get(workflowId)
   if (entry) {
-    clearInterval(entry.timer)
-    clearTimeout(entry.timer)
+    // Use the correct clear function based on how the timer was created.
+    // clearInterval and clearTimeout are NOT interchangeable on all runtimes.
+    if (entry.timerType === 'interval') {
+      clearInterval(entry.timer)
+    } else {
+      clearTimeout(entry.timer)
+    }
     activeTimers.delete(workflowId)
   }
 }
+
 
 /**
  * Schedule the next exact-time fire for a workflow using setTimeout.
  * Re-queues itself after each execution so it remains accurate.
  */
 function scheduleNextFire(wf, parsed) {
-  const delay = msUntilNextFire(parsed.fields)
+  // Read timezone from trigger config; default to UTC if not set
+  const tz = wf.trigger?.timezone || 'UTC'
+  const delay = msUntilNextFire(parsed.fields, new Date(), tz)
   if (!delay) {
-    console.warn(`[Scheduler] No upcoming fire time for workflow "${wf.name}" cron "${wf.trigger.cron}" — skipping`)
+    console.warn(`[Scheduler] No upcoming fire time for workflow "${wf.name}" cron "${wf.trigger.cron}" (tz: ${tz}) — skipping`)
     return
   }
 
@@ -210,11 +300,38 @@ function scheduleNextFire(wf, parsed) {
   }, delay)
 
   const nextFireAt = new Date(Date.now() + delay).toISOString()
-  activeTimers.set(wf.id, { timer, cronKey: JSON.stringify(parsed), cron: wf.trigger.cron, name: wf.name, nextFireAt })
-  console.log(`[Scheduler] Scheduled "${wf.name}" next at ${nextFireAt}`)
+  activeTimers.set(wf.id, { timer, timerType: 'timeout', cronKey: JSON.stringify(parsed), cron: wf.trigger.cron, name: wf.name, nextFireAt })
+  console.log(`[Scheduler] Scheduled "${wf.name}" next at ${nextFireAt} (tz: ${tz})`)
 }
 
+
 async function triggerWorkflow(wf) {
+  // ── Distributed lock: prevent double-firing in multi-instance deployments ──
+  // Each API instance runs its own scheduler in-memory. Without a lock, every
+  // instance fires the same workflow at the same cron tick.
+  // We use Redis SET NX PX (set-if-not-exists with TTL) as a lightweight mutex.
+  // Key: workflow:<id>:lock:<minute-bucket>  — unique per workflow per fire-minute.
+  // TTL: 90s — long enough for the execution to start, short enough to not block
+  //      the NEXT fire if this one is delayed.
+  const lockTTLMs = 90_000
+  const minuteBucket = Math.floor(Date.now() / 60_000) // changes every minute
+  const lockKey = `scheduler:lock:${wf.id}:${minuteBucket}`
+
+  try {
+    const { getRedisConnection } = await import('./queue.service.js')
+    const redis = getRedisConnection()
+    // SET key value NX PX ttl — returns 'OK' if acquired, null if already held
+    const acquired = await redis.set(lockKey, '1', 'NX', 'PX', lockTTLMs)
+    if (!acquired) {
+      // Another instance already acquired the lock for this minute — skip
+      console.log(`[Scheduler] Lock already held for "${wf.name}" (${minuteBucket}) — skipping (multi-instance dedup)`)
+      return
+    }
+  } catch {
+    // Redis unavailable — fall through without lock (single-instance safe)
+    console.warn(`[Scheduler] Redis lock unavailable for "${wf.name}" — proceeding without distributed lock`)
+  }
+
   try {
     console.log(`[Scheduler] Triggering workflow "${wf.name}" (scheduled)`)
     const { startWorkflowExecution } = await import('./workflow.service.js')
@@ -222,15 +339,29 @@ async function triggerWorkflow(wf) {
       context: { triggeredBy: 'SCHEDULE', triggeredAt: new Date().toISOString() }
     })
     console.log(`[Scheduler] Execution started: ${exec.id}`)
+    try {
+      await auditLog({
+        eventType: 'trigger.fired', tenantId: wf.tenant_id,
+        actorType: 'SYSTEM', actorId: wf.id,
+        resourceType: 'WorkflowTrigger', resourceId: wf.id,
+        action: 'SCHEDULE_FIRED',
+        metadata: { workflowId: wf.id, workflowName: wf.name, triggerType: 'SCHEDULE', cron: wf.trigger?.cron, executionId: exec.id }
+      })
+    } catch { /* non-critical */ }
   } catch (err) {
     console.error(`[Scheduler] Failed to trigger workflow ${wf.id}:`, err.message)
   }
 }
 
+
 export function stopScheduler() {
   if (schedulerInterval) {
     clearInterval(schedulerInterval)
     schedulerInterval = null
+  }
+  if (approvalCleanupInterval) {
+    clearInterval(approvalCleanupInterval)
+    approvalCleanupInterval = null
   }
   for (const [id] of activeTimers) clearWorkflowTimer(id)
   console.log('[Scheduler] Stopped')

@@ -5,6 +5,7 @@ import path from 'path'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const RUNNER_SCRIPT = path.join(__dirname, 'skill-runner.mjs')
+const PYTHON_RUNNER_SCRIPT = path.join(__dirname, 'skill-runner-python.mjs')
 
 /**
  * Executes a custom JavaScript code snippet in an isolated child process.
@@ -20,7 +21,7 @@ const RUNNER_SCRIPT = path.join(__dirname, 'skill-runner.mjs')
  * @param {Object} env - Any decrypted environment variables/secrets configured for the skill.
  * @returns {Promise<any>} The result of the code execution.
  */
-export async function executeCustomSkill(code, input = {}, env = {}) {
+async function executeCustomSkill(code, input = {}, env = {}) {
   return new Promise((resolve, reject) => {
     const child = fork(RUNNER_SCRIPT, [], {
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
@@ -73,3 +74,67 @@ export async function executeCustomSkill(code, input = {}, env = {}) {
     child.stdin.end()
   })
 }
+
+/**
+ * Execute a Python code snippet in a sandboxed child process.
+ * Uses process-level isolation (child_process.spawn) — the Python process has
+ * no access to the parent's modules, database pool, crypto keys, or any
+ * Kuvalam internals.
+ *
+ * The child runs a wrapper script that reads input from stdin, executes the
+ * user code, and writes the result as JSON to stdout delimited by a marker.
+ *
+ * @param {string} code - Python source code to execute.
+ * @param {Object} input - Input data passed to the script.
+ * @param {Object} env - Environment variables for the subprocess.
+ * @returns {Promise<object>} Execution result with { success, data/error }.
+ */
+async function executePythonSkill(code, input = {}, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = fork(
+      PYTHON_RUNNER_SCRIPT,
+      [],
+      { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] }
+    )
+
+    let output = ''
+    child.stdout.on('data', chunk => { output += chunk })
+
+    let errorOutput = ''
+    child.stderr.on('data', chunk => { errorOutput += chunk })
+
+    child.on('message', (msg) => {
+      // IPC message not expected but handle gracefully
+    })
+
+    child.on('close', (code) => {
+      if (code !== 0 && !output) {
+        reject(new Error(errorOutput.trim() || `Process exited with code ${code}`))
+        return
+      }
+      try {
+        const parsed = JSON.parse(output.trim())
+        resolve(parsed)
+      } catch {
+        resolve({ success: true, data: output.trim() })
+      }
+    })
+
+    child.on('error', reject)
+
+    // Send code + input as JSON to the child process stdin
+    const message = JSON.stringify({ code, input, env })
+    child.stdin.write(message)
+    child.stdin.end()
+
+    // Timeout after 15 seconds
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error('Python script timed out after 15s'))
+    }, 15000)
+
+    child.on('close', () => clearTimeout(timer))
+  })
+}
+
+export { executeCustomSkill, executePythonSkill }

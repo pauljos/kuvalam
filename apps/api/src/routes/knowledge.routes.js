@@ -8,11 +8,13 @@ const ALLOWED_UPLOAD_MIME_TYPES = new Set([
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
   'application/msword', // .doc (older)
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+  'application/vnd.ms-excel', // .xls (older)
   'text/plain',
   'text/markdown',
   'text/csv'
 ])
-const ALLOWED_UPLOAD_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'txt', 'md', 'csv'])
+const ALLOWED_UPLOAD_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'xlsx', 'xls', 'txt', 'md', 'csv'])
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 // 50MB — matches multipart limit
 
 export default async function knowledgeRoutes(fastify) {
@@ -39,6 +41,14 @@ export default async function knowledgeRoutes(fastify) {
     try {
       const kb = await knowledgeService.getKnowledgeBase(req.params.tenantId, req.params.kbId)
       return reply.send({ success: true, data: kb, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // DELETE /tenants/:tenantId/knowledge-bases/:kbId
+  fastify.delete('/tenants/:tenantId/knowledge-bases/:kbId', auth, async (req, reply) => {
+    try {
+      await knowledgeService.deleteKnowledgeBase(req.params.tenantId, req.params.kbId, req.user.sub)
+      return reply.send({ success: true, data: { deleted: true }, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
 
@@ -129,6 +139,30 @@ export default async function knowledgeRoutes(fastify) {
     } catch (err) { return errorResponse(reply, err) }
   })
 
+  // DELETE /tenants/:tenantId/knowledge-bases/:kbId/documents/:docId
+  fastify.delete('/tenants/:tenantId/knowledge-bases/:kbId/documents/:docId', auth, async (req, reply) => {
+    try {
+      const result = await knowledgeService.deleteDocument(req.params.tenantId, req.params.docId, req.user.sub)
+      return reply.send({ success: true, data: result, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/knowledge-bases/:kbId/documents/:docId/reprocess
+  fastify.post('/tenants/:tenantId/knowledge-bases/:kbId/documents/:docId/reprocess', auth, async (req, reply) => {
+    try {
+      const result = await knowledgeService.reprocessDocument(req.params.tenantId, req.params.docId, req.user.sub)
+      return reply.send({ success: true, data: result, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/knowledge-bases/:kbId/reprocess-all
+  fastify.post('/tenants/:tenantId/knowledge-bases/:kbId/reprocess-all', auth, async (req, reply) => {
+    try {
+      const result = await knowledgeService.reprocessKnowledgeBase(req.params.tenantId, req.params.kbId, req.user.sub)
+      return reply.send({ success: true, data: result, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
   // POST /tenants/:tenantId/knowledge-bases/:kbId/search — test search
   fastify.post('/tenants/:tenantId/knowledge-bases/:kbId/search', auth, async (req, reply) => {
     try {
@@ -141,6 +175,32 @@ export default async function knowledgeRoutes(fastify) {
         threshold
       })
       return reply.send({ success: true, data: { chunks, count: chunks.length }, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // GET /tenants/:tenantId/knowledge-bases/:kbId/db-schema
+  // Returns discoverable PostgreSQL tables for DB import
+  fastify.get('/tenants/:tenantId/knowledge-bases/:kbId/db-schema', auth, async (req, reply) => {
+    try {
+      const { connectionId } = req.query
+      const { discoverDBSchema } = await import('../services/graph-db-importer.service.js')
+      const schema = await discoverDBSchema(req.params.tenantId, connectionId || undefined)
+      return reply.send({ success: true, data: schema, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/knowledge-bases/:kbId/import-from-db
+  // Imports selected PostgreSQL tables as vector-searchable documents
+  fastify.post('/tenants/:tenantId/knowledge-bases/:kbId/import-from-db', auth, async (req, reply) => {
+    try {
+      const { tables, limit, rowsPerDoc, connectionId } = req.body || {}
+      const result = await knowledgeService.importDBToKnowledgeBase(
+        req.params.tenantId,
+        req.params.kbId,
+        req.user.sub,
+        { tables, limit: limit || 500, rowsPerDoc: rowsPerDoc || 200, connectionId }
+      )
+      return reply.send({ success: true, data: result, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
 }

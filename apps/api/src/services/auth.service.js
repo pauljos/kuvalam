@@ -159,15 +159,45 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     }
   }
 
+  // ── M5: Email verification enforcement (sysadmin-configurable) ─────────
+  // Default: DISABLED. Sysadmin can enable via POST /admin/platform-settings.
+  // When enabled: unverified users are blocked at login with a clear message.
+  // When disabled: login succeeds but the response includes requiresEmailVerification
+  // so the frontend can show a "Please verify your email" banner.
+  if (!user.email_verified && !user.is_system_admin) {
+    try {
+      const { getEmailVerificationRequired } = await import('./platform-settings.service.js')
+      const enforcementEnabled = await getEmailVerificationRequired()
+      if (enforcementEnabled) {
+        throw new AppError(
+          'EMAIL_NOT_VERIFIED',
+          'Please verify your email address before logging in. Check your inbox for the verification link.',
+          403
+        )
+      }
+    } catch (err) {
+      if (err.code === 'EMAIL_NOT_VERIFIED') throw err
+      // DB error reading platform settings — fail closed. Allowing login when
+      // we cannot verify the enforcement state would silently disable email
+      // verification for all tenants if the settings table were dropped.
+      console.error('[Auth] Failed to read email verification setting — denying login:', err.message)
+      throw new AppError(
+        'EMAIL_VERIFICATION_CHECK_FAILED',
+        'Unable to verify your account status. Please try again shortly.',
+        503
+      )
+    }
+  }
+
   // Generate tokens
   const { accessPayload, refreshToken } = generateTokens(user, tenantMembership || null)
 
-  // Store hashed refresh token
+  // Store hashed refresh token (include tenant_id for correct scoping on refresh)
   const tokenHash = hashToken(refreshToken)
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-    [user.id, tokenHash, expiresAt]
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, tenant_id) VALUES ($1, $2, $3, $4)',
+    [user.id, tokenHash, expiresAt, tenantMembership?.id || null]
   )
 
   // Clean up expired tokens to prevent unbounded table growth
@@ -192,7 +222,20 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
   return {
     accessPayload,
     refreshToken,
-    user: { id: user.id, email: user.email, name: user.name, isSystemAdmin: user.is_system_admin || false },
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      isSystemAdmin: user.is_system_admin || false,
+      role: tenantMembership?.role || null,
+      // ── M5: Surface email verification status ───────────────────────────
+      // Email verification is not yet enforced as a hard block (existing users
+      // would be locked out), but the flag lets the frontend show a banner
+      // directing users to verify their email. A full /auth/verify-email
+      // endpoint with token delivery should be added in a follow-up.
+      emailVerified: user.email_verified === true,
+      requiresEmailVerification: user.email_verified === false,
+    },
     tenant: tenantMembership ? {
       id: tenantMembership.id,
       name: tenantMembership.name,
@@ -202,6 +245,7 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     } : null
   }
 }
+
 
 export async function refreshAccessToken(refreshToken) {
   const tokenHash = hashToken(refreshToken)
@@ -217,17 +261,59 @@ export async function refreshAccessToken(refreshToken) {
     throw new AppError('REFRESH_TOKEN_INVALID', 'Invalid or expired refresh token', 401)
   }
 
+  const oldToken = rows[0]
+
+  // Token theft detection: if this token was already used, revoke all user tokens
+  if (oldToken.used_at) {
+    console.warn(`[Security] Refresh token reuse detected for user ${oldToken.user_id}. Revoking all tokens.`)
+    await query(
+      'UPDATE refresh_tokens SET revoked = true WHERE user_id = $1',
+      [oldToken.user_id]
+    )
+    throw new AppError('REFRESH_TOKEN_REUSE', 'Token reuse detected. All sessions have been revoked for security.', 401)
+  }
+
+  // Mark old token as used
+  await query(
+    'UPDATE refresh_tokens SET used_at = NOW() WHERE id = $1',
+    [oldToken.id]
+  )
+
+  // Re-fetch the exact tenant membership the token was originally issued for.
+  // We use the stored tenant_id on the refresh token row — this is the fix for
+  // the multi-tenant "LIMIT 1" bug where an arbitrary membership was selected.
   const { rows: memberships } = await query(
     `SELECT tm.role, t.id, t.name, t.slug, t.plan
      FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id
-     WHERE tm.user_id = $1 AND tm.status = 'ACTIVE' LIMIT 1`,
-    [rows[0].user_id]
+     WHERE tm.user_id = $1 AND tm.status = 'ACTIVE'
+       AND ($2::uuid IS NULL OR t.id = $2)
+     LIMIT 1`,
+    [oldToken.user_id, oldToken.tenant_id || null]
   )
 
-  const user = { id: rows[0].user_id, email: rows[0].email, name: rows[0].name, is_system_admin: rows[0].is_system_admin }
-  const { accessPayload } = generateTokens(user, memberships[0] || null)
+  const user = { id: oldToken.user_id, email: oldToken.email, name: oldToken.name, is_system_admin: oldToken.is_system_admin }
+  const tenantMembership = memberships[0] || null
+  const { accessPayload, refreshToken: newRefreshToken } = generateTokens(user, tenantMembership)
 
-  return { accessPayload, expiresAt: new Date(Date.now() + 15 * 60 * 1000) }
+  // Store new refresh token — carry forward the same tenant_id
+  const newTokenHash = hashToken(newRefreshToken)
+  await query(
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, tenant_id)
+     VALUES ($1, $2, NOW() + INTERVAL '30 days', $3)`,
+    [oldToken.user_id, newTokenHash, tenantMembership?.id || null]
+  )
+
+  // Revoke old token
+  await query(
+    'UPDATE refresh_tokens SET revoked = true WHERE id = $1',
+    [oldToken.id]
+  )
+
+  return { 
+    accessPayload, 
+    refreshToken: newRefreshToken,
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000) 
+  }
 }
 
 export async function logoutUser(refreshToken) {

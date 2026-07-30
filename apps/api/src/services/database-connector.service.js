@@ -4,6 +4,8 @@
 // Supports multiple SQL flavors via a driver registry (`DRIVERS`):
 //   - postgres  (pg)          — long-standing default
 //   - mysql     (mysql2)      — MariaDB/Aurora MySQL/etc. work too
+//   - sqlite    (better-sqlite3 / sql.js) — file-based local DB
+//   - mongodb   (mongodb)     — NoSQL document database
 //
 // Adding a flavor: implement the driver interface below and register it.
 //   driver = {
@@ -148,9 +150,9 @@ const postgresDriver = {
     if (!allowPrivate) assertSafeHost(host)
 
     let ssl
-    if (cfg.ssl === 'disable' || cfg.ssl === false) ssl = false
+    if (cfg.ssl === 'require' || cfg.ssl === true) ssl = { rejectUnauthorized: false }
     else if (cfg.ssl === 'strict') ssl = { rejectUnauthorized: true }
-    else ssl = { rejectUnauthorized: false } // require (default)
+    else ssl = false // disable by default (local dev)
 
     return { host, port, database, user, password, ssl }
   },
@@ -288,9 +290,9 @@ const mysqlDriver = {
     if (!allowPrivate) assertSafeHost(host)
 
     let ssl
-    if (cfg.ssl === 'disable' || cfg.ssl === false) ssl = undefined
+    if (cfg.ssl === 'require' || cfg.ssl === true) ssl = { rejectUnauthorized: false }
     else if (cfg.ssl === 'strict') ssl = { rejectUnauthorized: true }
-    else ssl = { rejectUnauthorized: false } // require (default) — accepts self-signed cert (RDS/Aurora)
+    else ssl = undefined // disable by default (local dev)
 
     return { host, port, database, user, password, ssl }
   },
@@ -399,12 +401,405 @@ const mysqlDriver = {
   }
 }
 
+// ─── SQLite driver ─────────────────────────────────────────────────────────
+const sqliteDriver = {
+  buildConfig(cfg) {
+    const dbPath = cfg.path || cfg.database || ':memory:'
+    if (dbPath !== ':memory:' && typeof dbPath !== 'string') {
+      throw new Error('path or database must be a string pointing to a .db file')
+    }
+    return { dbPath }
+  },
+
+  createPool(cfg) {
+    const { dbPath } = sqliteDriver.buildConfig(cfg)
+    // No pool needed for file-based SQLite; return a "pool-like" object
+    return { dbPath, ready: true }
+  },
+
+  async endPool() {
+    // Nothing to do — no persistent connections
+    return Promise.resolve()
+  },
+
+  async verify(pool) {
+    // Try better-sqlite3 first, fall back to sql.js
+    try {
+      const betterSqlite3 = await import('better-sqlite3')
+      const db = betterSqlite3.default(pool.dbPath, { readonly: true })
+      const version = db.prepare('SELECT sqlite_version() AS v').get().v
+      db.close()
+      return { message: `Connected to SQLite (${version}) — ${pool.dbPath === ':memory:' ? 'in-memory database' : pool.dbPath}` }
+    } catch (err1) {
+      try {
+        const initSqlJs = await import('sql.js')
+        const SQL = await initSqlJs.default()
+        let buffer
+        if (pool.dbPath !== ':memory:') {
+          const fs = await import('fs')
+          buffer = fs.readFileSync(pool.dbPath)
+        }
+        const db = new SQL.Database(buffer)
+        const version = db.exec('SELECT sqlite_version() AS v')[0]?.values[0]?.[0] || 'unknown'
+        db.close()
+        return { message: `Connected to SQLite via sql.js (${version}) — ${pool.dbPath === ':memory:' ? 'in-memory database' : pool.dbPath}` }
+      } catch (err2) {
+        throw new Error(`No SQLite engine available: better-sqlite3 (${err1.message}) and sql.js (${err2.message}) both failed to load`)
+      }
+    }
+  },
+
+  async listTables(pool) {
+    const betterSqlite3 = await import('better-sqlite3')
+    const db = betterSqlite3.default(pool.dbPath, { readonly: true })
+    try {
+      const rows = db.prepare(
+        "SELECT name AS `table` FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+      ).all()
+      return {
+        tables: rows.map(r => ({
+          schema: null,
+          table: r.table,
+          estimated_rows: 0,
+          comment: null
+        }))
+      }
+    } finally {
+      db.close()
+    }
+  },
+
+  async describeTable(pool, { schema, table }) {
+    const betterSqlite3 = await import('better-sqlite3')
+    const db = betterSqlite3.default(pool.dbPath, { readonly: true })
+    try {
+      const rows = db.prepare(`PRAGMA table_info('${String(table).replace(/'/g, "''")}')`).all()
+      return {
+        cols: rows.map(r => ({
+          name: r.name,
+          type: r.type,
+          nullable: r.notnull === 0,
+          default: r.dflt_value,
+          max_length: null
+        })),
+        pks: rows.filter(r => r.pk > 0).map(r => r.name),
+        idx: []
+      }
+    } finally {
+      db.close()
+    }
+  },
+
+  async sampleTable(pool, { schema, table, limit = 5 }) {
+    const betterSqlite3 = await import('better-sqlite3')
+    const db = betterSqlite3.default(pool.dbPath, { readonly: true })
+    try {
+      const cap = Math.min(limit, 50)
+      const quotedTable = `'${String(table).replace(/'/g, "''")}'`
+      const rows = db.prepare(`SELECT * FROM ${quotedTable} LIMIT ${cap}`).all()
+      return { rows, columns: Object.keys(rows[0] || {}), row_count: rows.length }
+    } finally {
+      db.close()
+    }
+  },
+
+  async runQuery(pool, { sql, params = [], limit }) {
+    const readOnly = /^\s*(?:SELECT|WITH|PRAGMA|EXPLAIN)\b/i.test(sql.trim())
+    const betterSqlite3 = await import('better-sqlite3')
+    const db = betterSqlite3.default(pool.dbPath, { readonly: readOnly })
+    try {
+      if (readOnly) {
+        const cap = Math.min(limit || MAX_ROWS, MAX_ROWS)
+        const bounded = /\bLIMIT\s+\d+\s*$/i.test(sql.trim()) ? sql : `SELECT * FROM (${sql.trim().replace(/;+$/, '')}) AS __kuvalam_wrapped LIMIT ${cap}`
+        const rows = params.length > 0 ? db.prepare(bounded).all(...params) : db.prepare(bounded).all()
+        return {
+          rows,
+          columns: Object.keys(rows[0] || {}),
+          row_count: rows.length,
+          truncated: rows.length === MAX_ROWS
+        }
+      } else {
+        const stmt = db.prepare(sql)
+        const result = params.length > 0 ? stmt.run(...params) : stmt.run()
+        return {
+          rows: [{ changes: result.changes, lastInsertRowid: result.lastInsertRowid }],
+          columns: ['changes', 'lastInsertRowid'],
+          row_count: 1,
+          truncated: false
+        }
+      }
+    } finally {
+      db.close()
+    }
+  }
+}
+
+// ─── MongoDB driver ──────────────────────────────────────────────────────
+const mongoDriver = {
+  buildConfig(cfg) {
+    const allowPrivate = cfg.allow_private_host === true
+
+    // Support both connection-string and individual-fields style config
+    if (cfg.uri) {
+      // Connection string — minimal validation, let the driver parse it
+      const uri = String(cfg.uri).trim()
+      if (!uri.startsWith('mongodb://') && !uri.startsWith('mongodb+srv://')) {
+        throw new Error('MongoDB URI must start with mongodb:// or mongodb+srv://')
+      }
+      // Extract host from URI for safety check
+      const hostMatch = uri.match(/mongodb(?:\+srv)?:\/\/(?:[^@]+@)?([^:\/]+)/)
+      if (hostMatch && !allowPrivate) {
+        assertSafeHost(hostMatch[1])
+      }
+      return { uri, options: cfg.options || {} }
+    }
+
+    // Individual fields style
+    const host = String(cfg.host || 'localhost').trim()
+    const port = parseInt(cfg.port || '27017', 10)
+    const database = String(cfg.database || '').trim()
+    const user = cfg.user ? String(cfg.user).trim() : undefined
+    const password = cfg.password ? String(cfg.password) : undefined
+
+    if (!database) throw new Error('database is required for MongoDB')
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      throw new Error('port must be a valid TCP port number')
+    }
+    if (!allowPrivate) assertSafeHost(host)
+
+    const auth = user ? `${encodeURIComponent(user)}:${encodeURIComponent(password)}@` : ''
+    const uri = `mongodb://${auth}${host}:${port}/${encodeURIComponent(database)}`
+    return { uri, options: cfg.options || {} }
+  },
+
+  async createPool(cfg) {
+    // Lazy-import mongodb driver — only installed when using MongoDB connectors
+    const { MongoClient } = await import('mongodb')
+    const { uri, options } = mongoDriver.buildConfig(cfg)
+    const client = new MongoClient(uri, {
+      ...options,
+      maxPoolSize: 3,
+      connectTimeoutMS: 8_000,
+      serverSelectionTimeoutMS: 5_000,
+      socketTimeoutMS: DEFAULT_STATEMENT_TIMEOUT,
+      appName: 'kuvalam-agent',
+    })
+    await client.connect()
+    return client
+  },
+
+  async endPool(client) {
+    try { await client.close() } catch { /* ignore */ }
+  },
+
+  async verify(client) {
+    const db = client.db()
+    const { ok } = await db.admin().ping()
+    if (!ok) throw new Error('MongoDB ping failed')
+    const stats = await db.stats()
+    const colls = await db.listCollections().toArray()
+    return {
+      message: `Connected to MongoDB (v${stats.version || '?'}) — database "${db.databaseName}" has ${colls.length} collection(s), ${(stats.dataSize / 1024 / 1024).toFixed(1)} MB data`
+    }
+  },
+
+  async listTables(client) {
+    const db = client.db()
+    const colls = await db.listCollections().toArray()
+    return {
+      tables: await Promise.all(colls.map(async (c) => {
+        const collection = db.collection(c.name)
+        let estimated_rows = 0
+        try {
+          estimated_rows = await collection.estimatedDocumentCount()
+        } catch { /* ignore */ }
+        return {
+          schema: db.databaseName,
+          table: c.name,
+          estimated_rows,
+          comment: c.type === 'view' ? 'View' : null
+        }
+      }))
+    }
+  },
+
+  async describeTable(client, { schema, table }) {
+    const db = client.db()
+    const collection = db.collection(table)
+
+    // Check collection exists
+    const exists = await db.listCollections({ name: table }).hasNext()
+    if (!exists) {
+      return { cols: [], pks: [], idx: [] }
+    }
+
+    // Get indexes
+    const indexes = await collection.indexes()
+
+    // Sample one document to infer schema
+    const sampleDocs = await collection.find().limit(10).toArray()
+    const fieldMap = new Map()
+    for (const doc of sampleDocs) {
+      for (const [key, val] of Object.entries(doc)) {
+        if (fieldMap.has(key)) continue
+        fieldMap.set(key, {
+          name: key,
+          type: Array.isArray(val)
+            ? 'array'
+            : val instanceof Date
+              ? 'date'
+              : val === null
+                ? 'null'
+                : typeof val === 'object' && val._bsontype === 'ObjectId'
+                  ? 'objectId'
+                  : typeof val,
+          nullable: val === null,
+          default: null,
+          max_length: null
+        })
+      }
+    }
+
+    const cols = Array.from(fieldMap.values())
+    const pks = indexes
+      .filter(i => i.key && Object.keys(i.key).some(k => i.key[k] === 1))
+      .flatMap(i => Object.keys(i.key))
+    const idx = indexes.map(i => ({
+      name: i.name,
+      definition: `INDEX(${Object.keys(i.key).join(',')}) ${i.unique ? 'UNIQUE' : ''}`
+    }))
+
+    return { cols, pks, idx }
+  },
+
+  async sampleTable(client, { schema, table, limit = 5 }) {
+    const db = client.db()
+    const collection = db.collection(table)
+    const cap = Math.min(limit, 50)
+    const docs = await collection.find().limit(cap).toArray()
+
+    // Flatten BSON — convert ObjectId, Date, etc. to strings
+    const rows = docs.map(doc => {
+      const flat = {}
+      for (const [k, v] of Object.entries(doc)) {
+        if (v && typeof v === 'object' && v._bsontype === 'ObjectId') {
+          flat[k] = v.toString()
+        } else if (v instanceof Date) {
+          flat[k] = v.toISOString()
+        } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+          flat[k] = JSON.stringify(v)
+        } else {
+          flat[k] = v
+        }
+      }
+      return flat
+    })
+
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : []
+    return { rows, columns, row_count: rows.length }
+  },
+
+  async runQuery(client, { sql, params = [], limit }) {
+    // MongoDB "queries" come as JSON strings:
+    //   { "aggregate": [ { "$match": {...} }, ... ] }
+    //   { "filter": {...}, "project": {...}, "sort": {...} }
+    //
+    // Safety: only read ops are allowed. $out and $merge are blocked.
+    if (typeof sql !== 'string' || sql.trim() === '') {
+      throw new Error('MongoDB query must be a JSON string')
+    }
+
+    let parsed
+    try {
+      parsed = JSON.parse(sql)
+    } catch {
+      throw new Error('MongoDB query must be valid JSON. Use: { "aggregate": [...] } or { "filter": {...} }')
+    }
+
+    const db = client.db()
+    // Determine target collection — use the first collection listed, or a default
+    const collectionName = parsed.collection || (await db.listCollections().limit(1).toArray())[0]?.name
+    if (!collectionName) {
+      throw new Error('No collection specified and no collections exist in this database')
+    }
+
+    const collection = db.collection(collectionName)
+    const cap = Math.min(limit || MAX_ROWS, MAX_ROWS)
+
+    if (parsed.aggregate && Array.isArray(parsed.aggregate)) {
+      // Safety: block write stages
+      const writeStages = parsed.aggregate.filter(
+        s => s && (s.$out || s.$merge)
+      )
+      if (writeStages.length > 0) {
+        throw new Error('Write aggregation stages ($out, $merge) are not allowed')
+      }
+
+      // Always append a $limit for safety
+      const hasLimit = parsed.aggregate.some(s => s && s.$limit)
+      const pipeline = hasLimit
+        ? parsed.aggregate
+        : [...parsed.aggregate, { $limit: cap }]
+
+      const docs = await collection.aggregate(pipeline).toArray()
+      const rows = mongoDriver._serializeDocs(docs)
+      return {
+        rows,
+        columns: rows.length > 0 ? Object.keys(rows[0]) : [],
+        row_count: rows.length,
+        truncated: rows.length >= cap
+      }
+    }
+
+    // Default: find() with optional filter/projection/sort
+    const filter = parsed.filter || {}
+    const projection = parsed.projection || parsed.project || undefined
+    const sort = parsed.sort || undefined
+
+    let cursor = collection.find(filter)
+    if (projection) cursor = cursor.project(projection)
+    if (sort) cursor = cursor.sort(sort)
+    cursor = cursor.limit(cap)
+
+    const docs = await cursor.toArray()
+    const rows = mongoDriver._serializeDocs(docs)
+    return {
+      rows,
+      columns: rows.length > 0 ? Object.keys(rows[0]) : [],
+      row_count: rows.length,
+      truncated: rows.length >= cap
+    }
+  },
+
+  // Helper: serialize BSON types to JSON-friendly values
+  _serializeDocs(docs) {
+    return docs.map(doc => {
+      const flat = {}
+      for (const [k, v] of Object.entries(doc)) {
+        if (v && typeof v === 'object' && v._bsontype === 'ObjectId') {
+          flat[k] = v.toString()
+        } else if (v instanceof Date) {
+          flat[k] = v.toISOString()
+        } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+          flat[k] = JSON.stringify(v)
+        } else {
+          flat[k] = v
+        }
+      }
+      return flat
+    })
+  }
+}
+
 // ─── Driver registry ──────────────────────────────────────────────────────
 const DRIVERS = {
   postgres: postgresDriver,
   pg: postgresDriver,        // alias
   mysql: mysqlDriver,
   mariadb: mysqlDriver,      // wire-compatible
+  sqlite: sqliteDriver,
+  mongodb: mongoDriver,
+  mongo: mongoDriver,        // alias
 }
 
 function resolveDriver(flavor) {

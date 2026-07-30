@@ -1,18 +1,27 @@
 // apps/api/src/db/migrate.js
-import { readFileSync } from 'fs'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
+// Unified migration runner — handles both:
+//   • SQL files in infra/migrations/          (e.g. 001_initial_schema.sql)
+//   • JS files  in apps/api/src/db/migrations/ (e.g. 10_reports_enhanced.js)
+//
+// Both sets are sorted together by filename prefix so they run in
+// dependency order. The _migrations table tracks both by name.
+//
+// JS migrations must export:  export async function up() { ... }
+// SQL migrations are executed verbatim via pg Client.
+//
+// IMPORTANT: CREATE INDEX CONCURRENTLY cannot run inside an explicit
+// transaction block. JS migrations that need it should use the exported
+// `pool` directly or accept a raw Client with autocommit. This runner does
+// NOT wrap individual migrations in BEGIN/COMMIT — each migration is atomic
+// only if the migration itself manages its transaction.
+
+import { readFileSync, readdirSync } from 'fs'
+import { join, dirname, basename, extname } from 'path'
+import { fileURLToPath, pathToFileURL } from 'url'
 import pg from 'pg'
-import { createRequire } from 'module'
+import 'dotenv/config'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-
-// Load env from apps/api/.env
-const envPath = join(__dirname, '../../.env')
-try {
-  const { config } = await import('dotenv')
-  config({ path: envPath })
-} catch { /* dotenv optional */ }
 
 async function migrate() {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL })
@@ -30,22 +39,40 @@ async function migrate() {
       )
     `)
 
-    // Auto-discover migrations from infra/migrations — pick up any *.sql file
-    // ordered by filename (which starts with NNN_). This way ops don't have to
-    // remember to edit this file when adding a new migration.
-    // In Docker: /app/infra/migrations (from container root)
-    // In local dev: ../../../../infra/migrations (from apps/api/src/db)
-    const migrationsDir = process.env.NODE_ENV === 'production'
+    // ── Discover SQL migrations ────────────────────────────────────────────
+    const sqlDir = process.env.NODE_ENV === 'production'
       ? '/app/infra/migrations'
       : join(__dirname, '../../../../infra/migrations')
-    
-    const { readdirSync } = await import('fs')
-    const migrations = readdirSync(migrationsDir)
-      .filter(f => /^\d+_.+\.sql$/i.test(f))
-      .sort()
-      .map(f => ({ name: f.replace(/\.sql$/i, ''), file: join(migrationsDir, f) }))
 
-    for (const migration of migrations) {
+    const sqlMigrations = readdirSync(sqlDir)
+      .filter(f => /^\d+_.+\.sql$/i.test(f))
+      .map(f => ({
+        name: f.replace(/\.sql$/i, ''),
+        type: 'sql',
+        file: join(sqlDir, f),
+      }))
+
+    // ── Discover JS migrations ─────────────────────────────────────────────
+    const jsDir = join(__dirname, 'migrations')
+    const jsMigrations = readdirSync(jsDir)
+      .filter(f => /^\d+_.+\.(js|mjs)$/i.test(f))
+      .map(f => ({
+        name: basename(f, extname(f)),
+        type: 'js',
+        file: join(jsDir, f),
+      }))
+
+    // ── Merge and sort by numeric prefix ──────────────────────────────────
+    // Extract leading number from filename for stable cross-type ordering.
+    // e.g. "025_knowledge_graphs" → 25, "10_reports_enhanced" → 10
+    const allMigrations = [...sqlMigrations, ...jsMigrations].sort((a, b) => {
+      const numA = parseInt(a.name.match(/^(\d+)/)?.[1] || '0', 10)
+      const numB = parseInt(b.name.match(/^(\d+)/)?.[1] || '0', 10)
+      return numA - numB
+    })
+
+    // ── Run each migration if not already applied ─────────────────────────
+    for (const migration of allMigrations) {
       const { rows } = await client.query(
         'SELECT id FROM _migrations WHERE name = $1',
         [migration.name]
@@ -56,8 +83,27 @@ async function migrate() {
         continue
       }
 
-      const sql = readFileSync(migration.file, 'utf8')
-      await client.query(sql)
+      console.log(`  ▶  ${migration.name} [${migration.type}]`)
+
+      if (migration.type === 'sql') {
+        const sql = readFileSync(migration.file, 'utf8')
+        await client.query(sql)
+      } else {
+        // JS migration: import module and call up()
+        // Legacy standalone scripts in this folder may not export up() — skip them
+        // gracefully with a warning. Only new-style migrations with up()/down() are run.
+        const mod = await import(pathToFileURL(migration.file).href)
+        if (typeof mod.up !== 'function') {
+          console.log(`  ⏭  ${migration.name} [js] — no up() export, skipping (legacy standalone script)`)
+          // Mark as applied so we don't warn every run
+          await client.query('INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [migration.name])
+          continue
+        }
+        // Inject the pg client so migrations can run non-transactional
+        // statements (like CREATE INDEX CONCURRENTLY) when needed.
+        await mod.up(client)
+      }
+
       await client.query('INSERT INTO _migrations (name) VALUES ($1)', [migration.name])
       console.log(`  ✅ ${migration.name}`)
     }
@@ -69,12 +115,6 @@ async function migrate() {
   } finally {
     await client.end()
   }
-}
-
-// Load env if running directly
-if (process.env.DATABASE_URL === undefined) {
-  const { config } = await import('dotenv')
-  config({ path: new URL('../../.env', import.meta.url).pathname })
 }
 
 migrate()

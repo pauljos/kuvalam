@@ -6,8 +6,9 @@ import { Redis } from 'ioredis'
 let redis = null
 let cacheEnabled = false
 
-// Sentinel used to distinguish "no cache entry" from "cached null value"
-const CACHE_MISS = Symbol('cache-miss')
+// Sentinel used to distinguish "no cache entry" from "cached null value".
+// Exported so callers can do: `if (result === CACHE_MISS) { ... }`
+export const CACHE_MISS = Symbol('cache-miss')
 
 // Initialize Redis connection
 export function initCache() {
@@ -45,7 +46,8 @@ export function initCache() {
   }
 }
 
-// Get from cache
+// Get from cache.
+// Returns the cached value, or CACHE_MISS (exported symbol) if not found.
 export async function get(key) {
   if (!cacheEnabled || !redis) return CACHE_MISS
   try {
@@ -81,13 +83,28 @@ export async function del(key) {
   }
 }
 
-// Delete multiple keys by pattern
+/**
+ * Delete all keys matching a glob pattern.
+ *
+ * Uses SCAN (cursor-based, non-blocking) instead of KEYS (blocking O(N)).
+ * KEYS blocks the Redis event loop for the duration of the scan — on a
+ * large keyspace this causes cascading timeouts across every Redis-dependent
+ * feature (queues, scheduler locks, etc.).
+ */
 export async function delPattern(pattern) {
   if (!cacheEnabled || !redis) return false
   try {
-    const keys = await redis.keys(pattern)
-    if (keys.length > 0) {
-      await redis.del(...keys)
+    const toDelete = []
+    let cursor = '0'
+    do {
+      // SCAN returns [nextCursor, [keys…]]
+      const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100)
+      cursor = nextCursor
+      toDelete.push(...keys)
+    } while (cursor !== '0')
+
+    if (toDelete.length > 0) {
+      await redis.del(...toDelete)
     }
     return true
   } catch (err) {
@@ -99,18 +116,18 @@ export async function delPattern(pattern) {
 // Cache wrapper - tries cache first, then executes fn and caches result
 export async function cached(key, fn, ttl = 300) {
   // Try cache first
-  const cached = await get(key)
-  if (cached !== CACHE_MISS) {
-    return cached
+  const result = await get(key)
+  if (result !== CACHE_MISS) {
+    return result
   }
 
   // Execute function
-  const result = await fn()
+  const value = await fn()
 
   // Cache result (null/undefined are valid cacheable values)
-  await set(key, result, ttl)
+  await set(key, value, ttl)
 
-  return result
+  return value
 }
 
 // Invalidate all cache for a tenant

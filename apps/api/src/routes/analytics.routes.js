@@ -1,31 +1,86 @@
 // apps/api/src/routes/analytics.routes.js
 import { query } from '../db/pool.js'
+import { get, set } from '../services/cache.service.js'
 
-// Approximate LLM pricing per 1M tokens (USD) — used for cost estimates
-// Update these values when provider pricing changes
-const TOKEN_COST_PER_M = {
-  'gpt-4o':             { input: 2.50,  output: 10.00 },
-  'gpt-4o-mini':        { input: 0.15,  output: 0.60  },
-  'gpt-4-turbo':        { input: 10.00, output: 30.00 },
-  'gpt-3.5-turbo':      { input: 0.50,  output: 1.50  },
-  'claude-3-5-sonnet':  { input: 3.00,  output: 15.00 },
-  'claude-3-opus':      { input: 15.00, output: 75.00 },
-  default:              { input: 2.50,  output: 10.00 }
+// Load pricing from DB; falls back to inline defaults for bootstrapping.
+// Pricing is cached for 10 minutes — stale pricing is acceptable for cost estimates.
+let _pricingCache = null
+let _pricingCacheAt = 0
+const PRICING_CACHE_TTL_MS = 10 * 60 * 1000
+
+async function getPricingConfig() {
+  if (_pricingCache && (Date.now() - _pricingCacheAt) < PRICING_CACHE_TTL_MS) {
+    return _pricingCache
+  }
+  try {
+    const { rows } = await query(
+      `SELECT model_id, input_cost_per_million, output_cost_per_million
+       FROM llm_pricing_config
+       WHERE is_active = true AND (tenant_id IS NULL)
+       ORDER BY model_id`
+    )
+    const map = {}
+    for (const r of rows) {
+      map[r.model_id] = { input: parseFloat(r.input_cost_per_million), output: parseFloat(r.output_cost_per_million) }
+    }
+    // Default fallback if no pricing rows exist
+    if (Object.keys(map).length === 0) {
+      map['default'] = { input: 2.50, output: 10.00 }
+    }
+    _pricingCache = map
+    _pricingCacheAt = Date.now()
+    return map
+  } catch {
+    // DB may not have the table yet — use hardcoded fallback
+    return { default: { input: 2.50, output: 10.00 } }
+  }
 }
 
-function estimateCost(model, promptTokens, completionTokens) {
-  const key = Object.keys(TOKEN_COST_PER_M).find(k => model?.includes(k)) || 'default'
-  const rates = TOKEN_COST_PER_M[key]
+async function estimateCost(model, promptTokens, completionTokens) {
+  const pricing = await getPricingConfig()
+  // Exact match first, then substring match, then default
+  let rates = pricing[model]
+  if (!rates) {
+    const key = Object.keys(pricing).find(k => k !== 'default' && model?.includes(k))
+    rates = key ? pricing[key] : (pricing['default'] || { input: 2.50, output: 10.00 })
+  }
   return ((promptTokens / 1_000_000) * rates.input) + ((completionTokens / 1_000_000) * rates.output)
 }
 
 export default async function analyticsRoutes(fastify) {
   fastify.addHook('onRequest', fastify.authenticate)
 
-  // Get tenant analytics overview
+  // Get tenant analytics overview (cached 60s — analytics data is not real-time critical)
   fastify.get('/tenants/:tenantId/analytics', async (req, reply) => {
     const { tenantId } = req.params
 
+    // ── Security: ensure the authenticated user belongs to the requested tenant ──
+    // req.user.tenantId is set by the JWT authentication middleware from the
+    // token's 'tenantId' claim. Without this check any authenticated user could
+    // read another tenant's agent counts, LLM costs, and audit activity.
+    if (req.user.tenantId !== tenantId) {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Access denied to this organization\'s analytics' } })
+    }
+
+    const cacheKey = `analytics:${tenantId}`
+
+    // Try Redis cache first
+    const cachedResult = await get(cacheKey)
+    if (cachedResult !== null && typeof cachedResult === 'object' && cachedResult.data) {
+      return cachedResult
+    }
+
+    // Cache miss — fetch fresh data
+    const data = await fetchAnalyticsData(tenantId)
+    const payload = { data }
+    // Cache for 60s (fire-and-forget — failure is non-critical)
+    set(cacheKey, payload, 60).catch(() => {})
+    return payload
+  })
+}
+
+
+async function fetchAnalyticsData(tenantId) {
     const [
       agentStats,
       taskStats,
@@ -35,7 +90,9 @@ export default async function analyticsRoutes(fastify) {
       recentActivity,
       tasksByDay,
       topAgents,
-      tokenUsage
+      tokenUsage,
+      tenantConfig,
+      customModels
     ] = await Promise.all([
       // Agent counts
       query(
@@ -91,12 +148,26 @@ export default async function analyticsRoutes(fastify) {
         [tenantId]
       ),
 
-      // Recent audit activity (last 10 events)
+      // Recent audit activity (last 30 business events, filtered)
       query(
-        `SELECT event_type, actor_type, actor_id, resource_type, action, created_at
-         FROM audit_log
-         WHERE tenant_id = $1
-         ORDER BY created_at DESC LIMIT 10`,
+        `SELECT
+           a.event_type, a.actor_type, a.actor_id, a.resource_type, a.resource_id,
+           a.action, a.created_at, a.metadata,
+           COALESCE(ag.name, u.email, 'System') as actor_name,
+           COALESCE(t.goal, wf.name, '') as resource_label,
+           wf_name.name as workflow_name
+         FROM audit_log a
+         LEFT JOIN agents ag ON a.actor_type = 'AGENT' AND ag.id::text = a.actor_id
+         LEFT JOIN users u ON a.actor_type = 'USER' AND u.id::text = a.actor_id
+         LEFT JOIN agent_tasks t ON a.resource_type = 'AgentTask' AND t.id = a.resource_id
+         LEFT JOIN workflows wf ON a.resource_type = 'Workflow' AND wf.id = a.resource_id
+         LEFT JOIN workflows wf_name ON wf_name.id::text = COALESCE(
+           CASE WHEN a.event_type = 'trigger.fired' THEN a.resource_id::text ELSE NULL END,
+           a.metadata->>'workflowId'
+         )
+         WHERE a.tenant_id = $1
+           AND a.event_type NOT IN ('llm.tokens_used', 'agent.tool_executed')
+         ORDER BY a.created_at DESC LIMIT 30`,
         [tenantId]
       ),
 
@@ -142,6 +213,18 @@ export default async function analyticsRoutes(fastify) {
            AND created_at > NOW() - INTERVAL '30 days'
          GROUP BY metadata->>'model'`,
         [tenantId]
+      ),
+
+      // Tenant LLM config — all configured providers/models
+      query(
+        `SELECT llm_config FROM tenants WHERE id = $1`,
+        [tenantId]
+      ),
+
+      // Custom (fine-tuned) models for this tenant
+      query(
+        `SELECT model_name, base_model_path, status FROM custom_models WHERE tenant_id = $1`,
+        [tenantId]
       )
     ])
 
@@ -155,24 +238,83 @@ export default async function analyticsRoutes(fastify) {
     const approvals = approvalStats.rows[0]
 
     // Calculate token cost estimates per model and total
-    const tokenBreakdown = tokenUsage.rows.map(row => {
-      const promptTokens = parseInt(row.prompt_tokens) || 0
-      const completionTokens = parseInt(row.completion_tokens) || 0
-      const costUsd = estimateCost(row.model, promptTokens, completionTokens)
-      return {
-        model: row.model || 'unknown',
+    const pricing = await getPricingConfig()
+
+    // Build a map of model → token usage from audit data
+    const usageByModel = {}
+    for (const row of tokenUsage.rows) {
+      const model = row.model || 'unknown'
+      usageByModel[model] = {
+        promptTokens: parseInt(row.prompt_tokens) || 0,
+        completionTokens: parseInt(row.completion_tokens) || 0,
+        totalTokens: parseInt(row.total_tokens) || 0
+      }
+    }
+
+    // Collect all configured model names from tenant LLM config + custom models
+    const configuredModels = new Set()
+    try {
+      const llmConfig = tenantConfig.rows[0]?.llm_config
+      if (llmConfig?.providers) {
+        for (const provider of Object.values(llmConfig.providers)) {
+          if (provider.model) configuredModels.add(provider.model)
+        }
+      }
+    } catch { /* ignore malformed config */ }
+    for (const cm of customModels.rows) {
+      configuredModels.add(cm.model_name)
+      if (cm.base_model_path) configuredModels.add(cm.base_model_path)
+    }
+
+    // Merge: start with models that have usage, then add configured models with zero usage
+    const seenModels = new Set()
+    const tokenBreakdown = []
+
+    // First, add all models with usage data
+    for (const row of tokenUsage.rows) {
+      const model = row.model || 'unknown'
+      seenModels.add(model)
+      const promptTokens = usageByModel[model].promptTokens
+      const completionTokens = usageByModel[model].completionTokens
+      let rates = pricing[model]
+      if (!rates) {
+        const key = Object.keys(pricing).find(k => k !== 'default' && model?.includes(k))
+        rates = key ? pricing[key] : (pricing['default'] || { input: 2.50, output: 10.00 })
+      }
+      const costUsd = ((promptTokens / 1_000_000) * rates.input) + ((completionTokens / 1_000_000) * rates.output)
+      tokenBreakdown.push({
+        model,
         promptTokens,
         completionTokens,
-        totalTokens: parseInt(row.total_tokens) || 0,
-        estimatedCostUsd: Math.round(costUsd * 10000) / 10000 // 4 decimal places
+        totalTokens: usageByModel[model].totalTokens,
+        estimatedCostUsd: Math.round(costUsd * 10000) / 10000
+      })
+    }
+
+    // Then, add configured models with zero usage (so they appear in the table)
+    for (const model of configuredModels) {
+      if (!seenModels.has(model)) {
+        seenModels.add(model)
+        let rates = pricing[model]
+        if (!rates) {
+          const key = Object.keys(pricing).find(k => k !== 'default' && model?.includes(k))
+          rates = key ? pricing[key] : (pricing['default'] || { input: 2.50, output: 10.00 })
+        }
+        tokenBreakdown.push({
+          model,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          estimatedCostUsd: 0
+        })
       }
-    })
+    }
+
     const totalCostUsd = tokenBreakdown.reduce((sum, r) => sum + r.estimatedCostUsd, 0)
     const totalTokensUsed = tokenBreakdown.reduce((sum, r) => sum + r.totalTokens, 0)
 
     return {
-      data: {
-        agents: {
+      agents: {
           total: Object.values(agentMap).reduce((a, b) => a + b, 0),
           active: agentMap['ACTIVE'] || 0,
           draft: agentMap['DRAFT'] || 0,
@@ -201,7 +343,39 @@ export default async function analyticsRoutes(fastify) {
           approved: parseInt(approvals.approved) || 0,
           rejected: parseInt(approvals.rejected) || 0,
         },
-        recentActivity: recentActivity.rows,
+        recentActivity: recentActivity.rows.map(r => {
+          // Build human-readable summary in JS (avoids PostgreSQL CASE type inference issues)
+          const meta = r.metadata || {}
+          let summary = ''
+          if (r.event_type.startsWith('agent.task_')) {
+            summary = meta.goal || r.resource_label || `Task ${String(r.resource_id || '').slice(0, 8)}`
+          } else if (r.event_type.startsWith('workflow.step_')) {
+            summary = `Step: ${meta.stepId || '?'} (${meta.stepType || '?'})`
+          } else if (r.event_type.startsWith('workflow.execution_') || r.event_type === 'trigger.fired') {
+            summary = r.workflow_name || r.resource_label || `Workflow ${String(meta.workflowId || r.resource_id || '').slice(0, 8)}`
+          } else if (r.event_type.startsWith('agent.')) {
+            summary = r.actor_name || `Agent ${String(r.actor_id || '').slice(0, 8)}`
+          } else if (r.event_type.startsWith('workflow.')) {
+            summary = r.resource_label || `Workflow ${String(r.resource_id || '').slice(0, 8)}`
+          } else if (r.event_type.startsWith('connector.')) {
+            summary = `${r.resource_type} ${String(r.resource_id || '').slice(0, 8)}`
+          } else {
+            summary = `${r.resource_type} ${String(r.resource_id || '').slice(0, 8)}`
+          }
+          return {
+            eventType: r.event_type,
+            action: r.action,
+            actor: { type: r.actor_type, name: r.actor_name, id: r.actor_id },
+            resource: { type: r.resource_type, name: r.resource_label, id: r.resource_id },
+            summary,
+            metadata: meta,
+            durationMs: parseInt(meta.durationMs) || null,
+            actionsCount: parseInt(meta.actionsCount) || null,
+            stepCount: parseInt(meta.stepCount) || null,
+            workflowName: r.workflow_name,
+            timestamp: r.created_at
+          }
+        }),
         tasksByDay: tasksByDay.rows,
         topAgents: topAgents.rows.map(a => ({
           ...a,
@@ -215,7 +389,5 @@ export default async function analyticsRoutes(fastify) {
           estimatedCostUsd: Math.round(totalCostUsd * 10000) / 10000,
           byModel: tokenBreakdown
         }
-      }
     }
-  })
 }

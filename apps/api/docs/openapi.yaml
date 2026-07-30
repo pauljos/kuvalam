@@ -116,7 +116,7 @@ components:
           enum: [DRAFT, ACTIVE, PAUSED, ARCHIVED]
         autonomy_level:
           type: string
-          enum: [SUPERVISED, SEMI_AUTONOMOUS, AUTONOMOUS]
+          enum: [SUPERVISED, GUARDED, AUTONOMOUS]
           default: SUPERVISED
         llm_provider:
           type: string
@@ -496,7 +496,7 @@ paths:
                   enum: [RESEARCHER, ANALYST, EXECUTOR, COMMUNICATOR]
                 autonomyLevel:
                   type: string
-                  enum: [SUPERVISED, SEMI_AUTONOMOUS, AUTONOMOUS]
+                  enum: [SUPERVISED, GUARDED, AUTONOMOUS]
                 llmProvider:
                   type: string
                 llmModel:

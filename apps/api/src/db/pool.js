@@ -19,43 +19,69 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  // 10s connection timeout: long enough to survive traffic spikes and short
+  // failovers without cascading into 500s, while still failing fast for
+  // genuinely unresponsive DBs. (Was 2000ms — too tight for cold starts.)
+  connectionTimeoutMillis: 10000,
 })
+
 
 pool.on('error', (err) => {
   console.error('Unexpected DB pool error', err)
 })
 
-// Store for tenant isolation context propagation
+// ─── Tenant isolation context ───────────────────────────────────────────────
+// Each request that carries a :tenantId in the URL gets an ALS context with:
+//   { tenantId, client? }
+// The client is lazily acquired on the first query() call and reused for the
+// entire request lifetime. This eliminates the per-query BEGIN/COMMIT overhead
+// (3 round-trips per query) and replaces it with a single SESSION-level SET
+// that persists on the connection until release.
+//
+// Before: every query → connect + BEGIN + SET LOCAL + query + COMMIT + release
+// After:  first query → connect + SET SESSION … then → query → query → …
+//         onResponse → release
 export const tenantContextStore = new AsyncLocalStorage()
+
+/**
+ * Release the per-request tenant DB client (if one was acquired).
+ * Called from the Fastify onResponse hook. Idempotent — safe to call
+ * when no client was acquired (e.g. auth-only routes).
+ */
+export function releaseTenantClient() {
+  const ctx = tenantContextStore.getStore()
+  if (ctx?.client) {
+    // Reset the session var so the connection is clean for the next tenant
+    ctx.client.query('RESET app.current_tenant_id').catch(() => {})
+    ctx.client.release()
+    ctx.client = null
+  }
+}
 
 // Helper: run a query (automatically injects RLS tenant context if present in AsyncLocalStorage)
 export async function query(text, params) {
-  const tenantId = tenantContextStore.getStore()
-  
-  if (tenantId) {
-    // BUGFIX: `set_config(..., true)` is transaction-local. Without an explicit
-    // BEGIN/COMMIT the setting was lost before the actual query ran — each
-    // `client.query()` auto-commits as its own transaction. Wrap in a real
-    // transaction so the RLS policy sees the tenant context.
-    const client = await pool.connect()
-    try {
-      await client.query('BEGIN')
-      await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(tenantId)])
-      const start = Date.now()
-      const res = await client.query(text, params)
-      await client.query('COMMIT')
-      const duration = Date.now() - start
-      if (process.env.NODE_ENV === 'development' && duration > 100) {
-        console.log('Slow tenant query', { text: text.substring(0, 60), duration, rows: res.rowCount, tenantId })
-      }
-      return res
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    } finally {
-      client.release()
+  const ctx = tenantContextStore.getStore()
+
+  if (ctx?.tenantId) {
+    // ── RLS path: reuse a single per-request client ──────────────────────
+    if (!ctx.client) {
+      // First query in this request — acquire a client and set the session
+      // variable. Using is_local=false makes it SESSION-level, so it survives
+      // across implicit transactions (auto-commit) on this connection.
+      ctx.client = await pool.connect()
+      await ctx.client.query(
+        'SELECT set_config($1, $2, false)',
+        ['app.current_tenant_id', validateTenantId(ctx.tenantId)]
+      )
     }
+
+    const start = Date.now()
+    const res = await ctx.client.query(text, params)
+    const duration = Date.now() - start
+    if (process.env.NODE_ENV === 'development' && duration > 100) {
+      console.log('Slow tenant query', { text: text.substring(0, 60), duration, rows: res.rowCount, tenantId: ctx.tenantId })
+    }
+    return res
   }
 
   // Non-RLS fallback (for auth/system queries)
@@ -71,9 +97,9 @@ export async function query(text, params) {
 // Helper: get a client for transactions
 export async function getClient() {
   const client = await pool.connect()
-  const tenantId = tenantContextStore.getStore()
-  if (tenantId) {
-    await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(tenantId)])
+  const ctx = tenantContextStore.getStore()
+  if (ctx?.tenantId) {
+    await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(ctx.tenantId)])
   }
   return client
 }
@@ -81,11 +107,11 @@ export async function getClient() {
 // Helper: run a transaction (automatically carries RLS tenant context)
 export async function transaction(fn) {
   const client = await pool.connect()
-  const tenantId = tenantContextStore.getStore()
+  const ctx = tenantContextStore.getStore()
   try {
     await client.query('BEGIN')
-    if (tenantId) {
-      await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(tenantId)])
+    if (ctx?.tenantId) {
+      await client.query('SELECT set_config($1, $2, true)', ['app.current_tenant_id', validateTenantId(ctx.tenantId)])
     }
     const result = await fn(client)
     await client.query('COMMIT')
