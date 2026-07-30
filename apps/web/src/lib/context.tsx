@@ -57,20 +57,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try {
       const u = localStorage.getItem('kuvalam_user')
+      
+      // No user found — redirect to login
+      if (!u) {
+        router.push('/')
+        return
+      }
+      
+      const parsedUser = JSON.parse(u)
+      setUser(parsedUser)
+      
+      // System admins don't need a tenant
+      if (parsedUser.isSystemAdmin && !localStorage.getItem('kuvalam_tenants')) {
+        setTenants([])
+        setTenantState(null)
+        return
+      }
+
       const t = localStorage.getItem('kuvalam_tenant_id')
       const ts = localStorage.getItem('kuvalam_tenants')
-      
-      if (u) {
-        const parsedUser = JSON.parse(u)
-        setUser(parsedUser)
-        
-        // System admins don't need a tenant
-        if (parsedUser.isSystemAdmin && (!ts || ts === '[]')) {
-          setTenants([])
-          setTenantState(null)
-          return
-        }
-      }
       
       if (ts) {
         const parsed: Tenant[] = JSON.parse(ts)
@@ -83,7 +88,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
     } catch { /* ignore corrupt localStorage */ }
-  }, [])
+  }, [router])
 
   const setTenant = useCallback((t: Tenant) => {
     setTenantState(t)
