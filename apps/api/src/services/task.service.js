@@ -298,7 +298,7 @@ export async function executeTask(task, agent) {
       try {
         const { rows: dbRows } = await query(
           `SELECT cmd.db_label, cmd.db_connection_string, cmd.db_type,
-                  cm.model_name, cm.ollama_tag
+                  cm.model_name
            FROM custom_model_databases cmd
            JOIN custom_models cm ON cm.id = cmd.model_id
            WHERE cm.tenant_id = $1
@@ -306,10 +306,8 @@ export async function executeTask(task, agent) {
              AND cm.status = 'COMPLETED'
              AND cmd.db_connection_string IS NOT NULL
              AND cmd.db_connection_string != ''
-             AND (cm.ollama_tag = $2 OR cm.model_name = $2
-                  OR cm.ollama_tag = split_part($2, ':', 1)
+             AND (cm.model_name = $2
                   OR cm.model_name = split_part($2, ':', 1)
-                  OR cm.ollama_tag LIKE $2 || '_%'
                   OR cm.model_name LIKE $2 || '_%')
            ORDER BY cmd.sort_order`,
           [agent.tenant_id, agent.llm_model]
@@ -340,7 +338,7 @@ export async function executeTask(task, agent) {
             `SELECT db_connection_string FROM custom_models
              WHERE tenant_id = $1 AND data_source = 'database' AND status = 'COMPLETED'
                AND db_connection_string IS NOT NULL AND db_connection_string != ''
-               AND (ollama_tag = $2 OR model_name = $2)
+               AND model_name = $2
              LIMIT 1`,
             [agent.tenant_id, agent.llm_model]
           )
@@ -629,9 +627,8 @@ export async function executeTask(task, agent) {
     // + listDatabases/useDatabase for multi-DB models
     if (agentDbConnectionString) {
       let { rows: [customModel] } = await query(
-        `SELECT model_name, ollama_tag FROM custom_models
-         WHERE tenant_id = $1 AND (ollama_tag = $2 OR model_name = $2
-                OR ollama_tag = split_part($2, ':', 1)
+        `SELECT model_name FROM custom_models
+         WHERE tenant_id = $1 AND (model_name = $2
                 OR model_name = split_part($2, ':', 1))
          LIMIT 1`,
         [agent.tenant_id, agent.llm_model]
@@ -639,7 +636,7 @@ export async function executeTask(task, agent) {
       // Fallback: if the agent's model didn't match, pick any completed DB model
       if (!customModel) {
         const { rows: [fallback] } = await query(
-          `SELECT model_name, ollama_tag FROM custom_models
+          `SELECT model_name FROM custom_models
            WHERE tenant_id = $1
              AND data_source = 'database'
              AND status = 'COMPLETED'
@@ -650,7 +647,7 @@ export async function executeTask(task, agent) {
         )
         customModel = fallback
       }
-      const dbModelName = customModel?.model_name || customModel?.ollama_tag || 'database'
+      const dbModelName = customModel?.model_name || 'database'
 
       // ── Multi-DB tools (prepended when connection map exists) ───────────
       if (agentDbConnectionMap) {
