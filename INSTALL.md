@@ -318,6 +318,81 @@ The repo includes a `render.yaml` blueprint. Deploy with one click:
 ```bash
 # Build and start all production services
 docker compose -f infra/docker/docker-compose.prod.yml up -d --build
+```
+
+---
+
+## 12. Quick-Start Reference (Verified Configuration)
+
+This is the exact setup tested and verified with all 3 agents running successfully.
+
+### Required Credentials
+
+| Role | Email | Password | Slug |
+|------|-------|----------|------|
+| System Admin | `admin@kuvalam.ai` | `Admin123!` | `acme` |
+
+### Docker Services
+
+```bash
+docker compose up -d                                    # postgres + redis
+docker compose --profile graph up -d neo4j              # Neo4j (optional)
+```
+
+| Service | Container | Port | Required |
+|---------|-----------|------|----------|
+| PostgreSQL 16 + pgvector | `kuvalam-postgres` | `5434` | ✅ Yes |
+| Redis 7 | `kuvalam-redis` | `6380` | ✅ Yes |
+| Neo4j 5 | `kuvalam-neo4j` | `7474`/`7687` | Optional |
+
+### Environment (`.env`)
+
+```env
+DATABASE_URL=postgresql://axon:axon_dev_password@localhost:5434/axon_db
+REDIS_URL=redis://localhost:6380
+JWT_SECRET=<generate with: openssl rand -hex 32>
+COOKIE_SECRET=<generate with: openssl rand -hex 32>
+CREDENTIAL_ENCRYPTION_KEY=<generate with: openssl rand -hex 32>
+FRONTEND_URL=http://localhost:3000
+```
+
+### LLM Provider (configure via Settings → LLM Providers)
+
+| Field | Value |
+|-------|-------|
+| Provider | Ollama (Local) |
+| Model | `qwen2.5:7b` |
+| Base URL | `http://localhost:11434/v1` |
+
+### Agents Created & Tested
+
+| Agent | Autonomy | Status | Test Result |
+|-------|----------|--------|-------------|
+| Research Analyst | 🛡️ GUARDED | ✅ ACTIVE | ✅ 4,256 tokens |
+| Customer Support Bot | 🔒 SUPERVISED | ✅ ACTIVE | ✅ 19,626 tokens (KB-augmented) |
+| Compliance Auditor | 🚀 AUTONOMOUS | ✅ ACTIVE | ✅ 4,286 tokens |
+
+### System Requirements
+
+| Dependency | Required | Notes |
+|------------|----------|-------|
+| Node.js ≥ 20 | ✅ | via nvm or official download |
+| npm ≥ 10 | ✅ | ships with Node |
+| Python ≥ 3.10 | ✅ | 3.7 detected on this machine — upgrade recommended |
+| Docker ≥ 24 | ✅ | Docker Desktop or OrbStack |
+| Ollama ≥ 0.9 | ✅ | with at least one model pulled |
+| Git | ✅ | |
+
+### Render Deployment
+
+```bash
+# 1. Push to GitHub
+# 2. dashboard.render.com → New → Blueprint
+# 3. Connect repo → render.yaml auto-provisions everything
+# 4. Fill prompted secrets (OPENAI_API_KEY, NEO4J_AUTH, etc.)
+```
+
+**⚠️ Neo4j on Render:** Needs starter plan (512MB RAM min). Set `NEO4J_AUTH=neo4j/yourpassword`. On free plan, use Neo4j AuraDB free tier or skip.
 
 # Run migrations on the production DB
 npm run prod:migrate

@@ -1,13 +1,17 @@
 import pg from 'pg';
 const { Client } = pg;
 
-export async function up() {
-  const client = new Client({
-    connectionString: process.env.DATABASE_URL || 'postgresql://axon:axon_dev_password@localhost:5434/axon_db'
-  });
+export async function up(runnerClient) {
+  // Use the runner's client if provided, otherwise create our own (standalone mode)
+  const client = runnerClient || await (async () => {
+    const c = new Client({
+      connectionString: process.env.DATABASE_URL || 'postgresql://axon:axon_dev_password@localhost:5434/axon_db'
+    });
+    await c.connect();
+    return c;
+  })();
 
-  await client.connect();
-  console.log('Connected to database.');
+  const ownsConnection = !runnerClient;
 
   try {
     await client.query(`
@@ -49,8 +53,9 @@ export async function up() {
 
   } catch (err) {
     console.error('❌ Error creating table:', err.message);
+    throw err;
   } finally {
-    await client.end();
+    if (ownsConnection) await client.end();
   }
 }
 

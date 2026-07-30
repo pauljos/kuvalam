@@ -104,17 +104,18 @@ services:
           name: kuvalam-browser-agent
           type: web
           envVarKey: RENDER_EXTERNAL_URL
-      # Neo4j knowledge graph — auto-wired from kuvalam-neo4j service
-      - key: NEO4J_HOST
-        value: kuvalam-neo4j
-      - key: NEO4J_HTTP_PORT
-        value: "7474"
-      - key: NEO4J_BOLT_PORT
-        value: "7687"
-      - key: NEO4J_PASSWORD
-        sync: false
-      - key: NEO4J_DATABASE
-        value: neo4j
+      # Neo4j — not deployed on Render (uses local/K8s or managed AuraDB).
+      # Remove these comments and set values when using a managed Neo4j service.
+      # - key: NEO4J_HOST
+      #   value: <your-neo4j-host>
+      # - key: NEO4J_HTTP_PORT
+      #   value: "7474"
+      # - key: NEO4J_BOLT_PORT
+      #   value: "7687"
+      # - key: NEO4J_PASSWORD
+      #   sync: false
+      # - key: NEO4J_DATABASE
+      #   value: neo4j
 
   # ── BullMQ Worker ───────────────────────────────────────────────────────────
   - type: worker
@@ -164,17 +165,18 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
-      # Neo4j knowledge graph — auto-wired from kuvalam-neo4j service
-      - key: NEO4J_HOST
-        value: kuvalam-neo4j
-      - key: NEO4J_HTTP_PORT
-        value: "7474"
-      - key: NEO4J_BOLT_PORT
-        value: "7687"
-      - key: NEO4J_PASSWORD
-        sync: false
-      - key: NEO4J_DATABASE
-        value: neo4j
+      # Neo4j — not deployed on Render (uses local/K8s or managed AuraDB).
+      # Remove these comments and set values when using a managed Neo4j service.
+      # - key: NEO4J_HOST
+      #   value: <your-neo4j-host>
+      # - key: NEO4J_HTTP_PORT
+      #   value: "7474"
+      # - key: NEO4J_BOLT_PORT
+      #   value: "7687"
+      # - key: NEO4J_PASSWORD
+      #   sync: false
+      # - key: NEO4J_DATABASE
+      #   value: neo4j
       # Browser agent URL for web automation (browser_use tool)
       - key: BROWSER_AGENT_URL
         fromService:
@@ -197,28 +199,11 @@ services:
         - package.json
         - package-lock.json
 
-  # ── Knowledge Graph (Neo4j) — OPTIONAL ──────────────────────────────────────
-  # Uncomment to deploy Neo4j as a Docker service on Render.
-  # Needs at least starter plan (~512MB RAM). For free: use Neo4j AuraDB.
-  - type: web
-    name: kuvalam-neo4j
-    runtime: docker
-    dockerfilePath: infra/docker/neo4j.Dockerfile
-    dockerContext: .
-    plan: starter
-    region: oregon
-    healthCheckPath: /
-    envVars:
-      - key: NEO4J_AUTH
-        sync: false
-      - key: NEO4J_dbms_memory_heap_initial__size
-        value: 256m
-      - key: NEO4J_dbms_memory_heap_max__size
-        value: 512m
-    disk:
-      name: neo4j-data
-      mountPath: /data
-      sizeGB: 10
+  # ── Neo4j — SKIPPED on Render ─────────────────────────────────────────────
+  # Neo4j is not deployed on Render. Knowledge Graphs use pgvector (always
+  # available) or a managed Neo4j instance (e.g. Neo4j AuraDB free tier).
+  # Set NEO4J_HOST / NEO4J_PASSWORD env vars in the API and Worker services
+  # above if you add a managed Neo4j instance.
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web
