@@ -1,11 +1,11 @@
 import pg from 'pg';
 const { Client } = pg;
 
-const client = new Client({
-  connectionString: 'postgresql://axon:axon_dev_password@localhost:5434/axon_db'
-});
+export async function up() {
+  const client = new Client({
+    connectionString: process.env.DATABASE_URL || 'postgresql://axon:axon_dev_password@localhost:5434/axon_db'
+  });
 
-async function createCustomModelsTable() {
   await client.connect();
   console.log('Connected to database.');
 
@@ -54,4 +54,7 @@ async function createCustomModelsTable() {
   }
 }
 
-createCustomModelsTable();
+// Allow running directly: node src/db/migrations/05_custom_models.js
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  up().catch(err => { console.error(err); process.exit(1); });
+}

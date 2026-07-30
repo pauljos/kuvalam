@@ -104,13 +104,13 @@ services:
           name: kuvalam-browser-agent
           type: web
           envVarKey: RENDER_EXTERNAL_URL
-      # Neo4j knowledge graph — leave blank if not using graph features
+      # Neo4j knowledge graph — auto-wired from kuvalam-neo4j service
       - key: NEO4J_HOST
-        sync: false
+        value: kuvalam-neo4j
       - key: NEO4J_HTTP_PORT
-        sync: false
+        value: "7474"
       - key: NEO4J_BOLT_PORT
-        sync: false
+        value: "7687"
       - key: NEO4J_PASSWORD
         sync: false
       - key: NEO4J_DATABASE
@@ -164,13 +164,13 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
-      # Neo4j knowledge graph — leave blank if not using graph features
+      # Neo4j knowledge graph — auto-wired from kuvalam-neo4j service
       - key: NEO4J_HOST
-        sync: false
+        value: kuvalam-neo4j
       - key: NEO4J_HTTP_PORT
-        sync: false
+        value: "7474"
       - key: NEO4J_BOLT_PORT
-        sync: false
+        value: "7687"
       - key: NEO4J_PASSWORD
         sync: false
       - key: NEO4J_DATABASE
@@ -196,6 +196,29 @@ services:
         - apps/browser-agent/**
         - package.json
         - package-lock.json
+
+  # ── Knowledge Graph (Neo4j) — OPTIONAL ──────────────────────────────────────
+  # Uncomment to deploy Neo4j as a Docker service on Render.
+  # Needs at least starter plan (~512MB RAM). For free: use Neo4j AuraDB.
+  - type: web
+    name: kuvalam-neo4j
+    runtime: docker
+    dockerfilePath: infra/docker/neo4j.Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      - key: NEO4J_AUTH
+        sync: false
+      - key: NEO4J_dbms_memory_heap_initial__size
+        value: 256m
+      - key: NEO4J_dbms_memory_heap_max__size
+        value: 512m
+    disk:
+      name: neo4j-data
+      mountPath: /data
+      sizeGB: 10
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web
