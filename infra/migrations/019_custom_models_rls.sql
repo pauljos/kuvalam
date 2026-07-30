@@ -7,14 +7,14 @@
 DO $$
 BEGIN
   IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_models') THEN
-    EXECUTE 'ALTER TABLE custom_models ENABLE ROW LEVEL SECURITY';
+    ALTER TABLE custom_models ENABLE ROW LEVEL SECURITY;
 
-    EXECUTE 'DROP POLICY IF EXISTS custom_models_tenant_isolation ON custom_models';
-    EXECUTE 'CREATE POLICY custom_models_tenant_isolation ON custom_models
-      USING (tenant_id = current_tenant_id())';
+    DROP POLICY IF EXISTS custom_models_tenant_isolation ON custom_models;
+    CREATE POLICY custom_models_tenant_isolation ON custom_models
+      USING (tenant_id = current_tenant_id());
 
-    EXECUTE 'DROP POLICY IF EXISTS custom_models_tenant_insert ON custom_models';
-    EXECUTE 'CREATE POLICY custom_models_tenant_insert ON custom_models
-      FOR INSERT WITH CHECK (tenant_id = current_tenant_id())';
+    DROP POLICY IF EXISTS custom_models_tenant_insert ON custom_models;
+    CREATE POLICY custom_models_tenant_insert ON custom_models
+      FOR INSERT WITH CHECK (tenant_id = current_tenant_id());
   END IF;
 END $$;

@@ -34,10 +34,10 @@ BEGIN
       );
 
     -- ── RLS: tenant isolation via parent custom_models row ───────────────
-    EXECUTE 'ALTER TABLE custom_model_databases ENABLE ROW LEVEL SECURITY';
+    ALTER TABLE custom_model_databases ENABLE ROW LEVEL SECURITY;
 
-    EXECUTE 'DROP POLICY IF EXISTS custom_model_databases_isolation ON custom_model_databases';
-    EXECUTE 'CREATE POLICY custom_model_databases_isolation ON custom_model_databases
+    DROP POLICY IF EXISTS custom_model_databases_isolation ON custom_model_databases;
+    CREATE POLICY custom_model_databases_isolation ON custom_model_databases
       FOR ALL
       USING (
         model_id IN (
@@ -50,6 +50,6 @@ BEGIN
           SELECT id FROM custom_models
           WHERE tenant_id = (current_setting('app.current_tenant_id', true))::uuid
         )
-      )';
+      );
   END IF;
 END $$;
