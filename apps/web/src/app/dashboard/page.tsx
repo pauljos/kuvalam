@@ -231,7 +231,7 @@ export default function DashboardPage() {
                           </Link>
                           <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>{agent.archetype}</div>
                         </td>
-                        <td><span className="tag" style={{ fontSize: 11 }}>{agent.llm_model}</span></td>
+                        <td><span className="tag" style={{ fontSize: 11 }}>{agent.llm_model === 'auto' || !agent.llm_model ? 'System default' : agent.llm_model}</span></td>
                         <td><span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span></td>
                         <td><Link href={`/dashboard/agents/${agent.id}`} className="btn btn-secondary btn-sm">Open</Link></td>
                       </tr>

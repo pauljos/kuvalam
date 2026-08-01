@@ -133,6 +133,49 @@ export async function processWebhook({ body, tenantId, secretToken }) {
       return { success: true, results }
     }
 
+    // Handle Telegram slash commands immediately (no agent LLM needed)
+    if (content.startsWith('/')) {
+      const [cmdRaw, ...cmdArgs] = content.split(/\s+/)
+      const cmd = cmdRaw.toLowerCase()
+      let replyText = null
+
+      if (cmd === '/start') {
+        replyText = `👋 Hello! I'm an AI agent ready to help.\n\nSend me a message and I'll respond. Type /help for available commands.`
+      } else if (cmd === '/help') {
+        replyText = `🤖 *Available Commands:*\n\n/start — Greet the bot\n/help — Show this message\n/reset — Clear this conversation history\n/status — Show agent info\n\nOr just send any message to chat with the AI agent!`
+      } else if (cmd === '/reset') {
+        // Clear session history
+        const session = await resolveSession(tenantId, chatId, displayName, username, chat.type)
+        await query(
+          `DELETE FROM telegram_messages WHERE session_id = $1 AND tenant_id = $2`,
+          [session.id, tenantId]
+        )
+        await query(
+          `UPDATE telegram_sessions SET session_state = $1 WHERE id = $2`,
+          [JSON.stringify({}), session.id]
+        )
+        replyText = `✅ Conversation history cleared. Start fresh!`
+      } else if (cmd === '/status') {
+        const session = await resolveSession(tenantId, chatId, displayName, username, chat.type)
+        const { rows: [agent] } = await query(
+          `SELECT name, archetype FROM agents WHERE id = $1`,
+          [session.agent_id]
+        )
+        const { rows: [{ count }] } = await query(
+          `SELECT COUNT(*)::int as count FROM telegram_messages WHERE session_id = $1`,
+          [session.id]
+        )
+        replyText = `🤖 *Agent:* ${agent?.name || 'Unknown'}\n*Type:* ${agent?.archetype || 'general'}\n*Messages:* ${count}`
+      }
+
+      if (replyText) {
+        await sendMessage({ tenantId, chatId, text: replyText, parseMode: 'Markdown' })
+        results.push({ type: 'command', cmd, chatId })
+        return { success: true, results }
+      }
+      // Unknown command — fall through to normal agent processing
+    }
+
     // Resolve session
     const session = await resolveSession(tenantId, chatId, displayName, username, chat.type)
 

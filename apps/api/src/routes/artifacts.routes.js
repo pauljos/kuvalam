@@ -6,6 +6,11 @@ import { join, resolve } from 'path'
 import { existsSync } from 'fs'
 import { errorResponse } from '../utils/errors.js'
 
+import { fileURLToPath } from 'url'
+import { dirname } from 'path'
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
 const ts = () => ({ requestId: undefined, timestamp: new Date().toISOString() })
 
 export default async function artifactsRoutes(fastify) {
@@ -18,7 +23,7 @@ export default async function artifactsRoutes(fastify) {
 
       // Resolve to workspace-level artifacts/<tenantId>/<date>/<filename>
       // We serve from the artifacts root, scanning date folders for the file
-      const artifactsRoot = resolve(process.cwd(), '..', '..', 'artifacts', tenantId)
+      const artifactsRoot = resolve(__dirname, '..', '..', '..', '..', 'artifacts', tenantId)
 
       if (!existsSync(artifactsRoot)) {
         return reply.status(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'No artifacts for this tenant' }, meta: ts(request) })

@@ -47,14 +47,27 @@ export const tenantContextStore = new AsyncLocalStorage()
  * Release the per-request tenant DB client (if one was acquired).
  * Called from the Fastify onResponse hook. Idempotent — safe to call
  * when no client was acquired (e.g. auth-only routes).
+ *
+ * Accepts an optional store reference so callers (Fastify hooks) can
+ * release deterministically even if the ALS context has been lost
+ * (e.g. across error boundaries or the response completion tick).
  */
-export function releaseTenantClient() {
-  const ctx = tenantContextStore.getStore()
+export function releaseTenantClient(store) {
+  const ctx = store || tenantContextStore.getStore()
   if (ctx?.client) {
     // Reset the session var so the connection is clean for the next tenant
     ctx.client.query('RESET app.current_tenant_id').catch(() => {})
-    ctx.client.release()
+    try { ctx.client.release() } catch { /* already released */ }
     ctx.client = null
+  }
+}
+
+/** Runtime pool telemetry — exposed via /metrics for pool-leak diagnosis. */
+export function poolStats() {
+  return {
+    totalCount: pool.totalCount,
+    idleCount: pool.idleCount,
+    waitingCount: pool.waitingCount,
   }
 }
 

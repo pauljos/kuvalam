@@ -13,9 +13,10 @@ import { generateAgentSystemPrompt } from './agent.service.js'
  * @param {string} params.userId
  * @param {string} params.message - The user's natural-language request
  * @param {Array<{role:string,content:string}>} params.history - Prior conversation turns (max 20)
+ * @param {Array<{name:string, type:string, contentBase64:string}>} params.attachments - Optional file attachments
  * @returns {{ message: string, actions: Array, suggestions: Array<string> }}
  */
-export async function builderChat({ tenantId, userId, message, history = [], userRole: jwtRole, isSystemAdmin: jwtIsSysAdmin }) {
+export async function builderChat({ tenantId, userId, message, history = [], attachments = [], userRole: jwtRole, isSystemAdmin: jwtIsSysAdmin }) {
   // 1. Gather tenant context
   const tenantCtx = await gatherTenantContext(tenantId)
 
@@ -50,7 +51,7 @@ export async function builderChat({ tenantId, userId, message, history = [], use
   let replyText = ''
 
   try {
-    const result = await runBuilderLoop({ tenantId, userId, message, history, systemPrompt, tenantCtx, userRole, isSystemAdmin })
+    const result = await runBuilderLoop({ tenantId, userId, message, history, attachments, systemPrompt, tenantCtx, userRole, isSystemAdmin })
     actions = result.actions
     replyText = result.replyText
   } catch (err) {
@@ -71,13 +72,24 @@ export async function builderChat({ tenantId, userId, message, history = [], use
 
 // ─── Main builder loop (extracted for error isolation) ────────────────────────
 
-async function runBuilderLoop({ tenantId, userId, message, history, systemPrompt, tenantCtx, userRole, isSystemAdmin = false }) {
+async function runBuilderLoop({ tenantId, userId, message, history, attachments, systemPrompt, tenantCtx, userRole, isSystemAdmin = false }) {
   const SEARCH_ONLY_TOOLS = new Set(['search_existing', 'list_resources'])
+  
+  let augmentedMessage = message
+  if (attachments && attachments.length > 0) {
+    const fileList = attachments.map(a => `Filename: ${a.name}`).join('\n')
+    augmentedMessage += `\n\n[System: The user has attached the following files. You can upload them to a knowledge base using the upload_file tool by passing their filename (the system will inject the base64 content).]\n${fileList}`
+  }
+
   const messages = [
     { role: 'system', content: systemPrompt },
     ...(history.slice(-20)),
-    { role: 'user', content: message },
+    { role: 'user', content: augmentedMessage },
   ]
+  if (attachments && attachments.length > 0) {
+    // Add raw attachment data for the upload_file tool to retrieve content from
+    messages.push({ role: 'system', content: `Attachment Data: ${JSON.stringify(attachments)}` })
+  }
 
   let currentMessages = messages
   let currentResult = await callLLM({ tenantId, messages: currentMessages, tenantCtx, userRole, goal: `Builder: ${message.slice(0, 80)}` })
@@ -100,7 +112,16 @@ async function runBuilderLoop({ tenantId, userId, message, history, systemPrompt
 
       for (const tc of toolCallsWithIds) {
         const toolName = tc.function.name
-        const toolArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments
+        let toolArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments
+        
+        // Inject base64 for upload_file to prevent LLM hallucination
+        if (toolName === 'upload_file' && attachments) {
+          const matchedAttachment = attachments.find(a => a.name === toolArgs.filename)
+          if (matchedAttachment) {
+            toolArgs.contentBase64 = matchedAttachment.contentBase64
+          }
+        }
+
         try {
           const actionResult = await executeBuilderAction(
             { name: toolName, arguments: toolArgs },
@@ -301,7 +322,7 @@ ${roleInfo}
 - **When a user asks to LIST or SEARCH, call list_resources or search_existing** and present the results clearly.
 - After creating something, show a summary with links (use the returned ID).
 - If the user asks about something you can't do, politely explain your scope.
-- For agent creation, derive name from user request. Use these archetypes as appropriate: analytics (data-analyst), coordinator, communication (customer-support), compliance, planner, research, document, developer, data-entry, agent-generation.
+- For agent creation, derive name from user request. Use these archetypes as appropriate: analytics (data-analyst), coordinator, communication (customer-support), compliance, planner, research, document, developer, data-entry, agent-generation, news-media (news/journalism), insurance (claims/underwriting), banking (finance/risk).
 - For agent LLM selection: use the default provider unless user specifies otherwise.
 
 ## RULES
@@ -361,7 +382,7 @@ function buildToolDefinitions(ctx, userRole = 'VIEWER') {
         properties: {
           name: { type: 'string', description: 'REQUIRED. A descriptive name derived from the user request. Example: "Malayalam News Reporter", "Support Agent", "Data Analyzer".' },
           description: { type: 'string', description: 'One-line summary of what the agent does. Optional — will default to name if omitted.' },
-          archetype: { type: 'string', enum: ['analytics', 'data-analyst', 'planner', 'research', 'compliance', 'document', 'communication', 'customer-support', 'coordinator', 'developer', 'data-entry', 'agent-generation'], description: 'Optional. Default: research for news/info agents, analytics for data, coordinator for multi-step.' },
+          archetype: { type: 'string', enum: ['analytics', 'data-analyst', 'planner', 'research', 'compliance', 'document', 'communication', 'customer-support', 'coordinator', 'developer', 'data-entry', 'agent-generation', 'news-media', 'insurance', 'banking'], description: 'Optional. Default: research for news/info agents, analytics for data, coordinator for multi-step, insurance for claims, banking for finance.' },
           systemPrompt: { type: 'string', description: 'Optional detailed instructions. Default: auto-generated from name+description.' },
           autonomyLevel: { type: 'string', enum: ['SUPERVISED', 'GUARDED', 'AUTONOMOUS'], description: 'Optional. Default: SUPERVISED.' },
           llmProvider: { type: 'string', description: `Optional. Available: ${ctx.providers.join(', ') || 'none configured'}. Default: ${ctx.defaultProvider || 'none'}` },
@@ -418,6 +439,18 @@ function buildToolDefinitions(ctx, userRole = 'VIEWER') {
           description: { type: 'string', description: 'What kind of knowledge it contains' },
         },
         required: ['name'],
+      },
+    })
+    tools.push({
+      name: 'upload_file',
+      description: 'Upload an attached file to a Knowledge Base.',
+      parameters: {
+        type: 'object',
+        properties: {
+          kbId: { type: 'string', description: 'ID of the Knowledge Base to upload to.' },
+          filename: { type: 'string', description: 'Name of the attached file to upload.' },
+        },
+        required: ['kbId', 'filename'],
       },
     })
   }
@@ -499,12 +532,18 @@ async function executeBuilderAction(toolCall, { tenantId, userId, userRole = 'VI
       // Auto-derive defaults for optional fields the LLM may omit
       const agentName = parsedArgs.name
       const agentDesc = parsedArgs.description || `Agent for: ${agentName}`
-      const agentArchetype = parsedArgs.archetype || inferArchetype(agentName, agentDesc)
+      // LLM may hallucinate "none" — always infer from name/desc if so
+      const agentArchetype = (parsedArgs.archetype && parsedArgs.archetype !== 'none')
+        ? parsedArgs.archetype
+        : inferArchetype(agentName, agentDesc)
 
       // ── Generate rich archetype-specific system prompt ────────────────────
-      // Use the shared helper instead of the bare "You are X" default.
-      const systemPrompt = parsedArgs.systemPrompt
-        || generateAgentSystemPrompt(agentName, agentDesc, agentArchetype)
+      // LLM may pass a bare "an AI agent" prompt — ignore and auto-generate
+      const isGenericPrompt = parsedArgs.systemPrompt
+        && (parsedArgs.systemPrompt.includes('an AI agent') || parsedArgs.systemPrompt.length < 80)
+      const systemPrompt = (!isGenericPrompt && parsedArgs.systemPrompt)
+        ? parsedArgs.systemPrompt
+        : await generateAgentSystemPrompt(agentName, agentDesc, agentArchetype, tenantId)
 
       // ── Derive autonomy level from archetype ──────────────────────────────
       const AUTONOMOUS_ARCHETYPES = new Set(['coordinator', 'planner', 'agent-generation', 'orchestrator'])
@@ -610,6 +649,27 @@ async function executeBuilderAction(toolCall, { tenantId, userId, userRole = 'VI
       }
     }
 
+    case 'upload_file': {
+      if (!canCreateKB) return permDenied('knowledge bases')
+      if (!parsedArgs.kbId) return { success: false, error: 'Knowledge base ID is required.' }
+      if (!parsedArgs.filename || !parsedArgs.contentBase64) return { success: false, error: 'Filename and valid attachment are required.' }
+      const { uploadFileToKnowledgeBase } = await import('./knowledge.service.js')
+      
+      const buffer = Buffer.from(parsedArgs.contentBase64, 'base64')
+      const doc = await uploadFileToKnowledgeBase({
+        tenantId,
+        kbId: parsedArgs.kbId,
+        file: { originalname: parsedArgs.filename, buffer },
+        uploadedBy: userId,
+      })
+      return {
+        resourceType: 'file',
+        id: doc.id,
+        name: doc.title || doc.filename,
+        url: `/dashboard/knowledge/${parsedArgs.kbId}`,
+      }
+    }
+
     case 'create_trigger': {
       if (!canCreateTrigger) return permDenied('triggers')
       if (!parsedArgs.workflowId) {
@@ -695,11 +755,17 @@ function inferArchetype(name, description) {
   const text = `${name} ${description}`.toLowerCase()
   // These map directly to scope preset keys
   if (/create.*(agent|workflow|trigger)|meta.?agent|oversee|orchestrat.*agent|agent.*generat/i.test(text)) return 'agent-generation'
-  if (/news|headline|article|feed|rss|daily|weekly|research|summar/i.test(text)) return 'research'
-  if (/data|analy|sql|chart|graph|dash|metric|statistic|insight|engineer|civil|structural|architect|design|model|calc|simulation|knowledge.graph|ontology|rag|retriev|vector.search|embedding|semantic|entity/i.test(text)) return 'analytics'
+  if (/news|headline|article|feed|rss|daily|weekly|research|summar|media|journalis|press|reporter/i.test(text)) return 'news-media'
+  if (/medical|clinical|healthcare|patient|drug|pharma|diagnos|pathology|radiology|health.*insur|claim.*(health|medical)/i.test(text)) return 'medical'
+  if (/insurance|claim|underwrit|actuarial|policy.*(cover|premium|deductible)|loss.*ratio/i.test(text)) return 'insurance'
+  if (/bank|fintech|financial|finance|kyc|aml|transaction.*monitor|credit.*(scor|assess)|loan|mortgage|wire.*transfer|swift|compliance.*(finance|bank)/i.test(text)) return 'banking'
+  if (/physics|chemistry|chemical|biology|genetic|dna|genom|bioinformatic|molecule|molecular|quantum|spectroscopy|math\b|mathematic/i.test(text)) return 'scientific'
+  if (/data\b|analytics|analy(sis|tics)|sql|chart|graph|dash(board)?|metric|statistic|insight|knowledge.graph|ontology|rag|retriev|vector.search|embedding|semantic|entity/i.test(text)) return 'analytics'
   if (/message|chat|notif|alert|slack|email|whatsapp|telegram|social|support|customer/i.test(text)) return 'communication'
   if (/browser|automation|data.entry|form.*(fill|entry)|scrap|type.*into|click.*button|navigate.*web/i.test(text)) return 'data-entry'
   if (/code|program|develop|debug|refactor|git|pr|pull.request|commit|build.*app|(write|fix).*code/i.test(text)) return 'developer'
+  if (/civil|structural|mechanical|engineering|engineer|beam|column|load|stress|strain|truss|cad|autocad/i.test(text)) return 'engineering'
+  if (/iot|embedded|sensor|arduino|mqtt|telemetry|firmware|microcontroller|modbus|plc|scada/i.test(text)) return 'iot'
   if (/workflow|orchestrat|pipeline|multi.?step|chain|approval/i.test(text)) return 'coordinator'
   if (/doc|pdf|template|write|draft|content|blog/i.test(text)) return 'document'
   if (/compliance|audit|policy|legal|regulat|grc|risk|finance/i.test(text)) return 'compliance'

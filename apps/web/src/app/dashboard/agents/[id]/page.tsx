@@ -72,6 +72,9 @@ export default function AgentDetailPage() {
 
   // Skill Modal State
   const [showSkillModal, setShowSkillModal] = useState(false)
+  // Worker Configuration display state (collapsible sections)
+  const [showSystemPrompt, setShowSystemPrompt] = useState(true)
+  const [showKnowledge, setShowKnowledge] = useState(false)
   const [newSkill, setNewSkill] = useState({ type: 'nl', name: '', description: '', instruction: '', code: '', url: '', method: 'GET', headers: '{\n  "Content-Type": "application/json"\n}', bodyTemplate: '', language: 'javascript' })
   const [testInput, setTestInput] = useState('{}')
   const [testResult, setTestResult] = useState<any>(null)
@@ -94,6 +97,27 @@ export default function AgentDetailPage() {
   // System prompt preview
   const [promptPreview, setPromptPreview] = useState<any>(null)
   const [loadingPromptPreview, setLoadingPromptPreview] = useState(false)
+  const [promptMode, setPromptMode] = useState<'full' | 'local' | 'summarised'>('full')
+  const [compressedPreview, setCompressedPreview] = useState<any>(null)
+  const [localPreview, setLocalPreview] = useState<any>(null)
+  const [loadingCompressed, setLoadingCompressed] = useState(false)
+  const [loadingLocal, setLoadingLocal] = useState(false)
+  const [savingPromptMode, setSavingPromptMode] = useState(false)
+
+  // AI Prompt & Guardrail Refiner
+  const [refineScenario, setRefineScenario] = useState('')
+  const [refiningPrompt, setRefiningPrompt] = useState(false)
+  const [refineResult, setRefineResult] = useState<any>(null)
+  const [applyingRefine, setApplyingRefine] = useState(false)
+  const [cloneModalOpen, setCloneModalOpen] = useState(false)
+  const [cloneName, setCloneName] = useState('')
+  const [cloningAgent, setCloningAgent] = useState(false)
+
+  // Agent Memory (long-term entity + episodic)
+  const [agentMemory, setAgentMemory] = useState<any>({ entityMemory: [], episodicMemory: [] })
+  const [loadingMemory, setLoadingMemory] = useState(false)
+  const [clearingMemory, setClearingMemory] = useState(false)
+  const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null)
 
   const BUILTIN_TOOLS = [
     { id: 'http_request', name: 'HTTP Request', description: 'Make HTTP requests to any URL' },
@@ -105,6 +129,16 @@ export default function AgentDetailPage() {
     { id: 'delegate_task', name: 'Delegate Task', description: 'Delegate subtasks to other internal agents' },
     { id: 'browser_use', name: 'Browser Use', description: 'Control a real web browser' },
     { id: 'publish_dashboard_report', name: 'Publish Report', description: 'Publish dynamic HTML reports to dashboard' },
+    // ML Service tools — optional, require ML_SERVICE_URL on the API server
+    { id: 'ml_transcribe', name: 'ML: Transcribe Audio', description: 'Speech-to-text via Whisper (requires ML service)' },
+    { id: 'ml_sentiment',  name: 'ML: Sentiment Analysis', description: 'FinBERT financial/general sentiment (requires ML service)' },
+    { id: 'ml_entities',   name: 'ML: Entity Extraction', description: 'BERT named entity recognition (requires ML service)' },
+    { id: 'ml_classify',   name: 'ML: Zero-Shot Classify', description: 'BART zero-shot text classification (requires ML service)' },
+    { id: 'ml_ocr',           name: 'ML: Image OCR',            description: 'TrOCR image text extraction (requires ML service)' },
+    { id: 'ml_parse_document', name: 'ML: Parse Document',        description: 'Donut invoice/receipt/form structured extraction (requires ML service)' },
+    { id: 'ml_forecast',       name: 'ML: Time-Series Forecast',  description: 'Prophet demand/sales forecasting with confidence intervals (requires ML service)' },
+    { id: 'ml_anomaly_detect', name: 'ML: Anomaly Detection',     description: 'Isolation Forest outlier detection on tabular data (requires ML service)' },
+    { id: 'ml_image_search',   name: 'ML: Image-Text Similarity', description: 'CLIP image-text matching and visual search (requires ML service)' },
   ]
 
   const wsRef = useRef<WebSocket | null>(null)
@@ -188,6 +222,24 @@ export default function AgentDetailPage() {
       }).catch(() => {})
     }
   }, [agent?.llm_provider, tenantId])
+
+  // Load agent memory (long-term entity + episodic) — refreshed whenever the
+  // page mounts or the agent changes.
+  const loadAgentMemory = useCallback(async () => {
+    if (!tenantId) return
+    setLoadingMemory(true)
+    try {
+      const res = await api.getAgentMemory(tenantId, agentId)
+      const d = res?.data || res || {}
+      setAgentMemory({ entityMemory: d.entityMemory || [], episodicMemory: d.episodicMemory || [] })
+    } catch {
+      setAgentMemory({ entityMemory: [], episodicMemory: [] })
+    } finally {
+      setLoadingMemory(false)
+    }
+  }, [tenantId, agentId])
+
+  useEffect(() => { loadAgentMemory() }, [loadAgentMemory])
 
   // Auto-scroll trace to bottom — only if user hasn't manually scrolled up.
   // When the user scrolls away from the bottom, auto-scroll is paused so they
@@ -367,7 +419,11 @@ export default function AgentDetailPage() {
     if (task && traceEvents.length === 0) {
       const reconstructed: TraceEvent[] = []
       if (task.plan) {
-        reconstructed.push({ type: 'plan_ready', phase: 'planning', plan: task.plan.content } as any)
+        // Plan can be stored as { content: '...' } (new format) or { steps: '...' } (old placeholder)
+        const planText = typeof task.plan === 'object'
+          ? (task.plan.content || task.plan.steps || JSON.stringify(task.plan))
+          : task.plan
+        reconstructed.push({ type: 'plan_ready', plan: planText } as any)
       }
       if (task.actions && Array.isArray(task.actions)) {
         task.actions.forEach((act: any) => {
@@ -375,6 +431,10 @@ export default function AgentDetailPage() {
           // Actions store { output: { success, ... } } — read output directly
           reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: act.output?.success, output: act.output } as any)
         })
+      }
+      // Show the error for FAILED tasks loaded from history
+      if (task.error || task.status === 'FAILED') {
+        reconstructed.push({ type: 'failed', error: task.error || 'Task failed with no error details' } as any)
       }
       if (reconstructed.length > 0) {
         setTraceEvents(reconstructed)
@@ -405,7 +465,8 @@ export default function AgentDetailPage() {
       const updated = await api.updateAgent(tenantId, agentId, {
         name: agent.name, description: agent.description, systemPrompt: agent.system_prompt,
         autonomyLevel: agent.autonomy_level, llmProvider: agent.llm_provider,
-        llmModel: agent.llm_model, confidenceThreshold: agent.confidence_threshold
+        llmModel: agent.llm_model, confidenceThreshold: agent.confidence_threshold,
+        archetype: agent.archetype
       })
       // Fetch the full agent again to get the updated KB list
       const freshAgent = await api.getAgent(tenantId, agentId)
@@ -432,12 +493,112 @@ export default function AgentDetailPage() {
     if (!tenantId || !agentId) return
     setLoadingPromptPreview(true)
     try {
-      const res = await api.previewAgentPrompt(tenantId, agentId)
+      const res = await api.previewAgentPrompt(tenantId, agentId, goal)
       setPromptPreview(res)
     } catch (err: any) {
       toast('error', 'Failed to load prompt preview', err.message)
     } finally {
       setLoadingPromptPreview(false)
+    }
+  }
+
+  // Teach the agent from a scenario: refine its System Instructions + Goal, then
+  // show a preview for the user to review before applying (approve/reject).
+  async function refinePrompt(scenario?: string) {
+    const sc = (scenario || refineScenario || '').trim()
+    if (!sc) return toast('error', 'Enter a scenario first', 'Describe the goal or scenario you want to teach the agent.')
+    if (!tenantId || !agentId) return
+    setRefiningPrompt(true)
+    setRefineResult(null) // clear any previous preview
+    try {
+      const res = await api.refineAgentPrompt(tenantId, agentId, {
+        scenario: sc,
+        systemPrompt: agent.system_prompt,
+        goal: sc // pass the current goal for refinement too
+      })
+      const refined = res?.data || res
+      if (!refined?.updatedSystemPrompt) throw new Error('No updated prompt returned')
+
+      // Show preview — do NOT auto-save. User must approve.
+      setRefineResult(refined)
+      if (refined.usedFallback) {
+        toast('info', 'Preview ready (fallback)', refined.summary || 'Review the proposed changes below.')
+      } else {
+        toast('success', 'Preview ready', refined.summary || 'Review the proposed changes, then Approve or Reject.')
+      }
+    } catch (err: any) {
+      toast('error', 'Refine failed', err.message)
+    } finally {
+      setRefiningPrompt(false)
+    }
+  }
+
+  // User approves the refined changes → save them.
+  async function approveRefine() {
+    if (!refineResult || !tenantId || !agentId) return
+    setApplyingRefine(true)
+    try {
+      await api.updateAgent(tenantId, agentId, { systemPrompt: refineResult.updatedSystemPrompt })
+      setAgent((a: any) => ({ ...a, system_prompt: refineResult.updatedSystemPrompt }))
+      // Copy the refined goal into the execution box for easy re-use
+      if (refineResult.refinedGoal) {
+        setGoal(refineResult.refinedGoal)
+        setAutoLoadedGoal(false)
+      }
+      toast('success', 'Agent updated & saved', 'System instructions and guardrails applied.')
+      setRefineResult(null)
+      setRefineScenario('')
+    } catch (err: any) {
+      toast('error', 'Save failed', err.message)
+    } finally {
+      setApplyingRefine(false)
+    }
+  }
+
+  // User rejects the proposed changes.
+  function rejectRefine() {
+    setRefineResult(null)
+    toast('info', 'Changes discarded', 'The agent was not modified.')
+  }
+
+  // Open the clone modal — prefill with a suggested name.
+  function cloneFromRefine() {
+    if (!refineResult || !agent) return
+    setCloneName(`${agent.name || 'Agent'} (refined)`)
+    setCloneModalOpen(true)
+  }
+
+  // Create a new agent cloned from the current one with refined prompt.
+  async function confirmCloneAgent() {
+    if (!refineResult || !tenantId || !cloneName.trim()) return
+    setCloningAgent(true)
+    try {
+      const body = {
+        name: cloneName.trim(),
+        description: agent.description || '',
+        archetype: agent.archetype || 'generalist',
+        systemPrompt: refineResult.updatedSystemPrompt,
+        autonomyLevel: agent.autonomy_level || 'SUPERVISED',
+      }
+      const res = await api.createAgent(tenantId, body)
+      const newAgent = res?.data || res
+      const newId = newAgent?.id || newAgent?.agent?.id
+      toast('success', 'Agent cloned', `New agent "${cloneName.trim()}" created.`)
+
+      // Close modal and clear refine state
+      setCloneModalOpen(false)
+      setCloneName('')
+      setRefineResult(null)
+      setRefineScenario('')
+
+      // Navigate to the new agent if we have an ID
+      if (newId) {
+        router.push(`/dashboard/agents/${newId}`)
+      }
+    } catch (err: any) {
+      toast('error', 'Clone failed', err.message)
+    } finally {
+      setCloningAgent(false)
     }
   }
 
@@ -724,13 +885,13 @@ export default function AgentDetailPage() {
               { label: 'Agents', href: '/dashboard/agents' },
               { label: agent.name },
             ]} />
-            <h1 className="page-title">{agent.name}</h1>
+            <h1 className="page-title" style={{ background: 'linear-gradient(135deg, #256329 0%, #3f8a43 45%, #0d9488 100%)', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }}>{agent.name}</h1>
             <p className="page-sub">Configure agent properties and test autonomous goal execution</p>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <span className={`badge badge-${agent.status.toLowerCase()}`}>{agent.status}</span>
-          {agent.archetype && <span className="badge" style={{ backgroundColor: 'var(--blue-light)', color: 'var(--blue-dark)', fontSize: 12, fontWeight: 600 }}>{agent.archetype}</span>}
+          {agent.archetype && <span className="badge" style={{ backgroundColor: 'rgba(139,92,246,0.12)', color: '#6d28d9', border: '1px solid rgba(139,92,246,0.3)', fontSize: 12, fontWeight: 700 }}>{agent.archetype}</span>}
           {agent.status === 'DRAFT' && <button className="btn btn-primary btn-sm" onClick={activate}>Activate Agent</button>}
           <button 
             className={`btn btn-sm ${deleteState === 1 ? 'btn-primary' : 'btn-secondary'}`} 
@@ -747,20 +908,66 @@ export default function AgentDetailPage() {
         {/* Left Column: Properties */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24, minHeight: 0, overflowY: 'auto' }}>
           <div className="card" style={{ padding: 24 }}>
-            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Worker Configuration</h2>
+            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #3f8a43, #68b36c)', display: 'inline-block' }} />Worker Configuration</h2>
             <form onSubmit={updateAgent} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <div className="form-group">
-                <label className="form-label">Worker Name</label>
-                <input className="input" value={agent.name} onChange={e => setAgent({ ...agent, name: e.target.value })} required />
+              {/* ── Identity ─────────────────────────────────────────────── */}
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(63,138,67,0.12)', color: '#256329', border: '1px solid rgba(63,138,67,0.25)' }}>🧍 Identity</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <div className="form-group">
+                  <label className="form-label">Worker Name</label>
+                  <input className="input" value={agent.name} onChange={e => setAgent({ ...agent, name: e.target.value })} required />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Worker Description</label>
+                  <input className="input" value={agent.description || ''} onChange={e => setAgent({ ...agent, description: e.target.value })} />
+                </div>
               </div>
               <div className="form-group">
-                <label className="form-label">Worker Description</label>
-                <input className="input" value={agent.description || ''} onChange={e => setAgent({ ...agent, description: e.target.value })} />
+                <label className="form-label">Archetype</label>
+                <select className="input" value={agent.archetype || ''} onChange={e => setAgent({ ...agent, archetype: e.target.value })}>
+                  <option value="">-- Select archetype --</option>
+                  <option value="none">⚪ None — No template, user-defined behaviour only</option>
+                  <option value="data-analyst">📊 Data Analyst — SQL queries &amp; dashboards</option>
+                  <option value="research">🔬 Research — Web research &amp; intelligence gathering</option>
+                  <option value="scientific">🧪 Scientific — Physics, chemistry, biology, math &amp; simulations</option>
+                  <option value="medical">🏥 Medical — Clinical literature, drug info, healthcare data</option>
+                  <option value="coordinator">🎯 Coordinator — Decompose &amp; delegate to other agents</option>
+                  <option value="agent-generation">🏗️ Agent Generation — Create &amp; manage other agents</option>
+                  <option value="developer">💻 Developer — Code, repos, CI/CD</option>
+                  <option value="engineering">🏗️ Engineering — Civil, structural, mechanical design &amp; calcs</option>
+                  <option value="iot">📡 IoT — Sensor data, devices, embedded systems</option>
+                  <option value="data-entry">🌐 Data Entry — Web automation &amp; form filling</option>
+                  <option value="customer-support">💬 Customer Support — Messaging &amp; notifications</option>
+                  <option value="planner">📋 Planner — Project planning &amp; task management</option>
+                  <option value="compliance">🔒 Compliance — Audit &amp; regulatory review</option>
+                  <option value="document">📄 Document — Content &amp; report generation</option>
+                  <option value="banking">🏦 Banking — Financial services, risk &amp; compliance</option>
+                  <option value="insurance">🛟 Insurance — Claims, policies &amp; underwriting</option>
+                  <option value="news-media">📰 News &amp; Media — Journalism, monitoring &amp; articles</option>
+                  <option value="generalist">🤖 Generalist — Versatile multi-purpose agent</option>
+                </select>
+                <p className="form-hint" style={{ marginTop: 6 }}>
+                  Determines the agent's default role, behaviour, and system prompt template.
+                  Use <strong>Research</strong> for web-based tasks, <strong>Data Analyst</strong> for SQL/databases,
+                  <strong>Developer</strong> for coding work.
+                </p>
               </div>
-              <div className="form-group">
-                <label className="form-label">System instructions (Guardrails & Constraints)</label>
-                <textarea className="input" rows={6} value={agent.system_prompt || ''} onChange={e => setAgent({ ...agent, system_prompt: e.target.value })} />
+
+              {/* ── Intelligence ────────────────────────────────────────── */}
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(139,92,246,0.12)', color: '#6d28d9', border: '1px solid rgba(139,92,246,0.25)' }}>🧠 Intelligence</div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                <button type="button" onClick={() => setShowSystemPrompt(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(139,92,246,0.06)', border: 'none', cursor: 'pointer', color: '#5b21b6', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #8b5cf6' }}>
+                  <span>📜 System instructions (Guardrails & Constraints)</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{showSystemPrompt ? '▾ Hide' : `▸ Show (${agent.system_prompt?.length || 0} chars)`}</span>
+                </button>
+                {showSystemPrompt && (
+                  <div style={{ padding: '0 14px 14px' }}>
+                    <textarea className="input" rows={6} value={agent.system_prompt || ''} onChange={e => setAgent({ ...agent, system_prompt: e.target.value })} />
+                  </div>
+                )}
               </div>
+              {/* ── Runtime ────────────────────────────────────────────── */}
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(59,130,246,0.12)', color: '#1d4ed8', border: '1px solid rgba(59,130,246,0.25)' }}>⚙️ Runtime</div>
               <div className="form-group">
                 <label className="form-label">LLM Provider &amp; Model</label>
                 {Object.keys(llmProviders).length === 0 ? (
@@ -771,15 +978,25 @@ export default function AgentDetailPage() {
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <select
                       className="input"
-                      value={agent.llm_provider || ''}
+                      value={agent.llm_model === 'auto' || !agent.llm_model ? 'auto' : (agent.llm_provider || '')}
                       onChange={e => {
                         const p = e.target.value
-                        const suggested = llmProviders[p]?.model || agent.llm_model
+                        if (p === 'auto') {
+                          // System default: use the tenant's Settings default provider + model at runtime
+                          setAgent({ ...agent, llm_provider: null, llm_model: 'auto' })
+                          return
+                        }
+                        // Prefer the provider's saved model; otherwise use current model
+                        // (but not 'auto' — that's a sentinel, not a real model)
+                        const providerModel = llmProviders[p]?.model
+                        const currentModel = agent.llm_model === 'auto' ? '' : agent.llm_model
+                        const suggested = providerModel || currentModel
                         setAgent({ ...agent, llm_provider: p, llm_model: suggested })
                       }}
                     >
+                      <option value="auto">⚙️ System default (from Settings)</option>
                       {/* Preserve the agent's current provider even if it was removed from settings */}
-                      {agent.llm_provider && !llmProviders[agent.llm_provider] && (
+                      {agent.llm_provider && agent.llm_model !== 'auto' && !llmProviders[agent.llm_provider] && (
                         <option value={agent.llm_provider}>{PROVIDER_LABELS[agent.llm_provider] || agent.llm_provider} (not configured)</option>
                       )}
                       {Object.keys(llmProviders).map(pid => (
@@ -787,6 +1004,12 @@ export default function AgentDetailPage() {
                       ))}
                     </select>
                     {(() => {
+                      // System default — no model to choose, provider not set
+                      if (agent.llm_model === 'auto' && !agent.llm_provider) {
+                        return (
+                          <input className="input" value="Using system default" disabled style={{ opacity: 0.6 }} />
+                        )
+                      }
                       const completedCustom = customModels.filter(cm => cm.status === 'COMPLETED')
                       const hasOllamaModels = agent.llm_provider === 'ollama' && (ollamaModels.length > 0 || completedCustom.length > 0)
                       if (hasOllamaModels) {
@@ -820,68 +1043,82 @@ export default function AgentDetailPage() {
                   value={agent.autonomy_level || 'SUPERVISED'}
                   onChange={e => setAgent({ ...agent, autonomy_level: e.target.value })}
                 >
-                  <option value="SUPERVISED">🔒 SUPERVISED — All marked tools require approval</option>
-                  <option value="GUARDED">🛡️ GUARDED — Only high-risk tools require approval</option>
+                  <option value="SUPERVISED">🔒 SUPERVISED — Approve before sensitive actions</option>
+                  <option value="GUARDED">🛡️ GUARDED — Only approve high-risk tools</option>
                   <option value="AUTONOMOUS">🚀 AUTONOMOUS — No approval required</option>
                 </select>
                 <p className="form-hint" style={{ marginTop: 6 }}>
                   {agent.autonomy_level === 'AUTONOMOUS' ? (
-                    'Agents run without any human oversight. Use with caution in production environments.'
+                    'Agent runs all tools without any human oversight. Use only for safe, repetitive tasks.'
                   ) : agent.autonomy_level === 'GUARDED' ? (
-                    'Only SSH exec, Docker run, HTTP requests and file downloads will require human approval.'
+                    'Approval required for: SSH exec, Docker run, HTTP requests, file downloads. Safe tools run freely.'
                   ) : (
-                    'Every tool marked as "requires approval" in the Capabilities section will pause execution until a human approves.'
+                    'Approval required for: HTTP requests, shell/docker exec, browser, publish, delegate, write artifacts, SQL writes. Best for first runs and critical workflows.'
                   )}
                 </p>
               </div>
-              <div className="form-group">
-                <label className="form-label">Attached Knowledge Bases</label>
-                {kbs.length === 0 ? (
-                  <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge bases found. <Link href="/dashboard/knowledge" style={{ color: 'var(--green-dark)' }}>Create one</Link></div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
-                    {kbs.map(kb => {
-                      const isSelected = selectedKBs.includes(kb.id)
-                      return (
-                        <label key={kb.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
-                          <input type="checkbox" checked={isSelected} onChange={() => {
-                            setSelectedKBs(prev => isSelected ? prev.filter(i => i !== kb.id) : [...prev, kb.id])
-                          }} style={{ accentColor: 'var(--green)' }} />
-                          <strong>{kb.name}</strong> ({kb.document_count || 0} docs)
-                        </label>
-                      )
-                    })}
+              {/* ── Knowledge ───────────────────────────────────────────── */}
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(245,158,11,0.14)', color: '#b45309', border: '1px solid rgba(245,158,11,0.3)' }}>📚 Knowledge</div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+                <button type="button" onClick={() => setShowKnowledge(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(245,158,11,0.07)', border: 'none', cursor: 'pointer', color: '#92400e', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #f59e0b' }}>
+                  <span>📎 Attached knowledge</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{showKnowledge ? '▾ Hide' : `▸ Show (${selectedKBs.length} KBs, ${selectedGraphs.length} graphs)`}</span>
+                </button>
+                {showKnowledge && (
+                  <div style={{ padding: '0 14px 14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    <div className="form-group">
+                      <label className="form-label">Attached Knowledge Bases</label>
+                      {kbs.length === 0 ? (
+                        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge bases found. <Link href="/dashboard/knowledge" style={{ color: 'var(--green-dark)' }}>Create one</Link></div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                          {kbs.map(kb => {
+                            const isSelected = selectedKBs.includes(kb.id)
+                            return (
+                              <label key={kb.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                                <input type="checkbox" checked={isSelected} onChange={() => {
+                                  setSelectedKBs(prev => isSelected ? prev.filter(i => i !== kb.id) : [...prev, kb.id])
+                                }} style={{ accentColor: 'var(--green)' }} />
+                                <strong>{kb.name}</strong> ({kb.document_count || 0} docs)
+                              </label>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    <div className="form-group">
+                      <label className="form-label">Attached Knowledge Graphs</label>
+                      {graphs.length === 0 ? (
+                        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge graphs found. <Link href="/dashboard/knowledge?tab=graphs" style={{ color: 'var(--purple, #8b5cf6)' }}>Create one</Link></div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                          {graphs.map(g => {
+                            const isSelected = selectedGraphs.includes(g.id)
+                            return (
+                              <label key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+                                <input type="checkbox" checked={isSelected} onChange={() => {
+                                  setSelectedGraphs(prev => isSelected ? prev.filter(i => i !== g.id) : [...prev, g.id])
+                                }} style={{ accentColor: 'var(--purple, #8b5cf6)' }} />
+                                <strong>{g.name}</strong> ({g.entity_count || 0} entities, {g.graph_kind})
+                              </label>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
-              <div className="form-group">
-                <label className="form-label">Attached Knowledge Graphs</label>
-                {graphs.length === 0 ? (
-                  <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge graphs found. <Link href="/dashboard/knowledge?tab=graphs" style={{ color: 'var(--purple, #8b5cf6)' }}>Create one</Link></div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
-                    {graphs.map(g => {
-                      const isSelected = selectedGraphs.includes(g.id)
-                      return (
-                        <label key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
-                          <input type="checkbox" checked={isSelected} onChange={() => {
-                            setSelectedGraphs(prev => isSelected ? prev.filter(i => i !== g.id) : [...prev, g.id])
-                          }} style={{ accentColor: 'var(--purple, #8b5cf6)' }} />
-                          <strong>{g.name}</strong> ({g.entity_count || 0} entities, {g.graph_kind})
-                        </label>
-                      )
-                    })}
-                  </div>
-                )}
+              <div style={{ position: 'sticky', bottom: 12, background: 'color-mix(in srgb, var(--surface) 90%, transparent)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, display: 'flex', justifyContent: 'flex-end', backdropFilter: 'blur(6px)' }}>
+                <button className="btn btn-primary" type="submit">Save Configuration</button>
               </div>
-              <button className="btn btn-primary" type="submit" style={{ alignSelf: 'flex-start' }}>Save Configuration</button>
             </form>
           </div>
 
           {/* Custom Skills Section */}
           <div className="card" style={{ padding: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 800 }}>Custom Skills</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #8b5cf6, #a78bfa)', display: 'inline-block' }} />Custom Skills</h2>
               <button className="btn btn-secondary btn-sm" onClick={() => setShowSkillModal(true)}>+ Add Skill</button>
             </div>
             {agent.skills?.length > 0 ? (
@@ -900,7 +1137,7 @@ export default function AgentDetailPage() {
                     {s.action_id === 'nl_instruction' && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#a855f7', display: 'inline-block' }}>Natural Language</div>}
                     {s.config?.language === 'python' && s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#3776AB', display: 'inline-block' }}>🐍 Python Script</div>}
                     {(!s.config?.language || s.config?.language === 'javascript') && s.config?.code && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--green-dark)', display: 'inline-block' }}>JS Script</div>}
-                    {s.config?.url && <div style={{ marginTop: 8, fontSize: 11, background: 'var(--surface)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: 'var(--blue)', display: 'inline-block' }}>API Endpoint</div>}
+                    {s.config?.url && <div style={{ marginTop: 8, fontSize: 11, background: 'rgba(59,130,246,0.1)', padding: '4px 8px', borderRadius: 4, fontFamily: 'monospace', color: '#1d4ed8', display: 'inline-block' }}>API Endpoint</div>}
                   </div>
                 ))}
               </div>
@@ -909,61 +1146,16 @@ export default function AgentDetailPage() {
             )}
           </div>
 
-          {/* System Prompt Preview */}
-          <div className="card" style={{ padding: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span>📋</span> System Prompt Preview
-              </h2>
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={loadPromptPreview}
-                disabled={loadingPromptPreview}
-                style={{ fontSize: 12 }}
-              >
-                {loadingPromptPreview ? '⟳ Loading...' : promptPreview ? '🔄 Refresh' : '🔍 Load Prompt'}
-              </button>
-            </div>
-            {promptPreview ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-muted)' }}>
-                  <span>📐 Archetype: <strong style={{ color: 'var(--text-secondary)' }}>{promptPreview.archetype || 'none'}</strong></span>
-                  <span>📝 Custom instructions: <strong style={{ color: promptPreview.hasCustomInstructions ? '#10b981' : 'var(--text-muted)' }}>{promptPreview.hasCustomInstructions ? 'Yes' : 'No'}</strong></span>
-                  <span>📊 ~{promptPreview.estimatedTokens} tokens</span>
-                  <span>📏 {promptPreview.charCount.toLocaleString()} chars</span>
-                </div>
-                <div style={{
-                  maxHeight: 400, overflowY: 'auto',
-                  background: '#0d1117', borderRadius: 8,
-                  padding: '14px 16px', border: '1px solid var(--border)',
-                }}>
-                  <pre style={{
-                    margin: 0, fontSize: 11, lineHeight: 1.7,
-                    color: '#c9d1d9', fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word'
-                  }}>
-                    {promptPreview.systemPrompt}
-                  </pre>
-                </div>
-                <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
-                  💡 This is the exact prompt sent to the LLM every time this agent executes a task. 
-                  Edit the agent's <strong>System instructions</strong> above to customise it.
-                </p>
-              </div>
-            ) : (
-              <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '24px 0' }}>
-                Click <strong>Load Prompt</strong> to see the full system prompt that will be sent to the LLM when this agent runs.
-              </div>
-            )}
-          </div>
-
           {/* ════════════════════════════════════════════════════════════════
              Tool Capabilities — scope which connectors, MCP servers, and
              built-in tools this agent is allowed to use.
              ════════════════════════════════════════════════════════════════ */}
           <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start' }}>
+            {/* ── LEFT: Tool scopes ─────────────────────────────────────────── */}
+            <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 800 }}>Tool Capabilities</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #3b82f6, #60a5fa)', display: 'inline-block' }} />Tool Capabilities</h2>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {agent?.archetype && (
                   <button className="btn btn-primary btn-sm" onClick={() => applyArchetypePresets(agent.archetype)} title={`Apply "${agent.archetype}" preset for this agent's archetype`} style={{ fontWeight: 700 }}>
@@ -1211,11 +1403,15 @@ export default function AgentDetailPage() {
             )}
           </div>
         </div>
+          </div>
+        </div>
 
-        {/* Right Column: Live Execution */}
+        {/* Right Column: Teach Agent + Live Execution */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24, minHeight: 0, overflowY: 'auto' }}>
+
+          {/* ─── Autonomous Execution card ─────────────────────────────── */}
           <div className="card" style={{ padding: 24 }}>
-            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16 }}>Autonomous Execution</h2>
+            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #f59e0b, #fbbf24)', display: 'inline-block' }} />Autonomous Execution</h2>
             <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 20 }}>
               Provide a high-level goal. The agent will plan, retrieve knowledge, call tools, and stream results live.
             </p>
@@ -1273,8 +1469,8 @@ export default function AgentDetailPage() {
               <div className="alert alert-warning">⚠ You must Activate this Agent before sending it goals.</div>
             )}
 
-            {/* Live streaming trace — always reserved to prevent layout jumps */}
-            <div style={{ marginTop: 8, minHeight: 200 }}>
+            {/* Live streaming trace — reserve space only while running to prevent layout jumps */}
+            <div style={{ marginTop: 8, minHeight: (running || task?.result || traceEvents.length > 0) ? 200 : 0 }}>
               {(traceEvents.length > 0 || running || task?.result) ? (
               <div className="animate-in">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
@@ -1339,8 +1535,11 @@ export default function AgentDetailPage() {
                       </div>
                     )
                     if (ev.type === 'failed') return (
-                      <div key={i} style={{ borderTop: '1px solid #1e293b', paddingTop: 10, color: '#ef4444', fontWeight: 700 }}>
-                        ✗ Task failed: {ev.error}
+                      <div key={i} style={{ borderTop: '1px solid #1e293b', paddingTop: 10 }}>
+                        <div style={{ color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>✗ Task failed</div>
+                        <div style={{ color: '#fca5a5', whiteSpace: 'pre-wrap', background: '#1a1219', borderRadius: 6, padding: '8px 10px', fontSize: 12, maxHeight: 300, overflowY: 'auto' }}>
+                          {ev.error}
+                        </div>
                       </div>
                     )
                     return null
@@ -1377,7 +1576,7 @@ export default function AgentDetailPage() {
           {/* Past Executions */}
           <div className="card" style={{ padding: 24, marginTop: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>Past Executions</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #0d9488, #2dd4bf)', display: 'inline-block' }} />Past Executions</h2>
               {pastTasks.length > 5 && (
                 <button
                   className="btn btn-secondary btn-sm"
@@ -1417,7 +1616,7 @@ export default function AgentDetailPage() {
                         title="Stop execution"
                       >⏹ STOP</button>
                     )}
-                     <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{t.goal}</div>
+                     <div style={{ fontWeight: 400, fontSize: 13, marginBottom: 6, lineHeight: 1.5 }}>{t.goal}</div>
                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                        <span className={`badge badge-${t.status.toLowerCase()}`}>{t.status}</span>
                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{new Date(t.created_at).toLocaleString()}</span>
@@ -1427,8 +1626,342 @@ export default function AgentDetailPage() {
               </div>
             )}
           </div>
+
+          {/* ─── Prompt Settings card ───────────────────────────────────────── */}
+          <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #7c3aed, #a78bfa)', display: 'inline-block' }} />📋 Prompt Settings</h2>
+              <button className="btn btn-secondary btn-sm" onClick={loadPromptPreview} disabled={loadingPromptPreview} style={{ fontSize: 12 }}>
+                {loadingPromptPreview ? '⟳ Loading...' : promptPreview ? '↻ Refresh' : '🔍 Load Preview'}
+              </button>
+            </div>
+
+            {/* Status: what gets sent on every run — always visible */}
+            <div style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 14, border: '1px solid var(--border)', marginBottom: 16, display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 6 }}>Sent to LLM each run</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{
+                    padding: '4px 12px', borderRadius: 20, fontSize: 13, fontWeight: 700,
+                    background: agent?.compress_system_prompt ? 'rgba(16,185,129,0.15)' : agent?.local_refine_prompt ? 'rgba(245,158,11,0.15)' : 'rgba(100,116,139,0.12)',
+                    color: agent?.compress_system_prompt ? '#10b981' : agent?.local_refine_prompt ? '#f59e0b' : 'var(--text-secondary)',
+                    border: `1px solid ${agent?.compress_system_prompt ? 'rgba(16,185,129,0.3)' : agent?.local_refine_prompt ? 'rgba(245,158,11,0.3)' : 'var(--border)'}`,
+                  }}>
+                    {agent?.compress_system_prompt ? '⚡ AI compressed' : agent?.local_refine_prompt ? '✂️ Local trimmed' : '📄 Full prompt'}
+                  </span>
+                  {agent?.chunked_prompt && (
+                    <span style={{ padding: '4px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700, background: 'rgba(167,139,250,0.15)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)' }}>
+                      🧩 Chunked delivery
+                    </span>
+                  )}
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {promptMode === 'local' && localPreview
+                      ? `~${localPreview.compressedTokens} tokens • saved ${localPreview.savedPct}%`
+                      : promptMode === 'summarised' && compressedPreview
+                      ? `~${compressedPreview.compressedTokens} tokens • saved ${compressedPreview.savedPct}%`
+                      : promptPreview ? `~${promptPreview.estimatedTokens} tokens` : ''}
+                  </span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Mode:</div>
+                <button
+                  className={`btn btn-sm ${agent?.compress_system_prompt ? 'btn-primary' : agent?.local_refine_prompt ? 'btn-warning' : 'btn-secondary'}`}
+                  style={{ fontSize: 11 }}
+                  disabled={savingPromptMode}
+                  title="Cycle: Full → ✂️ Local (instant, no LLM) → ⚡ AI (cached once) → Full"
+                  onClick={async () => {
+                    setSavingPromptMode(true)
+                    const isAI = !!agent?.compress_system_prompt
+                    const isLocal = !!agent?.local_refine_prompt && !isAI
+                    let nextAI = false, nextLocal = false
+                    if (!isAI && !isLocal) nextLocal = true
+                    else if (isLocal) nextAI = true
+                    try {
+                      await api.updateAgent(tenantId, agentId, { compressSystemPrompt: nextAI, localRefinePrompt: nextLocal })
+                      setAgent((a: any) => ({ ...a, compress_system_prompt: nextAI, local_refine_prompt: nextLocal }))
+                      toast('success', nextAI ? 'AI compression on' : nextLocal ? 'Local trim on' : 'Full prompt mode', '')
+                      if (nextLocal && !localPreview) {
+                        const r = await api.compressPrompt(tenantId, agentId, false, 'local', goal)
+                        setLocalPreview(r.data); setPromptMode('local')
+                      } else if (nextAI && !compressedPreview) {
+                        const r = await api.compressPrompt(tenantId, agentId, false, 'ai', goal)
+                        setCompressedPreview(r.data); setPromptMode('summarised')
+                      }
+                    } catch { toast('error', 'Failed to save', '') }
+                    finally { setSavingPromptMode(false) }
+                  }}
+                >
+                  {savingPromptMode ? '⟳' : agent?.compress_system_prompt ? '⚡ AI' : agent?.local_refine_prompt ? '✂️ Local' : '📄 Full'}
+                </button>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Delivery:</div>
+                <button
+                  className={`btn btn-sm ${agent?.chunked_prompt ? 'btn-primary' : 'btn-secondary'}`}
+                  style={{ fontSize: 11 }}
+                  disabled={savingPromptMode}
+                  title="Split by ## headings — LLM waits for all parts before acting"
+                  onClick={async () => {
+                    setSavingPromptMode(true)
+                    const next = !agent?.chunked_prompt
+                    try {
+                      await api.updateAgent(tenantId, agentId, { chunkedPrompt: next })
+                      setAgent((a: any) => ({ ...a, chunked_prompt: next }))
+                      toast('success', next ? 'Chunked delivery ON' : 'Single delivery', '')
+                    } catch { toast('error', 'Failed to save', '') }
+                    finally { setSavingPromptMode(false) }
+                  }}
+                >
+                  {agent?.chunked_prompt ? '🧩 Chunked' : '🧩 Single'}
+                </button>
+              </div>
+            </div>
+
+            {/* Preview tabs + text area */}
+            {promptPreview && (
+              <div style={{ display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }}>
+                {(['full', 'local', 'summarised'] as const).map(id => (
+                  <button key={id}
+                    className={`btn btn-sm ${promptMode === id ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 11 }}
+                    disabled={(id === 'local' && loadingLocal) || (id === 'summarised' && loadingCompressed)}
+                    onClick={async () => {
+                      setPromptMode(id)
+                      if (id === 'local' && !localPreview) {
+                        setLoadingLocal(true)
+                        try { const r = await api.compressPrompt(tenantId, agentId, false, 'local', goal); setLocalPreview(r.data) }
+                        catch { toast('error', 'Failed', '') } finally { setLoadingLocal(false) }
+                      }
+                      if (id === 'summarised' && !compressedPreview) {
+                        setLoadingCompressed(true)
+                        try { const r = await api.compressPrompt(tenantId, agentId, false, 'ai', goal); setCompressedPreview(r.data) }
+                        catch { toast('error', 'Failed', '') } finally { setLoadingCompressed(false) }
+                      }
+                    }}
+                  >
+                    {id === 'local' && loadingLocal ? '⟳' : id === 'summarised' && loadingCompressed ? '⟳' : id === 'full' ? '📄 Full' : id === 'local' ? '✂️ Local' : '⚡ AI'}
+                  </button>
+                ))}
+                {promptMode === 'local' && localPreview && <span style={{ fontSize: 11, color: '#f59e0b', marginLeft: 4 }}>saves {localPreview.savedPct}%</span>}
+                {promptMode === 'summarised' && compressedPreview && <span style={{ fontSize: 11, color: '#10b981', marginLeft: 4 }}>saves {compressedPreview.savedPct}%</span>}
+              </div>
+            )}
+            {promptPreview ? (
+              <div style={{ maxHeight: 340, overflowY: 'auto', background: '#0d1117', borderRadius: 8, padding: '12px 16px', border: '1px solid var(--border)' }}>
+                <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.6, color: '#c9d1d9', fontFamily: 'ui-monospace, monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {promptMode === 'local' && localPreview ? localPreview.compressedPrompt
+                    : promptMode === 'summarised' && compressedPreview ? compressedPreview.compressedPrompt
+                    : promptPreview.systemPrompt}
+                </pre>
+              </div>
+            ) : (
+              <div
+                style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '28px 0', border: '1px dashed var(--border)', borderRadius: 8, cursor: 'pointer' }}
+                onClick={loadPromptPreview}
+              >
+                🔍 Click Load Preview to see the prompt
+              </div>
+            )}
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5, margin: '10px 0 0' }}>
+              Mode cycles: 📄 <strong>Full</strong> → ✂️ <strong>Local</strong> (rule-based trim, no LLM call) → ⚡ <strong>AI</strong> (LLM compresses once, cached forever). Delivery: 🧩 <strong>Chunked</strong> splits by <code>##</code> headings — the LLM waits for all sections before acting.
+            </p>
+          </div>
+
+          {/* ─── Teach Agent card ──────────────────────────────────────── */}
+          <div className="card" style={{ padding: 24 }}>
+            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #ec4899, #f472b6)', display: 'inline-block' }} />🧑‍🏫 Teach This Agent</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+              Describe a new goal or scenario. The AI will refine your goal and update the agent's guardrails — you approve before anything is saved.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <textarea className="input" rows={3}
+                placeholder="e.g. When a user asks for a compliance audit, always check the latest SOC2 report first and cross-reference with internal policy docs."
+                value={refineScenario} onChange={e => setRefineScenario(e.target.value)}
+                disabled={agent.status !== 'ACTIVE' || refiningPrompt || applyingRefine} />
+
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!refineScenario.trim() || refiningPrompt || applyingRefine || agent.status !== 'ACTIVE'}
+                onClick={() => refinePrompt(refineScenario)}
+                style={{ fontWeight: 600, fontSize: 13 }}
+              >
+                {refiningPrompt ? '⟳ Refining...' : '✨ Refine Goal & Guardrails'}
+              </button>
+            </div>
+
+            {/* Refinement preview + Approve/Reject */}
+            {refineResult && (
+              <div style={{ marginTop: 16, border: '1px solid var(--green)', borderRadius: 8, padding: 14, background: 'var(--surface)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <strong style={{ fontSize: 13 }}>🔍 Review Proposed Changes</strong>
+                  <button className="btn btn-secondary btn-sm" onClick={rejectRefine}>✕ Reject</button>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Review below. Approve to update the agent, or reject to discard.</div>
+                {refineResult.summary && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{refineResult.summary}</div>}
+                {refineResult.usedFallback && (
+                  <div style={{ fontSize: 11, color: 'var(--text-warning, #d97706)', fontWeight: 600 }}>⚠ fallback (model didn't return structured output)</div>
+                )}
+                {refineResult.guardrails?.length > 0 && (
+                  <div style={{ fontSize: 12 }}>
+                    <strong style={{ display: 'block', marginBottom: 4 }}>Updated guardrails</strong>
+                    <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {refineResult.guardrails.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {refineResult.refinedGoal && (
+                  <div>
+                    <strong style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>✨ Refined Goal</strong>
+                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--bg-raised, #f8fafc)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, fontSize: 13, maxHeight: 120, overflowY: 'auto', lineHeight: 1.5 }}>{refineResult.refinedGoal}</div>
+                  </div>
+                )}
+                <div>
+                  <strong style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>Updated System Instructions</strong>
+                  <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--bg-raised, #f8fafc)', border: '1px solid var(--border)', borderRadius: 8, padding: 12, fontSize: 13, maxHeight: 200, overflowY: 'auto', lineHeight: 1.5 }}>{refineResult.updatedSystemPrompt}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={approveRefine}
+                    disabled={applyingRefine}
+                    style={{ flex: 1, fontWeight: 700, fontSize: 13 }}
+                  >
+                    {applyingRefine ? '⟳ Saving...' : '✅ Approve & Save'}
+                  </button>
+                  <button className="btn btn-secondary" onClick={cloneFromRefine} style={{ flex: 1, fontSize: 13 }}>
+                    📋 Clone as New Agent
+                  </button>
+                  <button className="btn btn-secondary" onClick={rejectRefine} style={{ flex: 1, fontSize: 13 }}>
+                    ✕ Reject
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ─── Agent Memory card ─────────────────────────────────────── */}
+          <div className="card" style={{ padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 4 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #10b981, #34d399)', display: 'inline-block' }} />🧠 Agent Memory
+              </h2>
+              {(agentMemory.entityMemory?.length > 0 || agentMemory.episodicMemory?.length > 0) && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ fontSize: 12, color: '#ef4444' }}
+                  disabled={clearingMemory}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: 'Clear all memory?',
+                      description: `This permanently deletes ${agentMemory.entityMemory?.length || 0} fact(s) and ${agentMemory.episodicMemory?.length || 0} past experience(s) for this agent. The agent will start fresh — this cannot be undone.`,
+                      confirmLabel: 'Clear All',
+                      variant: 'danger',
+                    })
+                    if (!ok) return
+                    setClearingMemory(true)
+                    try {
+                      await api.clearAgentMemory(tenantId, agentId)
+                      setAgentMemory({ entityMemory: [], episodicMemory: [] })
+                      toast('success', 'Memory cleared', 'All agent memory has been deleted.')
+                    } catch { toast('error', 'Failed', 'Could not clear memory.') }
+                    finally { setClearingMemory(false) }
+                  }}
+                >
+                  {clearingMemory ? '⟳ Clearing...' : '🗑️ Clear All Memory'}
+                </button>
+              )}
+            </div>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
+              What this agent remembers between tasks — facts it extracted from past runs and lessons from completed work.
+              Used automatically as context on future tasks.
+            </p>
+
+            {loadingMemory ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '16px 0', textAlign: 'center' }}>⟳ Loading memory...</div>
+            ) : agentMemory.entityMemory?.length === 0 && agentMemory.episodicMemory?.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '20px 0', border: '1px dashed var(--border)', borderRadius: 8 }}>
+                🫙 No memory yet — facts are stored automatically after each completed task.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 480, overflowY: 'auto', paddingRight: 6 }}>
+                {agentMemory.entityMemory?.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>📇 Facts &amp; Entities ({agentMemory.entityMemory.length})</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {agentMemory.entityMemory.map((m: any) => (
+                        <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', background: 'var(--surface)' }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, padding: '1px 7px', borderRadius: 999, background: 'rgba(16,185,129,0.15)', color: '#059669', textTransform: 'uppercase' }}>{m.entity_type}</span>
+                              <span style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-word' }}>{m.entity_name}</span>
+                            </div>
+                            {m.detail && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, wordBreak: 'break-word' }}>{m.detail}</div>}
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>seen {new Date(m.last_seen_at).toLocaleString?.() || ''}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: 11, flexShrink: 0, color: '#ef4444' }}
+                            disabled={deletingMemoryId === m.id}
+                            onClick={async () => {
+                              setDeletingMemoryId(m.id)
+                              try {
+                                await api.deleteAgentMemoryEntry(tenantId, agentId, m.id)
+                                setAgentMemory((prev: any) => ({ ...prev, entityMemory: prev.entityMemory.filter((e: any) => e.id !== m.id) }))
+                                toast('success', 'Deleted', 'Memory entry removed.')
+                              } catch { toast('error', 'Failed', 'Could not delete entry.') }
+                              finally { setDeletingMemoryId(null) }
+                            }}
+                          >
+                            {deletingMemoryId === m.id ? '…' : '✕'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {agentMemory.episodicMemory?.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>🎓 Past Experiences ({agentMemory.episodicMemory.length})</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {agentMemory.episodicMemory.map((m: any) => (
+                        <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', background: 'var(--surface)' }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, padding: '1px 7px', borderRadius: 999, background: m.outcome === 'SUCCESS' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)', color: m.outcome === 'SUCCESS' ? '#34d399' : '#f87171', textTransform: 'uppercase' }}>{m.outcome || 'DONE'}</span>
+                              <span style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-word' }}>{m.goal_summary}</span>
+                            </div>
+                            {m.result_summary && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, wordBreak: 'break-word' }}>{m.result_summary}</div>}
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{new Date(m.created_at).toLocaleString?.() || ''}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: 11, flexShrink: 0, color: '#ef4444' }}
+                            disabled={deletingMemoryId === m.id}
+                            onClick={async () => {
+                              setDeletingMemoryId(m.id)
+                              try {
+                                await api.deleteAgentEpisodicMemoryEntry(tenantId, agentId, m.id)
+                                setAgentMemory((prev: any) => ({ ...prev, episodicMemory: prev.episodicMemory.filter((e: any) => e.id !== m.id) }))
+                                toast('success', 'Deleted', 'Past experience removed.')
+                              } catch { toast('error', 'Failed', 'Could not delete entry.') }
+                              finally { setDeletingMemoryId(null) }
+                            }}
+                          >
+                            {deletingMemoryId === m.id ? '…' : '✕'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -1750,7 +2283,41 @@ export default function AgentDetailPage() {
           </div>
         </div>
       )}
+      {/* Clone Agent Modal */}
+      {cloneModalOpen && (
+        <div className="modal-overlay" onClick={() => setCloneModalOpen(false)}>
+          <div className="modal" style={{ maxWidth: 440 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 style={{ margin: 0, fontSize: 16 }}>📋 Clone as New Agent</h3>
+            </div>
+            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>
+                This will create a new agent with the refined system instructions and goal.
+                The current agent will not be modified.
+              </p>
+              <div className="form-group">
+                <label className="form-label">New Agent Name</label>
+                <input
+                  className="input"
+                  value={cloneName}
+                  onChange={e => setCloneName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') confirmCloneAgent() }}
+                  autoFocus
+                  maxLength={80}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setCloneModalOpen(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={confirmCloneAgent} disabled={!cloneName.trim() || cloningAgent}>
+                {cloningAgent ? '⟳ Creating...' : 'Create Agent'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {ConfirmDialog}
+    </div>
     </div>
   )
 }

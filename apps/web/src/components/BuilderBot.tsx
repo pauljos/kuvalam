@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
-import { Wand2, Bot, Workflow, Plug, Zap, Library, ArrowUp, Loader2, ExternalLink, Sparkles, X, Minimize2, Maximize2, MessageCircle } from 'lucide-react'
+import { Wand2, Bot, Workflow, Plug, Zap, Library, ArrowUp, Loader2, ExternalLink, Sparkles, X, Minimize2, Maximize2, MessageCircle, Paperclip } from 'lucide-react'
 import Link from 'next/link'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -134,8 +134,10 @@ export default function BuilderBot() {
   const [loading, setLoading] = useState(false)
   const [ctx, setCtx] = useState<BuilderContext | null>(null)
   const [initialized, setInitialized] = useState(false)
+  const [attachments, setAttachments] = useState<{name: string, type: string, contentBase64: string}[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // ── Persist messages to localStorage whenever they change ───────────────
   useEffect(() => {
@@ -266,11 +268,16 @@ export default function BuilderBot() {
         timestamp: new Date().toISOString(),
       }])
     } catch (err: any) {
-      toast('error', 'Builder error', err.message)
+      const isTimeout = err.message?.toLowerCase().includes('timeout') || err.name === 'AbortError' || err.message?.toLowerCase().includes('fetch')
+      const msg = isTimeout 
+        ? "The request took too long (timeout). Please try again or check the server."
+        : err.message
+      
+      toast('error', 'Builder error', msg)
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'system',
-        content: `❌ ${err.message}`,
+        content: `❌ ${msg}`,
         timestamp: new Date().toISOString(),
       }])
     } finally {
@@ -300,7 +307,7 @@ export default function BuilderBot() {
       timestamp: new Date().toISOString(),
     }])
 
-    api.builderChat(tenantId, { message: text, history })
+    api.builderChat(tenantId, { message: text, history, attachments })
       .then(data => {
         setMessages(prev => [...prev, {
           id: (Date.now() + 1).toString(),
@@ -312,15 +319,18 @@ export default function BuilderBot() {
         }])
       })
       .catch(err => {
+        const isTimeout = err.message?.toLowerCase().includes('timeout') || err.name === 'AbortError' || err.message?.toLowerCase().includes('fetch')
+        const msg = isTimeout ? "The request took too long (timeout)." : err.message
         setMessages(prev => [...prev, {
           id: (Date.now() + 1).toString(),
           role: 'system',
-          content: `❌ ${err.message}`,
+          content: `❌ ${msg}`,
           timestamp: new Date().toISOString(),
         }])
       })
       .finally(() => {
         setLoading(false)
+        setAttachments([])
         setTimeout(() => inputRef.current?.focus(), 100)
       })
   }
@@ -552,7 +562,9 @@ export default function BuilderBot() {
         {loading && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
             <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', opacity: 0.5 }} />
-            <span style={{ fontSize: 12, opacity: 0.4 }}>Thinking...</span>
+            <span style={{ fontSize: 12, opacity: 0.4 }}>
+              {attachments.length > 0 ? 'Uploading and processing file...' : 'Thinking...'}
+            </span>
           </div>
         )}
 
@@ -562,33 +574,75 @@ export default function BuilderBot() {
       {/* Input */}
       <div style={styles.inputArea}>
         <form onSubmit={sendMessage} style={{
-          display: 'flex', gap: 6,
+          display: 'flex', flexDirection: 'column', gap: 6,
           background: 'var(--bg)', borderRadius: 14,
           border: '1px solid var(--border)',
-          padding: '4px 4px 4px 14px',
+          padding: '6px',
         }}>
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            placeholder={canCreateAnything ? 'Ask me to build something...' : 'Ask me about resources...'}
-            disabled={loading}
-            style={{
-              flex: 1, border: 'none', background: 'transparent', outline: 'none',
-              fontSize: 13, color: 'var(--text)', padding: '6px 0',
-            }}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
-          />
-          <button type="submit" disabled={!input.trim() || loading} style={{
-            width: 32, height: 32, borderRadius: 10, border: 'none',
-            background: input.trim() && !loading ? 'linear-gradient(135deg, var(--green) 0%, var(--yellow-light) 100%)' : 'var(--border)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: input.trim() && !loading ? 'pointer' : 'not-allowed',
-            flexShrink: 0, transition: 'all 0.15s',
-          }}>
-            {loading ? <Loader2 size={14} style={{ color: '#fff', animation: 'spin 1s linear infinite' }} /> : <ArrowUp size={14} style={{ color: '#fff' }} />}
-          </button>
+          {/* Attachments Preview inside input form */}
+          {attachments.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, padding: '4px 8px' }}>
+              {attachments.map((att, idx) => (
+                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--bg-card, #fff)', padding: '4px 8px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <span>📎 {att.name}</span>
+                  <button type="button" onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--danger)', display: 'flex' }}>
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', paddingLeft: 8 }}>
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (!file) return
+                const reader = new FileReader()
+                reader.onload = (ev) => {
+                  const base64 = (ev.target?.result as string).split(',')[1]
+                  setAttachments(prev => [...prev, { name: file.name, type: file.type || 'application/octet-stream', contentBase64: base64 }])
+                }
+                reader.readAsDataURL(file)
+                e.target.value = ''
+              }}
+            />
+            <button
+              type="button"
+              title="Attach file"
+              style={{
+                background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: '4px'
+              }}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Paperclip size={16} />
+            </button>
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              placeholder={canCreateAnything ? 'Ask me to build something...' : 'Ask me about resources...'}
+              disabled={loading}
+              style={{
+                flex: 1, border: 'none', background: 'transparent', outline: 'none',
+                fontSize: 13, color: 'var(--text)', padding: '6px 0',
+              }}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
+            />
+            <button type="submit" disabled={!input.trim() || loading} style={{
+              width: 32, height: 32, borderRadius: 10, border: 'none',
+              background: input.trim() && !loading ? 'linear-gradient(135deg, var(--green) 0%, var(--yellow-light) 100%)' : 'var(--border)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: input.trim() && !loading ? 'pointer' : 'not-allowed',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}>
+              {loading ? <Loader2 size={14} style={{ color: '#fff', animation: 'spin 1s linear infinite' }} /> : <ArrowUp size={14} style={{ color: '#fff' }} />}
+            </button>
+          </div>
         </form>
       </div>
 

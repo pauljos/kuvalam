@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Interactive Dental Chart</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 20px;
+        }
+        .dental-chart {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .tooth {
+            width: 50px;
+            height: 50px;
+            margin: 5px;
+            border: 1px solid #333;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .tooth:hover {
+            background-color: #f0f0f0;
+        }
+        .tooth-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 12px;
+            color: white;
+        }
+        .count {
+            margin-top: 20px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Interactive Dental Chart</h1>
+    <div class="dental-chart" id="dentalChart">
+        <!-- Teeth will be dynamically inserted here -->
+    </div>
+    <div class="count" id="countDisplay">
+        Healthy: <span id="healthyCount">0</span> | Cavity: <span id="cavityCount">0</span> | Crown: <span id="crownCount">0</span> | Missing: <span id="missingCount">0</span>
+    </div>
+
+    <script>
+        const teeth = [];
+        const toothStates = {
+            healthy: 'green',
+            cavity: 'red',
+            crown: 'gold',
+            missing: 'grey'
+        };
+        const stateOrder = ['healthy', 'cavity', 'crown', 'missing'];
+        const counts = { healthy: 0, cavity: 0, crown: 0, missing: 0 };
+        const chart = document.getElementById('dentalChart');
+        const healthyCount = document.getElementById('healthyCount');
+        const cavityCount = document.getElementById('cavityCount');
+        const crownCount = document.getElementById('crownCount');
+        const missingCount = document.getElementById('missingCount');
+
+        // Generate teeth
+        for (let i = 11; i <= 18; i++) {
+            const tooth = document.createElement('div');
+            tooth.className = 'tooth';
+            tooth.dataset.id = i;
+            tooth.innerHTML = `<div class="tooth-text">${i}</div>`;
+            chart.appendChild(tooth);
+            teeth.push(tooth);
+        }
+
+        for (let i = 21; i <= 28; i++) {
+            const tooth = document.createElement('div');
+            tooth.className = 'tooth';
+            tooth.dataset.id = i;
+            tooth.innerHTML = `<div class="tooth-text">${i}</div>`;
+            chart.appendChild(tooth);
+            teeth.push(tooth);
+        }
+
+        for (let i = 31; i <= 38; i++) {
+            const tooth = document.createElement('div');
+            tooth.className = 'tooth';
+            tooth.dataset.id = i;
+            tooth.innerHTML = `<div class="tooth-text">${i}</div>`;
+            chart.appendChild(tooth);
+            teeth.push(tooth);
+        }
+
+        for (let i = 41; i <= 48; i++) {
+            const tooth = document.createElement('div');
+            tooth.className = 'tooth';
+            tooth.dataset.id = i;
+            tooth.innerHTML = `<div class="tooth-text">${i}</div>`;
+            chart.appendChild(tooth);
+            teeth.push(tooth);
+        }
+
+        // Initialize tooth states
+        teeth.forEach(tooth => {
+            let currentState = 'healthy';
+            tooth.style.backgroundColor = toothStates[currentState];
+            tooth.addEventListener('click', () => {
+                const currentIndex = stateOrder.indexOf(currentState);
+                const nextState = stateOrder[(currentIndex + 1) % stateOrder.length];
+                currentState = nextState;
+                tooth.style.backgroundColor = toothStates[currentState];
+                updateCounts(tooth.dataset.id, currentState);
+            });
+        });
+
+        function updateCounts(toothId, state) {
+            counts[state]++;
+            counts[state] = Math.max(0, counts[state]);
+            healthyCount.textContent = counts.healthy;
+            cavityCount.textContent = counts.cavity;
+            crownCount.textContent = counts.crown;
+            missingCount.textContent = counts.missing;
+        }
+    </script>
+</body>
+</html>

@@ -72,6 +72,7 @@ export default async function approvalsRoutes(fastify) {
         decisionNote,
         decidedBy: req.user.id,
         modifiedInput,
+        isSystemAdmin: req.user.isSystemAdmin === true,
       })
 
       return { success: true, data: updated, meta: ts() }
@@ -113,6 +114,7 @@ export default async function approvalsRoutes(fastify) {
           decision,
           decisionNote,
           decidedBy: req.user.id,
+          isSystemAdmin: req.user.isSystemAdmin === true,
         })
         results.push(updated)
       } catch (err) {

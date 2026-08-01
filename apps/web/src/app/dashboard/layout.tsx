@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
   LayoutGrid, Bot, Workflow, CheckCircle2, Library, Plug, BarChart3,
-  ScrollText, Settings, Shield, Zap, Search, Menu, X, LogOut, Building2, MessageSquare, Sparkles
+  ScrollText, Settings, Shield, Zap, Search, Menu, X, LogOut, Building2, MessageSquare, Sparkles, ShieldAlert
 } from 'lucide-react'
 import { AppProvider, useApp } from '@/lib/context'
 import { CommandPalette } from '@/components/CommandPalette'
@@ -41,6 +41,7 @@ const insightsNav: NavItem[] = [
   { href: '/dashboard/analytics',  label: 'Analytics',     icon: BarChart3 },
   { href: '/dashboard/reports',    label: 'Reports',       icon: ScrollText },
   { href: '/dashboard/audit',      label: 'Audit Log',     icon: ScrollText },
+  { href: '/dashboard/supervisor', label: 'Supervisor',    icon: ShieldAlert },
 ]
 
 const bottomNav: NavItem[] = [

@@ -154,6 +154,7 @@ export const api = {
   listAgents: (tenantId: string) => request(`/tenants/${tenantId}/agents`),
   getAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}`),
   updateAgent: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  compressPrompt: (tenantId: string, agentId: string, save = false, mode: 'ai' | 'local' = 'ai', goal = '') => request(`/tenants/${tenantId}/agents/${agentId}/compress-prompt`, { method: 'POST', body: JSON.stringify({ save, mode, goal }) }),
   deleteAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}`, { method: 'DELETE' }),
   activateAgent: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/activate`, { method: 'POST', body: '{}' }),
   addSkill: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/skills`, { method: 'POST', body: JSON.stringify(body) }),
@@ -169,6 +170,12 @@ export const api = {
   cancelTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' }),
   deleteTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}`, { method: 'DELETE' }),
   linkKB: (tenantId: string, agentId: string, kbId: string) => request(`/tenants/${tenantId}/agents/${agentId}/knowledge-bases/${kbId}`, { method: 'POST', body: '{}' }),
+
+  // Agent Memory
+  getAgentMemory: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/memory`),
+  clearAgentMemory: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/memory`, { method: 'DELETE' }),
+  deleteAgentMemoryEntry: (tenantId: string, agentId: string, memoryId: string) => request(`/tenants/${tenantId}/agents/${agentId}/memory/${memoryId}`, { method: 'DELETE' }),
+  deleteAgentEpisodicMemoryEntry: (tenantId: string, agentId: string, memoryId: string) => request(`/tenants/${tenantId}/agents/${agentId}/memory/episodic/${memoryId}`, { method: 'DELETE' }),
 
   // Knowledge
   createKB: (tenantId: string, body: any) => request(`/tenants/${tenantId}/knowledge-bases`, { method: 'POST', body: JSON.stringify(body) }),
@@ -206,6 +213,7 @@ export const api = {
 
   // System Scan (local deployment dependency checker)
   systemScan: (tenantId: string) => request(`/tenants/${tenantId}/system/scan`),
+  systemSecurityAudit: (tenantId: string) => request(`/tenants/${tenantId}/system/security`),
   systemInstall: (tenantId: string, depId: string) => request(`/tenants/${tenantId}/system/install`, { method: 'POST', body: JSON.stringify({ depId }) }),
 
   // Knowledge Infrastructure (local Docker provisioning for vector DB + graph DB)
@@ -214,7 +222,8 @@ export const api = {
   createInfraConnector: (tenantId: string, service: string) => request(`/tenants/${tenantId}/knowledge-infra/create-connector`, { method: 'POST', body: JSON.stringify({ service }) }),
 
   // Agent prompt preview
-  previewAgentPrompt: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/preview-prompt`),
+  previewAgentPrompt: (tenantId: string, agentId: string, goal = '') => request(`/tenants/${tenantId}/agents/${agentId}/preview-prompt${goal ? '?goal=' + encodeURIComponent(goal) : ''}`),
+  refineAgentPrompt: (tenantId: string, agentId: string, body: { scenario: string; systemPrompt?: string }) => request(`/tenants/${tenantId}/agents/${agentId}/refine-prompt`, { method: 'POST', body: JSON.stringify(body) }),
 
   // Workflows
   listWorkflows: (tenantId: string) => request(`/tenants/${tenantId}/workflows`),
@@ -233,7 +242,7 @@ export const api = {
   saveSystemLLMConfig: (tenantId: string, body: { systemProvider?: string | null; systemModel?: string | null }) => request(`/tenants/${tenantId}/settings/llm`, { method: 'PUT', body: JSON.stringify(body) }),
 
   // AI Builder Chatbot
-  builderChat: (tenantId: string, body: { message: string; history?: Array<{ role: string; content: string }> }) =>
+  builderChat: (tenantId: string, body: { message: string; history?: Array<{ role: string; content: string }>; attachments?: {name: string, type: string, contentBase64: string}[] }) =>
     request(`/tenants/${tenantId}/builder/chat`, { method: 'POST', body: JSON.stringify(body) }),
   builderContext: (tenantId: string) =>
     request(`/tenants/${tenantId}/builder/context`),
@@ -245,6 +254,18 @@ export const api = {
   // Approvals (Human-in-the-Loop)
   listApprovals: (tenantId: string, status?: string) => request(`/tenants/${tenantId}/approvals${status ? `?status=${status}` : ''}`),
   decideApproval: (tenantId: string, approvalId: string, body: any) => request(`/tenants/${tenantId}/approvals/${approvalId}/decide`, { method: 'POST', body: JSON.stringify(body) }),
+
+  // Supervisor — fleet health, circuit breakers, tenant memory
+  getSupervisorHealth: (tenantId: string) => request(`/tenants/${tenantId}/supervisor/health`),
+  supervisorTick: (tenantId: string) => request(`/tenants/${tenantId}/supervisor/tick`, { method: 'POST' }),
+  resetAgentCircuit: (tenantId: string, agentId: string) =>
+    request(`/tenants/${tenantId}/supervisor/agents/${agentId}/circuit/reset`, { method: 'POST' }),
+  listTenantMemory: (tenantId: string) => request(`/tenants/${tenantId}/tenant-memory`),
+  deleteTenantMemoryEntry: (tenantId: string, id: string) =>
+    request(`/tenants/${tenantId}/tenant-memory/${id}`, { method: 'DELETE' }),
+  clearTenantMemory: (tenantId: string) => request(`/tenants/${tenantId}/tenant-memory`, { method: 'DELETE' }),
+  createTenantMemory: (tenantId: string, body: { entityType: string; entityName: string; detail?: string }) =>
+    request(`/tenants/${tenantId}/tenant-memory`, { method: 'POST', body: JSON.stringify(body) }),
 
   // Audit Log
   listAuditLog: (tenantId: string, params?: Record<string, string>) => {
@@ -313,8 +334,12 @@ export const api = {
     request(`/tenants/${tenantId}/chat/conversations/${conversationId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   getChatMessages: (tenantId: string, conversationId: string) =>
     request(`/tenants/${tenantId}/chat/conversations/${conversationId}/messages`),
-  sendChatMessage: (tenantId: string, conversationId: string, body: { content: string; knowledgeBaseIds?: string[]; graphIds?: string[] }) =>
+  sendChatMessage: (tenantId: string, conversationId: string, body: { content: string; knowledgeBaseIds?: string[]; graphIds?: string[]; attachments?: {name: string, type: string, contentBase64: string}[] }) =>
     request(`/tenants/${tenantId}/chat/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify(body) }),
+  clearChatMessages: (tenantId: string, conversationId: string) =>
+    request(`/tenants/${tenantId}/chat/conversations/${conversationId}/messages`, { method: 'DELETE' }),
+  summarizeChatConversation: (tenantId: string, conversationId: string) =>
+    request(`/tenants/${tenantId}/chat/conversations/${conversationId}/summarize`, { method: 'POST', body: JSON.stringify({}) }),
 
   // MCP Servers
   listMcpServers: (tenantId: string) => request(`/tenants/${tenantId}/mcp/servers`),

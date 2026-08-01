@@ -160,12 +160,25 @@ function msUntilNextFire(fields, now = new Date(), timezone = 'UTC') {
 
 let schedulerInterval = null
 let approvalCleanupInterval = null
+let supervisorInterval = null
 const activeTimers = new Map()
 
 export async function startScheduler() {
   // Check every 60s for new/updated scheduled workflows
   schedulerInterval = setInterval(loadScheduledWorkflows, 60_000)
   await loadScheduledWorkflows()
+
+  // ── Tenant Supervisor (G1) — every 30s ─────────────────────────────────────
+  // Enforces runtime ceilings, refreshes agent_health, opens circuit breakers.
+  // Rules-based (no LLM); safe to invoke frequently.
+  supervisorInterval = setInterval(async () => {
+    try {
+      const { supervisorTick } = await import('./tenant-supervisor.service.js')
+      await supervisorTick()
+    } catch (err) {
+      console.warn(`[Scheduler] Supervisor tick failed: ${err.message}`)
+    }
+  }, 30_000)
 
   // ── Auto-reject expired approvals every 5 minutes ──────────────────────────
   // autoRejectExpiredApprovals was previously exported but never called, causing
@@ -362,6 +375,10 @@ export function stopScheduler() {
   if (approvalCleanupInterval) {
     clearInterval(approvalCleanupInterval)
     approvalCleanupInterval = null
+  }
+  if (supervisorInterval) {
+    clearInterval(supervisorInterval)
+    supervisorInterval = null
   }
   for (const [id] of activeTimers) clearWorkflowTimer(id)
   console.log('[Scheduler] Stopped')

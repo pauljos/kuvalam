@@ -12,6 +12,20 @@ export function hashKey(...parts) {
 }
 
 /**
+ * Remove model chain-of-thought blocks from LLM output. Many reasoning models
+ * (e.g. qwen3 on Groq/Ollama) prepend a verbose <think>…</think> block to every
+ * response, which would otherwise inflate token counts and pollute prompts.
+ * Handles closed blocks and dangling open <think> (truncated) blocks.
+ */
+export function stripThinkBlocks(str) {
+  if (!str) return str
+  let out = String(str).replace(/<think>[\s\S]*?<\/think>/gi, '')
+  // Dangling unclosed <think> (truncated mid-thought) — drop from the tag onward.
+  if (/<think>/i.test(out)) out = out.replace(/<think>[\s\S]*$/i, '')
+  return out.trim()
+}
+
+/**
  * Safely parse a JSON string with multiple repair strategies.
  *
  * Stage 1: Direct JSON.parse (fast path).
@@ -26,8 +40,9 @@ export function hashKey(...parts) {
  */
 export function safeParseJSON(str) {
   if (!str) return {}
+  let cleanStr = str.replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || str.trim()
   try {
-    return JSON.parse(str)
+    return JSON.parse(cleanStr)
   } catch (err) {
     console.error('[JSON Parse Error] Raw string:', JSON.stringify(str))
     console.error('[JSON Parse Error] Message:', err.message)
@@ -141,9 +156,11 @@ export function safeParseJSON(str) {
  */
 export function tryParseToolCallFromText(text, toolDefinitions) {
   if (!text) return null
+  const cleanText = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+  if (!cleanText) return null
 
   // First try the whole text as pure JSON (fast path)
-  let parsed = safeParseJSON(text)
+  let parsed = safeParseJSON(cleanText)
   if (parsed && typeof parsed === 'object') {
     const name = parsed.name || parsed.tool || parsed.function
     if (name && typeof name === 'string') {

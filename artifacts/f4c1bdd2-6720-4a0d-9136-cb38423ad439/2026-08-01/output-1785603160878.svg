@@ -1,0 +1,38 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600' preserveAspectRatio='xMidYMid meet'>
+  <rect width='800' height='600' fill='#e0f7fa' />
+  <g transform='translate(100, 50)'>
+    <!-- Central Garden -->
+    <rect x='0' y='0' width='400' height='200' fill='#76ff03' stroke='#2e7d32' stroke-width='4'/>
+    <text x='200' y='100' font-size='24' text-anchor='middle' fill='#2e7d32'>Central Garden</text>
+
+    <!-- Villas -->
+    <!-- Villa V1 -->
+    <rect x='450' y='0' width='100' height='100' fill='#ffe0b2' stroke='#ff6d00' stroke-width='3'/>
+    <text x='475' y='50' font-size='16' text-anchor='middle' fill='#000'>V1</text>
+
+    <!-- Villa V2 -->
+    <rect x='550' y='0' width='100' height='100' fill='#ffe0b2' stroke='#ff6d00' stroke-width='3'/>
+    <text x='575' y='50' font-size='16' text-anchor='middle' fill='#000'>V2</text>
+
+    <!-- Villa V3 -->
+    <rect x='450' y='120' width='100' height='100' fill='#ffe0b2' stroke='#ff6d00' stroke-width='3'/>
+    <text x='475' y='170' font-size='16' text-anchor='middle' fill='#000'>V3</text>
+
+    <!-- Villa V4 -->
+    <rect x='550' y='120' width='100' height='100' fill='#ffe0b2' stroke='#ff6d00' stroke-width='3'/>
+    <text x='575' y='170' font-size='16' text-anchor='middle' fill='#000'>V4</text>
+
+    <!-- Villa V5 -->
+    <rect x='450' y='240' width='100' height='100' fill='#ffe0b2' stroke='#ff6d00' stroke-width='3'/>
+    <text x='475' y='290' font-size='16' text-anchor='middle' fill='#000'>V5</text>
+
+    <!-- Access Road -->
+    <rect x='350' y='0' width='100' height='600' fill='#f0f0f0' stroke='#9e9e9e' stroke-width='2'/>
+    <text x='375' y='300' font-size='18' text-anchor='middle' fill='#000'>Access Road</text>
+  </g>
+  <text x='10' y='15' font-size='14' fill='#000'>Scale: 1:100</text>
+  <text x='10' y='30' font-size='14' fill='#000'>Legend:</text>
+  <text x='10' y='45' font-size='14' fill='#000'>Green: Garden</text>
+  <text x='10' y='60' font-size='14' fill='#000'>Yellow: Villas</text>
+  <text x='10' y='75' font-size='14' fill='#000'>Gray: Road</text>
+</svg>

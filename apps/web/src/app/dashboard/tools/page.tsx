@@ -19,6 +19,16 @@ const BUILTIN_TOOLS = [
   { id: 'docker_run',            name: 'Docker Run',            icon: '🐳', category: 'Infrastructure',  description: 'Run commands inside a Docker container on the host.',                                                                                         enabled: true, badge: 'High Risk', deploymentType: 'local' },
   { id: 'ssh_exec',              name: 'SSH Exec',              icon: '🔑', category: 'Infrastructure',  description: 'Execute commands on remote machines via SSH.',                                                                                                enabled: true, badge: 'High Risk', deploymentType: 'generic' },
   { id: 'publish_dashboard_report', name: 'Publish Report',     icon: '📊', category: 'Output',          description: 'Publish a dynamic HTML report to the agent dashboard.',                                                                                       enabled: true, deploymentType: 'generic' },
+  // ── ML Service tools (optional — require ML_SERVICE_URL on the API) ────────
+  { id: 'ml_transcribe', name: 'ML: Transcribe Audio',  icon: '🎙️', category: 'ML Models', description: 'Speech-to-text via OpenAI Whisper. Accepts a URL or base64 audio. Auto-detects language.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_sentiment',  name: 'ML: Sentiment Analysis',icon: '📈', category: 'ML Models', description: 'Financial/general sentiment with FinBERT. Returns positive/negative/neutral with confidence.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_entities',   name: 'ML: Entity Extraction', icon: '🏷️', category: 'ML Models', description: 'Named entity recognition via BERT NER. Extracts people, orgs, locations, dates.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_classify',   name: 'ML: Zero-Shot Classify',icon: '🗂️', category: 'ML Models', description: 'Zero-shot text classification via BART. No training needed — define your own labels.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_ocr',           name: 'ML: Image OCR',            icon: '🖼️', category: 'ML Models', description: 'Extract text from images using TrOCR. Accepts image URL or base64.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_parse_document', name: 'ML: Parse Document',        icon: '🧾', category: 'ML Models', description: 'Extract structured fields from invoices, receipts and forms using Donut. Returns JSON with totals, line items, dates.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_forecast',       name: 'ML: Time-Series Forecast',  icon: '📉', category: 'ML Models', description: 'Forecast future values with confidence intervals using Prophet. Provide historical date+value pairs.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_anomaly_detect', name: 'ML: Anomaly Detection',     icon: '🚨', category: 'ML Models', description: 'Flag outlier rows in tabular or time-series data using Isolation Forest. Returns score + anomaly flag per row.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
+  { id: 'ml_image_search',   name: 'ML: Image-Text Similarity', icon: '🔎', category: 'ML Models', description: 'CLIP: match an image to text labels, or rank images by text query. Useful for tagging, content moderation, visual search.', enabled: !!process.env.NEXT_PUBLIC_ML_SERVICE_URL, requires: 'ML_SERVICE_URL env var', deploymentType: 'generic' },
 ]
 
 // Tools that appear ONLY when the matching connector on the Connectors page is
@@ -256,9 +266,6 @@ export default function ToolsPage() {
   )
   const unlockedConnectorTools = CONNECTOR_BACKED_TOOLS.filter(t => connectorActive(t.connectorId))
 
-  // Per-instance active connections
-  const activeInstances = connectors.filter(c => c.status === 'ACTIVE')
-
   return (
     <div className="animate-in">
       <div className="page-header">
@@ -284,7 +291,6 @@ export default function ToolsPage() {
           <div style={{ fontSize: 13, color: 'var(--text-sub)', lineHeight: 1.6 }}>
             <strong>What the LLM sees at planning time</strong> &mdash; tools listed here are injected into every agent's system prompt.
             <br />• <strong>Built-in tools</strong> — always available, zero configuration needed.
-            <br />• <strong>Connector-backed tools</strong> — appear automatically when the matching provider is <em>Active</em> in <Link href="/dashboard/connectors" style={{ color: 'var(--green-dark)' }}>Providers</Link>.
             <br />• <strong>MCP tools</strong> — exposed by any Model Context Protocol server registered below.
           </div>
         </div>
@@ -309,7 +315,7 @@ export default function ToolsPage() {
               <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 4 }}>Built-in Agent Tools</h2>
               <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
                 Always available. Wired directly into every agent's tool loop.
-                Tools marked <span style={{ background: '#fef2f2', color: '#991b1b', padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>High Risk</span> require human approval in <strong>GUARDED</strong> autonomy mode.
+                Tools marked <span style={{ background: '#fef2f2', color: '#991b1b', padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>High Risk</span> always require approval in <strong>GUARDED</strong> and <strong>SUPERVISED</strong> modes.
               </p>
             </div>
             <input className="input" placeholder="Search tools..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: 200, fontSize: 13 }} />
@@ -431,54 +437,6 @@ export default function ToolsPage() {
                   </div>
                 )
               })}
-            </div>
-          )}
-        </div>
-
-        {/* Connector-backed tools — summary, details live on Providers page */}
-        <div className="card" style={{ padding: 28, marginBottom: 24 }}>
-          <div style={{ marginBottom: 20 }}>
-            <h2 style={{ fontSize: 17, fontWeight: 800, marginBottom: 4 }}>Connector-backed Tools</h2>
-            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-              Tools exposed by your active connectors. Set up and manage connections on the{' '}
-              <Link href="/dashboard/connectors" style={{ color: 'var(--green-dark)', fontWeight: 600 }}>Providers</Link> page.
-            </p>
-          </div>
-
-          {activeInstances.length > 0 ? (
-            <>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
-                {activeInstances.map(conn => {
-                  const icon = CONNECTOR_ICONS[conn.tool_id] || '🔌'
-                  const toolCount = CONNECTOR_BACKED_TOOLS.filter(t => t.connectorId === conn.tool_id).length
-                  return (
-                    <div key={conn.id} style={{
-                      padding: '12px 14px', borderRadius: 8,
-                      border: '1px solid var(--green-border)',
-                      background: 'var(--green-bg)',
-                      display: 'flex', alignItems: 'center', gap: 10,
-                    }}>
-                      <span style={{ fontSize: 22 }}>{icon}</span>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conn.name}</div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{toolCount} tool{toolCount !== 1 ? 's' : ''} available</div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-              <p style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                {unlockedConnectorTools.length} total connector tools across {activeInstances.length} active connection{activeInstances.length !== 1 ? 's' : ''}.{' '}
-                Open <Link href="/dashboard/connectors" style={{ color: 'var(--green-dark)', fontWeight: 600 }}>Providers</Link> to add more.
-              </p>
-            </>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)' }}>
-              <div style={{ fontSize: 32, marginBottom: 8, opacity: 0.5 }}>🔌</div>
-              <div style={{ fontSize: 13, marginBottom: 8 }}>No active connectors.</div>
-              <Link href="/dashboard/connectors" style={{ color: 'var(--green-dark)', fontWeight: 600, fontSize: 13 }}>
-                Set up your first connector →
-              </Link>
             </div>
           )}
         </div>

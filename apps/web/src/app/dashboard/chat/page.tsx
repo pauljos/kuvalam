@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
-import { MessageSquare, Send, Trash2, Plus, Database, GitFork } from 'lucide-react'
+import { MessageSquare, Send, Trash2, Plus, Database, GitFork, Paperclip, X, Mic, MicOff } from 'lucide-react'
 
 interface Message {
   id: string
@@ -34,16 +34,57 @@ interface KnowledgeGraph {
 }
 
 function renderMarkdown(text: string): string {
-  // Simple markdown-to-HTML renderer (no dependencies)
-  return text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:#1a1a2e;color:#e4e4e4;padding:10px;border-radius:6px;overflow-x:auto;font-size:12px;font-family:monospace"><code>$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code style="background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:12px;font-family:monospace;color:#dc2626">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/!\[([^\]]+)\]\(([^)]+)\)/g, '<img alt="$1" src="$2" style="max-width:100%;border-radius:6px;margin:8px 0" />')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#3b82f6;text-decoration:underline">$1</a>')
-    .replace(/\n/g, '<br />')
+  // Escape HTML first so no raw tags survive the transform.
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;')
+     .replace(/</g, '&lt;')
+     .replace(/>/g, '&gt;')
+     .replace(/"/g, '&quot;')
+     .replace(/'/g, '&#39;')
+
+  // Only allow http(s) and mailto URIs — blocks javascript:, data:, vbscript:, etc.
+  const safeUrl = (u: string) => {
+    const trimmed = u.trim()
+    if (/^(https?:|mailto:)/i.test(trimmed)) return esc(trimmed)
+    return '#'
+  }
+
+  // Extract fenced code blocks first (so their contents are not further transformed).
+  const codeBlocks: string[] = []
+  let out = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, _lang, body) => {
+    const idx = codeBlocks.push(
+      `<pre style="background:#1a1a2e;color:#e4e4e4;padding:10px;border-radius:6px;overflow-x:auto;font-size:12px;font-family:monospace"><code>${esc(body)}</code></pre>`
+    ) - 1
+    return `\u0000CODEBLOCK${idx}\u0000`
+  })
+
+  // Escape the remaining text.
+  out = esc(out)
+
+  // Inline code (already HTML-escaped above; safe to run on esc'd content).
+  out = out.replace(/`([^`]+)`/g, (_m, code) =>
+    `<code style="background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:12px;font-family:monospace;color:#dc2626">${code}</code>`
+  )
+
+  // Emphasis — patterns operate on already-escaped text.
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+  // Images: sanitize URL, alt is already esc'd.
+  out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt, url) =>
+    `<img alt="${alt}" src="${safeUrl(url)}" style="max-width:100%;border-radius:6px;margin:8px 0" />`
+  )
+
+  // Links: sanitize URL scheme; label is already esc'd.
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label, url) =>
+    `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer" style="color:#3b82f6;text-decoration:underline">${label}</a>`
+  )
+
+  out = out.replace(/\n/g, '<br />')
+
+  // Restore code blocks.
+  out = out.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_m, i) => codeBlocks[Number(i)])
+  return out
 }
 
 export default function ChatPage() {
@@ -73,6 +114,22 @@ export default function ChatPage() {
   const [showGraphSelector, setShowGraphSelector] = useState(false)
   const graphDropdownRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const commandMenuRef = useRef<HTMLDivElement>(null)
+  const recognitionRef = useRef<any>(null)
+  const [attachments, setAttachments] = useState<{name: string, type: string, contentBase64: string}[]>([])
+  const [thinkingLevel, setThinkingLevel] = useState<'off'|'low'|'medium'|'high'>('off')
+  const [listening, setListening] = useState(false)
+  const [showCommandMenu, setShowCommandMenu] = useState(false)
+
+  const SLASH_COMMANDS = [
+    { cmd: '/new', args: '[title]', desc: 'Start a new conversation' },
+    { cmd: '/reset', args: '', desc: 'Clear all messages in this conversation' },
+    { cmd: '/think', args: '[off|low|medium|high]', desc: 'Set LLM reasoning depth' },
+    { cmd: '/compact', args: '', desc: 'Summarize & compact this conversation' },
+    { cmd: '/help', args: '', desc: 'Show available commands' },
+  ]
 
   // Close KB/graph dropdowns on outside click
   useEffect(() => {
@@ -352,6 +409,111 @@ export default function ChatPage() {
     }
   }
 
+  function addSystemMessage(content: string) {
+    const msg: Message = {
+      id: Date.now().toString(),
+      role: 'system',
+      content,
+      created_at: new Date().toISOString()
+    }
+    setMessages(prev => [...prev, msg])
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+  }
+
+  async function handleSlashCommand(raw: string) {
+    const parts = raw.slice(1).split(/\s+/)
+    const cmd = '/' + (parts[0] || '').toLowerCase()
+    const args = parts.slice(1).join(' ').trim()
+    setShowCommandMenu(false)
+
+    switch (cmd) {
+      case '/new': {
+        if (args) setNewChatTitle(args)
+        openNewChatModal()
+        break
+      }
+      case '/reset': {
+        if (!activeConversation) { addSystemMessage('No active conversation.'); break }
+        if (!confirm('Clear all messages in this conversation?')) break
+        try {
+          await api.clearChatMessages(tenantId, activeConversation.id)
+          setMessages([])
+          toast('success', 'Conversation cleared', '')
+        } catch (err: any) {
+          toast('error', 'Failed to clear', err.message)
+        }
+        break
+      }
+      case '/think': {
+        const level = args as 'off'|'low'|'medium'|'high'
+        if (['off', 'low', 'medium', 'high'].includes(level)) {
+          setThinkingLevel(level)
+          addSystemMessage(`🧠 Thinking level set to **${level}**${level !== 'off' ? ' — responses will reason more deeply' : ''}`)
+        } else {
+          addSystemMessage('Usage: `/think [off|low|medium|high]`')
+        }
+        break
+      }
+      case '/compact': {
+        if (!activeConversation) { addSystemMessage('No active conversation.'); break }
+        if (messages.length === 0) { addSystemMessage('Nothing to compact yet.'); break }
+        try {
+          setStreaming(true)
+          const data = await api.summarizeChatConversation(tenantId, activeConversation.id)
+          const summary = (data as any)?.data?.summary || (data as any)?.summary || 'Could not summarize.'
+          addSystemMessage(`📋 **Conversation Summary:**\n\n${summary}`)
+        } catch (err: any) {
+          toast('error', 'Failed to compact', err.message)
+        } finally {
+          setStreaming(false)
+        }
+        break
+      }
+      case '/help': {
+        addSystemMessage([
+          '**Available Commands:**',
+          '',
+          '`/new [title]` — Start a new conversation',
+          '`/reset` — Clear all messages in this conversation',
+          '`/think [off|low|medium|high]` — Set LLM reasoning depth',
+          '`/compact` — Summarize this conversation',
+          '`/help` — Show this help',
+        ].join('\n'))
+        break
+      }
+      default: {
+        addSystemMessage(`Unknown command: \`${cmd}\`. Type \`/help\` to see available commands.`)
+      }
+    }
+  }
+
+  function startVoice() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) {
+      toast('error', 'Voice not supported', 'Try Chrome or Edge for voice input.')
+      return
+    }
+    if (listening) {
+      recognitionRef.current?.stop()
+      setListening(false)
+      return
+    }
+    const rec = new SR()
+    rec.continuous = false
+    rec.interimResults = false
+    rec.lang = 'en-US'
+    rec.onresult = (e: any) => {
+      const transcript = Array.from(e.results as any[]).map((r: any) => r[0].transcript).join(' ')
+      setInput(prev => prev ? `${prev} ${transcript}` : transcript)
+      inputRef.current?.focus()
+    }
+    rec.onerror = () => setListening(false)
+    rec.onend = () => setListening(false)
+    recognitionRef.current = rec
+    rec.start()
+    setListening(true)
+  }
+
   async function handleRename() {
     if (!activeConversation || !editTitleValue.trim()) {
       setEditingTitle(false)
@@ -376,7 +538,18 @@ export default function ChatPage() {
 
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault()
-    if (!input.trim() || !activeConversation || streaming) return
+    if (!input.trim() || streaming) return
+
+    // Intercept slash commands
+    if (input.trim().startsWith('/')) {
+      const cmd = input.trim()
+      setInput('')
+      setShowCommandMenu(false)
+      await handleSlashCommand(cmd)
+      return
+    }
+
+    if (!activeConversation) return
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -402,10 +575,12 @@ export default function ChatPage() {
       await api.sendChatMessage(tenantId, activeConversation.id, {
         content: currentInput,
         knowledgeBaseIds: selectedKnowledgeBaseIds.length > 0 ? selectedKnowledgeBaseIds : undefined,
-        graphIds: selectedGraphIds.length > 0 ? selectedGraphIds : undefined
+        graphIds: selectedGraphIds.length > 0 ? selectedGraphIds : undefined,
+        attachments: attachments.length > 0 ? attachments : undefined
       })
 
       // Reload messages to get the full conversation including assistant response
+      setAttachments([])
       await loadMessages(activeConversation.id)
       await loadConversations()
       
@@ -437,7 +612,7 @@ export default function ChatPage() {
       <div style={{ flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '20px 0 16px' }}>
         <div>
           <h1 className="page-title" style={{ fontSize: 20 }}>Chat</h1>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>Conversations with your LLM providers</p>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>Chat with your AI agents or query your LLM directly</p>
         </div>
         <button className="btn btn-primary btn-sm" onClick={openNewChatModal}>
           <Plus size={14} /> New Chat
@@ -666,8 +841,17 @@ export default function ChatPage() {
                       {activeConversation.title} <span style={{ fontSize: 10, opacity: 0.3, marginLeft: 4 }}>✎</span>
                     </div>
                   )}
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                    {activeConversation.provider} · {activeConversation.model}
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>{activeConversation.provider} · {activeConversation.model}</span>
+                    {thinkingLevel !== 'off' && (
+                      <span
+                        onClick={() => setThinkingLevel('off')}
+                        title="Click to disable thinking mode"
+                        style={{ fontSize: 10, background: 'rgba(16,185,129,0.12)', color: '#059669', padding: '2px 8px', borderRadius: 10, cursor: 'pointer', fontWeight: 600 }}
+                      >
+                        🧠 Think: {thinkingLevel}
+                      </span>
+                    )}
                   </div>
                   {/* Knowledge Base selector */}
                   {knowledgeBases.length > 0 && (
@@ -854,17 +1038,17 @@ export default function ChatPage() {
                       key={msg.id}
                       style={{
                         display: 'flex',
-                        justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start'
+                        justifyContent: msg.role === 'user' ? 'flex-end' : msg.role === 'system' ? 'center' : 'flex-start'
                       }}
                     >
                       <div
                         style={{
-                          maxWidth: '78%',
+                          maxWidth: msg.role === 'system' ? '90%' : '78%',
                           padding: '10px 14px',
-                          borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
-                          background: msg.role === 'user' ? 'var(--green)' : 'var(--bg)',
-                          color: msg.role === 'user' ? '#fff' : 'var(--text)',
-                          border: msg.role === 'assistant' ? '1px solid var(--border)' : 'none',
+                          borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : msg.role === 'system' ? '8px' : '12px 12px 12px 4px',
+                          background: msg.role === 'user' ? 'var(--green)' : msg.role === 'system' ? 'rgba(16,185,129,0.06)' : 'var(--bg)',
+                          color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#059669' : 'var(--text)',
+                          border: msg.role === 'assistant' ? '1px solid var(--border)' : msg.role === 'system' ? '1px dashed rgba(16,185,129,0.35)' : 'none',
                           boxShadow: msg.role === 'user' ? '0 2px 8px rgba(63,138,67,0.25)' : '0 1px 3px rgba(0,0,0,0.04)'
                         }}
                       >
@@ -881,22 +1065,109 @@ export default function ChatPage() {
                 <div ref={messagesEndRef} />
               </div>
 
+              {/* Attachments Preview */}
+              {attachments.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, padding: '8px 20px', background: 'var(--bg-white)', borderTop: '1px solid var(--border)' }}>
+                  {attachments.map((att, idx) => (
+                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--bg)', padding: '4px 8px', borderRadius: 4, fontSize: 11, border: '1px solid var(--border)' }}>
+                      <span>📎 {att.name}</span>
+                      <button type="button" onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--danger)' }}>
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {/* Input */}
-              <form onSubmit={sendMessage} style={{ flexShrink: 0, padding: '14px 20px', borderTop: '1px solid var(--border)', background: 'var(--bg)' }}>
-                <div style={{ display: 'flex', gap: 8 }}>
+              <form onSubmit={sendMessage} style={{ flexShrink: 0, padding: '14px 20px', borderTop: '1px solid var(--border)', background: 'var(--bg)', position: 'relative' }}>
+                {/* Slash command picker */}
+                {showCommandMenu && (
+                  <div ref={commandMenuRef} style={{
+                    position: 'absolute',
+                    bottom: '100%',
+                    left: 20,
+                    right: 20,
+                    background: 'var(--bg-white)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    boxShadow: '0 -4px 20px rgba(0,0,0,0.1)',
+                    marginBottom: 4,
+                    overflow: 'hidden',
+                    zIndex: 100,
+                  }}>
+                    {SLASH_COMMANDS.filter(c => c.cmd.startsWith(input.split(' ')[0] || '/')).map(c => (
+                      <button
+                        key={c.cmd}
+                        type="button"
+                        onClick={() => { setInput(c.cmd + (c.args ? ' ' : '')); setShowCommandMenu(false); inputRef.current?.focus() }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 14px', background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                        onMouseOver={e => { e.currentTarget.style.background = 'var(--bg-hover)' }}
+                        onMouseOut={e => { e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <code style={{ fontSize: 12, color: '#10b981', fontWeight: 700, background: 'rgba(16,185,129,0.1)', padding: '2px 8px', borderRadius: 4, flexShrink: 0 }}>{c.cmd}{c.args ? ` ${c.args}` : ''}</code>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{c.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <input
+                    type="file"
+                    ref={fileInputRef}
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (!file) return
+                      const reader = new FileReader()
+                      reader.onload = (ev) => {
+                        const base64 = (ev.target?.result as string).split(',')[1]
+                        setAttachments(prev => [...prev, { name: file.name, type: file.type || 'application/octet-stream', contentBase64: base64 }])
+                      }
+                      reader.readAsDataURL(file)
+                      e.target.value = ''
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    title="Attach file"
+                    style={{ padding: '8px 12px' }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Paperclip size={15} />
+                  </button>
+                  <input
+                    ref={inputRef}
                     type="text"
                     className="input"
-                    placeholder={streaming ? 'Waiting for response...' : 'Type your message...'}
+                    placeholder={streaming ? 'Waiting for response...' : 'Type a message or / for commands...'}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => { setInput(e.target.value); setShowCommandMenu(e.target.value.startsWith('/')) }}
+                    onKeyDown={(e) => { if (e.key === 'Escape') { setShowCommandMenu(false) } }}
                     disabled={streaming}
                     style={{ flex: 1, fontSize: 13, background: 'var(--bg-white)' }}
                   />
                   <button
+                    type="button"
+                    onClick={startVoice}
+                    title={listening ? 'Stop listening' : 'Voice input'}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      border: `1px solid ${listening ? '#ef4444' : 'var(--border)'}`,
+                      background: listening ? 'rgba(239,68,68,0.1)' : 'var(--bg)',
+                      color: listening ? '#ef4444' : 'var(--text-muted)',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                      animation: listening ? 'pulse 1.5s infinite' : 'none',
+                    }}
+                  >
+                    {listening ? <MicOff size={15} /> : <Mic size={15} />}
+                  </button>
+                  <button
                     type="submit"
                     className="btn btn-primary"
-                    disabled={!input.trim() || streaming}
+                    disabled={(!input.trim() && attachments.length === 0) || streaming}
                     title="Send message"
                     style={{ padding: '8px 16px' }}
                   >

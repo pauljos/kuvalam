@@ -250,7 +250,27 @@ const ARCHETYPE_ALIASES = {
   'FINANCE':            'compliance',
   'COORDINATOR':        'coordinator',
   'PLANNER':            'planner',
-  // Scope preset names (direct passthrough)
+  // New archetypes
+  'engineering':         'engineering',
+  'iot':                 'iot',
+  'scientific':          'scientific',
+  'medical':             'medical',
+  'generalist':          'generalist',
+  'none':                'generalist',  // 'none' gets generalist scopes
+  'news-media':          'news-media',
+  'news':                'news-media',
+  'media':               'news-media',
+  'journalist':          'news-media',
+  'journalism':          'news-media',
+  'insurance':           'insurance',
+  'banking':             'banking',
+  'bank':                'banking',
+  'finance':             'banking',
+  'financial':           'banking',
+  'fintech':             'banking',  // Tenant Supervisor — the "god" agent (G7). One per tenant.
+  'tenant-supervisor':  'tenant-supervisor',
+  'tenant_supervisor':  'tenant-supervisor',
+  'supervisor':         'tenant-supervisor',  // Scope preset names (direct passthrough)
   'data-analyst':       'data-analyst',
   'analyst':            'analyst',
   'browser-automation': 'browser-automation',
@@ -428,6 +448,135 @@ export function getArchetypeScopePresets(archetype) {
       { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
       { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
       { scopeType: 'group',    groupName: 'communication',           accessLevel: 'allowed' },
+    ],
+
+    // ── Tenant Supervisor — the "god" agent (G7) ─────────────────────────
+    // One per tenant. Watches the fleet, cancels runaway tasks, opens circuit
+    // breakers, and can raise supervisor-initiated HITL approvals. Autonomy
+    // is intentionally AUTONOMOUS — it must not itself need human approval.
+    // Should be created only by platform admin; see agent.service.js.
+    'tenant-supervisor': [
+      { scopeType: 'builtin',  builtinName: 'cancel_task',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'pause_task',            accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'delegate_task',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',              accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_tenant_memory',   accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'read_tenant_memory',    accessLevel: 'allowed' },
+      { scopeType: 'group',    groupName: 'communication',           accessLevel: 'allowed' },
+    ],
+
+    // ── Engineering (Civil / Structural / Mechanical) ────────────────────
+    'engineering': [
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'readonly' },
+    ],
+
+    // ── IoT / Embedded ──────────────────────────────────────────────────
+    'iot': [
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'readonly' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+    ],
+
+    // ── Scientific (Physics / Chemistry / Biology / Math) ────────────────
+    'scientific': [
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'readonly' },
+    ],
+
+    // ── Medical / Healthcare ────────────────────────────────────────────
+    'medical': [
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+    ],
+
+    // ── Generalist ──────────────────────────────────────────────────────
+    'generalist': [
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'readonly' },
+    ],
+
+    // ── News & Media ───────────────────────────────────────────────────
+    // Weapons: browser (news sites), HTTP (RSS/news APIs), file_search,
+    //          http_download (articles/PDFs), dashboard (media reports),
+    //          write_artifact (articles, newsletters, press releases),
+    //          Slack/Gmail (distribution), A2A (delegate research)
+    'news-media': [
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'slack',         accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'gmail',         accessLevel: 'allowed' },
+    ],
+
+    // ── Insurance ──────────────────────────────────────────────────────
+    // Weapons: database (policies/claims), file_search (documents),
+    //          browser (portals), HTTP (regulatory/benchmarks),
+    //          http_download (forms/statements), dashboard (reports),
+    //          write_artifact (assessments), Gmail/Slack (comms)
+    'insurance': [
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'gmail',         accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'slack',         accessLevel: 'allowed' },
+    ],
+
+    // ── Banking / Financial Services ────────────────────────────────────
+    // Weapons: database (transactions/accounts), file_search (statements),
+    //          browser (portals/regulatory), HTTP (market data/SWIFT),
+    //          http_download (filings), dashboard (metrics),
+    //          write_artifact (reports/audit trails)
+    'banking': [
+      { scopeType: 'group',    groupName: 'database',               accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'browser_use',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_request',          accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'http_download',         accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'file_search',           accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'write_artifact',        accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'publish_dashboard_report', accessLevel: 'allowed' },
+      { scopeType: 'builtin',  builtinName: 'a2a_call',             accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'gmail',         accessLevel: 'allowed' },
+      { scopeType: 'connectorType', connectorType: 'slack',         accessLevel: 'allowed' },
     ],
   }
   return presets[key] || null

@@ -814,12 +814,12 @@ function toolDefsForProvider(conn) {
       }
     }, {
       name: 'jira__search_issues',
-      description: `[Jira: ${conn.name}] Search Jira issues by JQL.`,
+      description: `[Jira: ${conn.name}] Search Jira issues by JQL. ⚠️ JQL does NOT support LIMIT — use the maxResults parameter instead to cap results. Common JQL: project="KEY" ORDER BY priority DESC, status="In Progress" AND assignee=currentUser(), created >= -7d. Fields: project, status, assignee, priority, issuetype, created, updated, resolution, summary, description, reporter, labels, fixVersion, component.`,
       inputSchema: {
         type: 'object', required: ['jql'],
         properties: {
-          jql:        { type: 'string', description: 'Jira Query Language expression' },
-          maxResults: { type: 'integer', default: 10, maximum: 50 }
+          jql:        { type: 'string', description: `JQL expression. ⚠️ IMPORTANT: JQL has NO "LIMIT" keyword — "LIMIT" is a reserved word in JQL and will cause an error if used. Never add LIMIT to your JQL. Instead use the maxResults parameter to control how many results are returned. Common patterns: project="KEY" ORDER BY priority DESC, status="In Progress", assignee=currentUser(), created >= -7d, issuetype="Bug".` },
+          maxResults: { type: 'integer', default: 10, maximum: 50, description: 'Maximum number of issues to return. Use this INSTEAD of LIMIT in JQL.' }
         }
       }
     }]
@@ -1616,17 +1616,40 @@ async function jiraCreateIssue(conn, config, { projectKey, summary, description,
 }
 
 async function jiraSearchIssues(conn, config, { jql, maxResults = 10 }) {
+  // ── Defensive: strip LIMIT from JQL (common LLM mistake — JQL has no LIMIT) ──
+  const limitMatch = jql.match(/\bLIMIT\s+(\d+)/i)
+  if (limitMatch) {
+    const parsedLimit = parseInt(limitMatch[1], 10)
+    if (parsedLimit > 0 && parsedLimit <= 50) {
+      maxResults = parsedLimit  // use the intended limit from JQL
+    }
+    jql = jql.replace(/\bLIMIT\s+\d+/i, '').trim()
+    console.log(`[jiraSearchIssues] Stripped LIMIT from JQL, using maxResults=${maxResults}`)
+  }
+
   const base = String(config.baseUrl || '').replace(/\/$/, '')
   assertSafeUrl(base)
   const basic = Buffer.from(`${config.email}:${config.apiKey}`).toString('base64')
-  const url = `${base}/rest/api/3/search?jql=${encodeURIComponent(jql)}&maxResults=${Math.min(maxResults, 50)}`
+  // Jira Cloud v3 /search/jql returns ONLY issue IDs unless fields are
+  // explicitly requested. Request the fields the agent needs for reporting.
+  const fields = 'key,summary,status,assignee,priority,issuetype,created,updated,resolutiondate,customfield_10001,customfield_10006'
+  const url = `${base}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=${Math.min(maxResults, 50)}&fields=${encodeURIComponent(fields)}`
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' } })
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) return { success: false, error: `Jira ${res.status}: ${JSON.stringify(body.errors || body)}` }
-  const issues = (body.issues || []).map(i => ({
-    key: i.key, summary: i.fields?.summary, status: i.fields?.status?.name,
-    assignee: i.fields?.assignee?.displayName, url: `${base}/browse/${i.key}`
-  }))
+  let bodyText = await res.text()
+  let body = {}
+  try { body = JSON.parse(bodyText) } catch (e) {}
+  if (!res.ok) return { success: false, error: `Jira ${res.status}: ${body.errorMessages ? body.errorMessages.join(', ') : (bodyText || 'Unknown error')}` }
+  const issues = (body.issues || []).map(i => {
+    const sprint = Array.isArray(i.fields?.customfield_10001) ? i.fields.customfield_10001[0] : null
+    return {
+      key: i.key, summary: i.fields?.summary, status: i.fields?.status?.name,
+      assignee: i.fields?.assignee?.displayName, priority: i.fields?.priority?.name,
+      issuetype: i.fields?.issuetype?.name, created: i.fields?.created, updated: i.fields?.updated,
+      resolutiondate: i.fields?.resolutiondate, storyPoints: i.fields?.customfield_10006 ?? null,
+      sprint: sprint ? { id: sprint.id, name: sprint.name, state: sprint.state } : null,
+      url: `${base}/browse/${i.key}`
+    }
+  })
   return { success: true, total: body.total, issues }
 }
 

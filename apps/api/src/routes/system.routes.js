@@ -2,7 +2,7 @@
 // System health / dependency scan routes.
 // Only available in non-production (local deployment) environments.
 
-import { scanDependencies, installDependency } from '../services/system-scan.service.js'
+import { scanDependencies, installDependency, runSecurityAudit } from '../services/system-scan.service.js'
 import { errorResponse, AppError } from '../utils/errors.js'
 
 export default async function systemRoutes(fastify) {
@@ -16,6 +16,8 @@ export default async function systemRoutes(fastify) {
     preHandler: [
       fastify.authenticate,
       async (req, reply) => {
+        // System admins always have access regardless of tenant role
+        if (req.user.isSystemAdmin) return
         if (!['OWNER', 'ADMIN'].includes(req.user.role)) {
           return reply.status(403).send({
             success: false,
@@ -25,6 +27,18 @@ export default async function systemRoutes(fastify) {
       }
     ]
   }
+
+  // GET /tenants/:tenantId/system/security
+  // Runs npm audit + pip check for known vulnerabilities.
+  fastify.get('/tenants/:tenantId/system/security', ownerAdmin, async (req, reply) => {
+    try {
+      if (isProduction) {
+        throw new AppError('NOT_AVAILABLE', 'Security audit is only available in local development environments', 403)
+      }
+      const report = await runSecurityAudit()
+      return reply.send({ success: true, data: report, meta: { timestamp: new Date().toISOString() } })
+    } catch (err) { return errorResponse(reply, err) }
+  })
 
   // GET /tenants/:tenantId/system/scan
   // Scans all registered dependencies and returns their status.

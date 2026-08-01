@@ -96,7 +96,7 @@ async function fetchAnalyticsData(tenantId) {
     ] = await Promise.all([
       // Agent counts
       query(
-        `SELECT status, COUNT(*) as count FROM agents WHERE tenant_id = $1 GROUP BY status`,
+        `SELECT status, COUNT(*) as count FROM agents WHERE tenant_id = $1 AND status != 'ARCHIVED' GROUP BY status`,
         [tenantId]
       ),
 

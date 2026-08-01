@@ -141,6 +141,19 @@ export async function loginUser({ email, password, tenantSlug, ip }) {
     }
 
     tenantMembership = memberships[0]
+  } else if (user.is_system_admin) {
+    // System admin without a specific tenant slug — auto-select their first
+    // membership so the JWT and login response carry a tenant context. Without
+    // this the frontend sends empty tenantId in API calls → UUID errors.
+    const { rows: memberships } = await query(
+      `SELECT tm.role, tm.status, t.id, t.name, t.slug, t.plan, t.status as tenant_status, t.approval_status
+       FROM tenant_members tm
+       JOIN tenants t ON t.id = tm.tenant_id
+       WHERE tm.user_id = $1 AND tm.status = 'ACTIVE'
+       ORDER BY tm.created_at ASC LIMIT 1`,
+      [user.id]
+    )
+    tenantMembership = memberships[0] || null
   }
 
   // Check tenant approval status (system admins can bypass)

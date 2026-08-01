@@ -95,7 +95,7 @@ export async function cancelTraining(tenantId, modelId) {
 export async function listCustomModels(tenantId) {
   const { rows } = await query(
     `SELECT id, model_name, base_model_path, data_source, dataset_path, db_query, web_url, db_connection_string,
-            status, error_message, train_log, ollama_tag, version, stream_token, created_at, updated_at
+            status, error_message, train_checkpoint, output_dir, created_at, updated_at
      FROM custom_models
      WHERE tenant_id = $1
      ORDER BY created_at DESC
@@ -106,20 +106,6 @@ export async function listCustomModels(tenantId) {
 }
 
 export async function deleteCustomModel(tenantId, modelId) {
-  // Try to remove from Ollama registry if it was pushed
-  const { rows: [model] } = await query(`SELECT ollama_tag, status FROM custom_models WHERE tenant_id = $1 AND id = $2`, [tenantId, modelId])
-  if (model && model.status === 'COMPLETED' && model.ollama_tag) {
-    try {
-      await fetch('http://localhost:11434/api/delete', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: model.ollama_tag })
-      })
-    } catch (err) {
-      console.warn('Failed to delete model from Ollama. It may already be removed:', err.message)
-    }
-  }
-  
   await query(`DELETE FROM custom_models WHERE tenant_id = $1 AND id = $2`, [tenantId, modelId])
 }
 
@@ -127,7 +113,7 @@ export async function getCustomModel(tenantId, modelId) {
   const { rows: [model] } = await query(
     `SELECT id, model_name, base_model_path, data_source, dataset_path,
             db_connection_string, db_query, web_url, status, error_message,
-            train_log, ollama_tag, version, stream_token, train_context, created_at, updated_at
+            train_checkpoint, output_dir, created_at, updated_at
      FROM custom_models
      WHERE tenant_id = $1 AND id = $2`,
     [tenantId, modelId]

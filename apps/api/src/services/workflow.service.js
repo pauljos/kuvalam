@@ -201,7 +201,7 @@ async function awaitTask(taskId, timeoutMs = AGENT_TASK_TIMEOUT_MS, maxStallMs =
 export async function createWorkflow(tenantId, { name, description, trigger = { type: 'MANUAL' }, steps = [], onFailure = 'STOP', userId }) {
   // Plan limit check
   const { rows: [countRow] } = await query(
-    'SELECT COUNT(*) as count FROM workflows WHERE tenant_id = $1',
+    'SELECT COUNT(*) as count FROM workflows WHERE tenant_id = $1 AND status != \'ARCHIVED\'',
     [tenantId]
   )
   await checkPlanLimit(tenantId, 'workflows', parseInt(countRow?.count || 0))
@@ -219,7 +219,7 @@ export async function createWorkflow(tenantId, { name, description, trigger = { 
 
 export async function listWorkflows(tenantId) {
   const { rows } = await query(
-    'SELECT * FROM workflows WHERE tenant_id = $1 ORDER BY created_at DESC',
+    'SELECT * FROM workflows WHERE tenant_id = $1 AND status != \'ARCHIVED\' ORDER BY created_at DESC',
     [tenantId]
   )
   return rows

@@ -71,6 +71,7 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (tenantId) loadAnalytics(tenantId)
+    else setLoading(false)
   }, [tenantId])
 
   async function loadAnalytics(tid: string, days?: number) {
@@ -90,7 +91,7 @@ export default function AnalyticsPage() {
 
   function changeRange(days: number) {
     setDateRange(days)
-    loadAnalytics(tenantId, days)
+    if (tenantId) loadAnalytics(tenantId, days)
   }
 
   if (loading) {
@@ -118,8 +119,8 @@ export default function AnalyticsPage() {
         <div className="page-body">
           <div className="card empty-state">
             <span className="empty-icon">📊</span>
-            <h2 className="empty-title">No analytics data yet</h2>
-            <p className="empty-desc">Start creating agents and dispatching tasks to see performance metrics here.</p>
+            <h2 className="empty-title">{tenantId ? 'No analytics data yet' : 'Select an organization'}</h2>
+            <p className="empty-desc">{tenantId ? 'Start creating agents and dispatching tasks to see performance metrics here.' : 'Sign in with an organization account or select a tenant to view analytics.'}</p>
           </div>
         </div>
       </div>
@@ -157,7 +158,7 @@ export default function AnalyticsPage() {
               Updated {refreshed.toLocaleTimeString()}
             </span>
           )}
-          <button className="btn btn-secondary" onClick={() => loadAnalytics(tenantId)}>
+          <button className="btn btn-secondary" onClick={() => tenantId && loadAnalytics(tenantId)}>
             ↻ Refresh
           </button>
         </div>

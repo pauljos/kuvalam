@@ -254,6 +254,82 @@ export default async function settingsRoutes(fastify) {
       return reply.send({ success: true, data: tenant, meta: ts() })
     } catch (err) { return errorResponse(reply, err) }
   })
+
+  // ──────────────────────────────────────────────
+  // Prompt Templates — per-tenant archetype overrides
+  // ──────────────────────────────────────────────
+
+  // GET /tenants/:tenantId/settings/prompt-templates
+  fastify.get('/tenants/:tenantId/settings/prompt-templates', auth, async (req, reply) => {
+    try {
+      const { rows } = await query(
+        'SELECT id, archetype, label, system_prompt, is_active, updated_at FROM prompt_templates WHERE tenant_id = $1 ORDER BY archetype',
+        [req.params.tenantId]
+      )
+      return reply.send({ success: true, data: rows, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // PUT /tenants/:tenantId/settings/prompt-templates/:archetype
+  fastify.put('/tenants/:tenantId/settings/prompt-templates/:archetype', ownerAdmin, async (req, reply) => {
+    try {
+      const { system_prompt, is_active } = req.body
+      const { tenantId, archetype } = req.params
+
+      if (system_prompt === undefined && is_active === undefined) {
+        throw new AppError('INVALID_INPUT', 'system_prompt or is_active is required', 400)
+      }
+
+      // Upsert: if the row doesn't exist for this tenant+archetype, create it
+      // COALESCE in INSERT provides defaults for new rows; COALESCE in UPDATE
+      // preserves existing values when a field is not provided.
+      const { rows: [updated] } = await query(
+        `INSERT INTO prompt_templates (tenant_id, archetype, label, system_prompt, is_active)
+         VALUES ($1, $2, $2, COALESCE($3, ''), COALESCE($4, true))
+         ON CONFLICT (tenant_id, archetype)
+         DO UPDATE SET
+           system_prompt = COALESCE($3, prompt_templates.system_prompt),
+           is_active = COALESCE($4, prompt_templates.is_active),
+           updated_at = NOW()
+         RETURNING id, archetype, label, system_prompt, is_active, updated_at`,
+        [tenantId, archetype, system_prompt || null, is_active !== undefined ? is_active : null]
+      )
+
+      await auditLog({
+        eventType: 'tenant.prompt_template_updated',
+        tenantId,
+        actorId: req.user.sub,
+        actorType: 'USER',
+        action: 'UPDATE_PROMPT_TEMPLATE',
+        afterState: { archetype, hasPrompt: !!system_prompt }
+      })
+
+      return reply.send({ success: true, data: updated, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
+
+  // POST /tenants/:tenantId/settings/prompt-templates/:archetype/reset
+  fastify.post('/tenants/:tenantId/settings/prompt-templates/:archetype/reset', ownerAdmin, async (req, reply) => {
+    try {
+      const { tenantId, archetype } = req.params
+
+      const { rowCount } = await query(
+        'DELETE FROM prompt_templates WHERE tenant_id = $1 AND archetype = $2',
+        [tenantId, archetype]
+      )
+
+      await auditLog({
+        eventType: 'tenant.prompt_template_reset',
+        tenantId,
+        actorId: req.user.sub,
+        actorType: 'USER',
+        action: 'RESET_PROMPT_TEMPLATE',
+        afterState: { archetype, wasDeleted: rowCount > 0 }
+      })
+
+      return reply.send({ success: true, data: { archetype, reset: rowCount > 0 }, meta: ts() })
+    } catch (err) { return errorResponse(reply, err) }
+  })
 }
 
 // Mask all API keys in the config object for safe client display

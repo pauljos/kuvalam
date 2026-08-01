@@ -16,6 +16,7 @@ const CONNECTORS = [
     // Slack is OAuth-first, but also accepts a bot token (xoxb-...) pasted
     // directly — set `hasApiKeyFallback` and the modal shows both options.
     authType: 'OAUTH',
+    multiInstance: true,
     hasApiKeyFallback: true,
     fallbackLabel: 'Or paste a Slack bot token',
     fallbackFields: [
@@ -31,6 +32,7 @@ const CONNECTORS = [
     category: 'Project Management',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'API Token', type: 'password', placeholder: 'ATATT3x...' },
       { name: 'baseUrl', label: 'Jira Base URL', type: 'text', placeholder: 'https://yourorg.atlassian.net' },
@@ -46,6 +48,7 @@ const CONNECTORS = [
     category: 'Developer Tools',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'token', label: 'Personal Access Token', type: 'password', placeholder: 'ghp_...' },
     ],
@@ -58,6 +61,7 @@ const CONNECTORS = [
     category: 'Communication',
     deploymentType: 'cloud',
     authType: 'OAUTH',
+    multiInstance: true,
     docsUrl: 'https://console.cloud.google.com',
   },
   {
@@ -68,6 +72,7 @@ const CONNECTORS = [
     category: 'Productivity',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'Integration Secret', type: 'password', placeholder: 'secret_...' },
     ],
@@ -80,6 +85,7 @@ const CONNECTORS = [
     category: 'CRM',
     deploymentType: 'cloud',
     authType: 'OAUTH',
+    multiInstance: true,
     docsUrl: 'https://login.salesforce.com',
   },
 
@@ -91,6 +97,7 @@ const CONNECTORS = [
     category: 'Project Management',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'API Key', type: 'password', placeholder: 'lin_api_...' },
     ],
@@ -172,6 +179,7 @@ const CONNECTORS = [
     category: 'Cloud',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiToken', label: 'Terraform Cloud API Token', type: 'password', placeholder: 'tf-api-...' },
       { name: 'organization', label: 'Organization Name', type: 'text', placeholder: 'my-org' },
@@ -204,6 +212,7 @@ const CONNECTORS = [
     category: 'IoT',
     deploymentType: 'generic',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'baseUrl', label: 'ThingsBoard URL', type: 'text', placeholder: 'https://thingsboard.example.com' },
       { name: 'apiToken', label: 'JWT Token', type: 'password', placeholder: 'eyJ...' },
@@ -220,6 +229,7 @@ const CONNECTORS = [
     category: 'Communication',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'accountSid', label: 'Account SID', type: 'text', placeholder: 'AC...' },
       { name: 'authToken', label: 'Auth Token', type: 'password', placeholder: '••••' },
@@ -234,6 +244,7 @@ const CONNECTORS = [
     category: 'Communication',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'API Key', type: 'password', placeholder: 'SG....' },
       { name: 'fromEmail', label: 'Default From Email', type: 'email', placeholder: 'agent@yourcompany.com' },
@@ -247,6 +258,7 @@ const CONNECTORS = [
     category: 'Communication',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'botToken', label: 'Bot Token', type: 'password', placeholder: 'MTE...' },
       { name: 'defaultChannel', label: 'Default Channel ID (optional)', type: 'text', placeholder: '123456789' },
@@ -295,6 +307,7 @@ const CONNECTORS = [
     category: 'Finance',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'secretKey', label: 'Secret Key', type: 'password', placeholder: 'sk_live_...' },
       { name: 'webhookSecret', label: 'Webhook Signing Secret (optional)', type: 'password', placeholder: 'whsec_...' },
@@ -308,6 +321,7 @@ const CONNECTORS = [
     category: 'Finance',
     deploymentType: 'cloud',
     authType: 'OAUTH',
+    multiInstance: true,
     docsUrl: 'https://developer.intuit.com',
   },
   // ═══════════════════════════════════════════════════════════════════════
@@ -321,6 +335,7 @@ const CONNECTORS = [
     category: 'Support',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'subdomain', label: 'Subdomain', type: 'text', placeholder: 'yourcompany' },
       { name: 'email', label: 'Agent Email', type: 'email', placeholder: 'bot@yourcompany.com' },
@@ -335,6 +350,7 @@ const CONNECTORS = [
     category: 'Support',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'instanceUrl', label: 'Instance URL', type: 'text', placeholder: 'https://dev12345.service-now.com' },
       { name: 'username', label: 'Username', type: 'text', placeholder: 'admin' },
@@ -349,6 +365,7 @@ const CONNECTORS = [
     category: 'CRM',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'Private App Access Token', type: 'password', placeholder: 'pat-...' },
     ],
@@ -364,6 +381,7 @@ const CONNECTORS = [
     category: 'Data',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'account', label: 'Account Identifier', type: 'text', placeholder: 'xy12345.us-east-1' },
       { name: 'username', label: 'Username', type: 'text', placeholder: 'AGENT_USER' },
@@ -416,6 +434,7 @@ const CONNECTORS = [
     category: 'Data',
     deploymentType: 'generic',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'baseUrl', label: 'Elasticsearch URL', type: 'text', placeholder: 'https://es.example.com:9200' },
       { name: 'apiKey', label: 'Encoded API Key', type: 'password', placeholder: 'ApiKey base64...' },
@@ -430,6 +449,7 @@ const CONNECTORS = [
     category: 'Data',
     deploymentType: 'generic',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'connectionUrl', label: 'Redis URL', type: 'text', placeholder: 'redis://user:pass@host:6379/0' },
     ],
@@ -445,6 +465,7 @@ const CONNECTORS = [
     category: 'Monitoring',
     deploymentType: 'generic',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'baseUrl', label: 'Prometheus URL', type: 'text', placeholder: 'https://prometheus.example.com' },
       { name: 'username', label: 'Basic Auth User (optional)', type: 'text', placeholder: 'admin' },
@@ -459,6 +480,7 @@ const CONNECTORS = [
     category: 'Monitoring',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'apiKey', label: 'API Key', type: 'password', placeholder: '••••' },
       { name: 'appKey', label: 'Application Key', type: 'password', placeholder: '••••' },
@@ -476,6 +498,7 @@ const CONNECTORS = [
     category: 'Documentation',
     deploymentType: 'cloud',
     authType: 'API_KEY',
+    multiInstance: true,
     fields: [
       { name: 'baseUrl', label: 'Confluence URL', type: 'text', placeholder: 'https://yourorg.atlassian.net/wiki' },
       { name: 'email', label: 'Email', type: 'email', placeholder: 'bot@yourorg.com' },
@@ -886,6 +909,7 @@ export default function ConnectorsPage() {
 
   const [visibleConnectors, setVisibleConnectors] = useState(CONNECTORS)
   const [deploymentFilter, setDeploymentFilter] = useState<'all' | 'local' | 'cloud' | 'generic'>('all')
+  const [activeTab, setActiveTab] = useState<'providers' | 'connections'>('providers')
 
   useEffect(() => {
     if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
@@ -934,21 +958,158 @@ export default function ConnectorsPage() {
       </div>
 
       <div className="tab-bar" style={{ marginTop: 20 }}>
-        <a href="/dashboard/connectors" className="tab-bar-item active">Providers</a>
-        <a href="/dashboard/tools" className="tab-bar-item">Tools & MCP</a>
+        <button
+          className={`tab-bar-item${activeTab === 'providers' ? ' active' : ''}`}
+          onClick={() => setActiveTab('providers')}
+          style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+        >
+          Providers
+        </button>
+        <button
+          className={`tab-bar-item${activeTab === 'connections' ? ' active' : ''}`}
+          onClick={() => setActiveTab('connections')}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+        >
+          Configured Connections
+          {activeConnections.length > 0 && (
+            <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 10, background: activeTab === 'connections' ? 'var(--green)' : 'var(--bg-hover)', color: activeTab === 'connections' ? '#fff' : 'var(--text-muted)' }}>
+              {activeConnections.length}
+            </span>
+          )}
+        </button>
+        <a href="/dashboard/tools" className="tab-bar-item">Tools &amp; MCP</a>
       </div>
 
       <div className="page-body">
-        {/* How Connectors relate to Tools */}
-        <div className="card" style={{ padding: 14, marginBottom: 20, display: 'flex', gap: 12, alignItems: 'flex-start', background: 'linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%)', border: '1px solid var(--green-border)' }}>
-          <span style={{ fontSize: 18, lineHeight: 1.4 }}>🔑</span>
-          <div style={{ fontSize: 13, color: 'var(--text-sub)', lineHeight: 1.6 }}>
-            <strong>Providers are credential stores</strong> — think of them as the account your agent acts through.
-            Once a provider is <em>Active</em> (passes the Test), the matching tools appear on
-            <a href="/dashboard/tools" style={{ color: 'var(--green-dark)' }}> Tools &amp; MCP</a> and become
-            callable by every agent on this tenant. New providers start as <em>Pending</em> until verified.
-          </div>
-        </div>
+        {/* ── Configured Connections Tab ──────────────────────────────────── */}
+        {activeTab === 'connections' && (
+          <>
+            {activeConnections.length === 0 ? (
+              <div className="card" style={{ padding: 48, textAlign: 'center' }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>🔌</div>
+                <h3 style={{ fontWeight: 700, marginBottom: 6 }}>No connections yet</h3>
+                <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 18 }}>
+                  Go to the <strong>Providers</strong> tab to connect your first service.
+                </p>
+                <button className="btn btn-primary btn-sm" onClick={() => setActiveTab('providers')}>
+                  Browse Providers →
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {activeConnections.map(conn => {
+                  const def = [...CONNECTORS, ...LOCAL_CONNECTORS].find(c => c.id === conn.tool_id)
+                  const isActive = conn.status === 'ACTIVE'
+                  const isError = conn.status === 'ERROR'
+                  const dt = conn.deployment_type || (def as any)?.deploymentType || 'cloud'
+                  const dtColors = DEPLOYMENT_COLORS[dt] || DEPLOYMENT_COLORS['cloud']
+                  return (
+                    <div key={conn.id} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '14px 18px', borderRadius: 10,
+                      border: `1px solid ${isActive ? 'var(--green-border)' : isError ? '#fecaca' : '#fef3c7'}`,
+                      background: isActive ? 'var(--green-bg)' : isError ? '#fef2f2' : '#fffbeb',
+                      transition: 'all 0.2s',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <div style={{
+                          width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+                          background: isActive ? '#d1fae5' : isError ? '#fecaca' : '#fef3c7',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+                        }}>
+                          {def?.icon || '🔗'}
+                        </div>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontWeight: 700, fontSize: 14 }}>{conn.name}</span>
+                            {dtColors && (
+                              <span style={{
+                                fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                                background: dtColors.bg, color: dtColors.fg, border: `1px solid ${dtColors.border}`,
+                              }}>
+                                {dtColors.icon} {dtColors.label}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                            Connected {new Date(conn.created_at).toLocaleDateString()}
+                            {conn.last_tested_at && ` · Tested ${new Date(conn.last_tested_at).toLocaleDateString()}`}
+                          </div>
+                          {isError && conn.last_error && (
+                            <div style={{ fontSize: 11, color: '#991b1b', marginTop: 4, maxWidth: 400 }}>⚠ {conn.last_error}</div>
+                          )}
+                          {conn.status === 'PENDING' && (
+                            <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>
+                              {conn.auth_type === 'OAUTH2'
+                                ? 'Awaiting OAuth authorisation — click Reconnect to retry.'
+                                : 'Click "Test" to verify credentials and activate.'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 20,
+                          background: isActive ? '#d1fae5' : isError ? '#fecaca' : '#fef3c7',
+                          color: isActive ? '#065f46' : isError ? '#991b1b' : '#92400e',
+                        }}>
+                          {isActive ? '● Active' : isError ? '● Error' : '○ Pending'}
+                        </span>
+                        <button className="btn btn-secondary btn-sm" disabled={testing === conn.id}
+                          onClick={() => testConnector(conn.id)}
+                          style={{ fontSize: 12, padding: '4px 12px' }}>
+                          {testing === conn.id ? (
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>⟳ Testing...</span>
+                          ) : 'Test'}
+                        </button>
+                        {conn.auth_type !== 'OAUTH2' && (
+                          <button className="btn btn-sm" onClick={() => {
+                            const def = [...CONNECTORS, ...LOCAL_CONNECTORS].find(c => c.id === conn.tool_id)
+                            if (def) {
+                              setEditingConnection(conn)
+                              setConfiguring(def)
+                              setModalTestState('idle')
+                              setModalTestError(null)
+                              const seeded: Record<string, string> = {}
+                              for (const f of (def.fields || [])) {
+                                const val = conn.config?.[f.name] || conn.config?.connection_string || ''
+                                if (val) seeded[f.name] = val
+                              }
+                              if (conn.name) seeded['_name'] = conn.name
+                              setFormValues(seeded)
+                              if (def.id === 'rest') {
+                                setRestConfig(conn.config as any || null)
+                              }
+                            }
+                          }}
+                            style={{ background: 'transparent', color: 'var(--text-sub)', border: '1px solid var(--border)', fontSize: 12, padding: '4px 12px' }}>
+                            Edit
+                          </button>
+                        )}
+                        <button className="btn btn-sm" onClick={() => removeConnector(conn.id)}
+                          style={{ background: '#FEF2F2', color: '#dc2626', border: '1px solid #FECACA', fontSize: 12, padding: '4px 12px' }}>Remove</button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── Providers Tab ────────────────────────────────────────────────── */}
+        {activeTab === 'providers' && (
+          <>
+            {/* How Connectors relate to Tools */}
+            <div className="card" style={{ padding: 14, marginBottom: 20, display: 'flex', gap: 12, alignItems: 'flex-start', background: 'linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%)', border: '1px solid var(--green-border)' }}>
+              <span style={{ fontSize: 18, lineHeight: 1.4 }}>🔑</span>
+              <div style={{ fontSize: 13, color: 'var(--text-sub)', lineHeight: 1.6 }}>
+                <strong>Providers are credential stores</strong> — think of them as the account your agent acts through.
+                Once a provider is <em>Active</em> (passes the Test), the matching tools appear on
+                <a href="/dashboard/tools" style={{ color: 'var(--green-dark)' }}> Tools &amp; MCP</a> and become
+                callable by every agent on this tenant. New providers start as <em>Pending</em> until verified.
+              </div>
+            </div>
         {/* Deployment type filter */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginRight: 4 }}>Environment:</span>
@@ -967,111 +1128,6 @@ export default function ConnectorsPage() {
             )
           })}
         </div>
-
-        {/* Configured Connections (Active + Pending + Error) */}
-        {activeConnections.length > 0 && (
-          <div className="card" style={{ padding: 24, marginBottom: 28 }}>
-            <h2 style={{ fontSize: 15, fontWeight: 800, marginBottom: 16 }}>Configured Connections</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {activeConnections.map(conn => {
-                const def = [...CONNECTORS, ...LOCAL_CONNECTORS].find(c => c.id === conn.tool_id)
-                const isActive = conn.status === 'ACTIVE'
-                const isError = conn.status === 'ERROR'
-                const dt = conn.deployment_type || (def as any)?.deploymentType || 'cloud'
-                const dtColors = DEPLOYMENT_COLORS[dt] || DEPLOYMENT_COLORS['cloud']
-                return (
-                  <div key={conn.id} style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '14px 18px', borderRadius: 10,
-                    border: `1px solid ${isActive ? 'var(--green-border)' : isError ? '#fecaca' : '#fef3c7'}`,
-                    background: isActive ? 'var(--green-bg)' : isError ? '#fef2f2' : '#fffbeb',
-                    transition: 'all 0.2s',
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                      <div style={{
-                        width: 40, height: 40, borderRadius: 10, flexShrink: 0,
-                        background: isActive ? '#d1fae5' : isError ? '#fecaca' : '#fef3c7',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
-                      }}>
-                        {def?.icon || '🔗'}
-                      </div>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span style={{ fontWeight: 700, fontSize: 14 }}>{conn.name}</span>
-                          {dtColors && (
-                            <span style={{
-                              fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
-                              background: dtColors.bg, color: dtColors.fg, border: `1px solid ${dtColors.border}`,
-                            }}>
-                              {dtColors.icon} {dtColors.label}
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          Connected {new Date(conn.created_at).toLocaleDateString()}
-                          {conn.last_tested_at && ` · Tested ${new Date(conn.last_tested_at).toLocaleDateString()}`}
-                        </div>
-                        {isError && conn.last_error && (
-                          <div style={{ fontSize: 11, color: '#991b1b', marginTop: 4, maxWidth: 400 }}>⚠ {conn.last_error}</div>
-                        )}
-                        {conn.status === 'PENDING' && (
-                          <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>
-                            {conn.auth_type === 'OAUTH2'
-                              ? 'Awaiting OAuth authorisation — click Reconnect to retry.'
-                              : 'Click "Test" to verify credentials and activate.'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <span style={{
-                        fontSize: 11, fontWeight: 700, padding: '4px 12px', borderRadius: 20,
-                        background: isActive ? '#d1fae5' : isError ? '#fecaca' : '#fef3c7',
-                        color: isActive ? '#065f46' : isError ? '#991b1b' : '#92400e',
-                      }}>
-                        {isActive ? '● Active' : isError ? '● Error' : '○ Pending'}
-                      </span>
-                      <button className="btn btn-secondary btn-sm" disabled={testing === conn.id}
-                        onClick={() => testConnector(conn.id)}
-                        style={{ fontSize: 12, padding: '4px 12px' }}>
-                        {testing === conn.id ? (
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>⟳ Testing...</span>
-                        ) : 'Test'}
-                      </button>
-                      {conn.auth_type !== 'OAUTH2' && (
-                        <button className="btn btn-sm" onClick={() => {
-                          const def = [...CONNECTORS, ...LOCAL_CONNECTORS].find(c => c.id === conn.tool_id)
-                          if (def) {
-                            setEditingConnection(conn)
-                            setConfiguring(def)
-                            setModalTestState('idle')
-                            setModalTestError(null)
-                            const seeded: Record<string, string> = {}
-                            for (const f of (def.fields || [])) {
-                              const val = conn.config?.[f.name] || conn.config?.connection_string || ''
-                              if (val) seeded[f.name] = val
-                            }
-                            // Carry over name
-                            if (conn.name) seeded['_name'] = conn.name
-                            setFormValues(seeded)
-                            if (def.id === 'rest') {
-                              setRestConfig(conn.config as any || null)
-                            }
-                          }
-                        }}
-                          style={{ background: 'transparent', color: 'var(--text-sub)', border: '1px solid var(--border)', fontSize: 12, padding: '4px 12px' }}>
-                          Edit
-                        </button>
-                      )}
-                      <button className="btn btn-sm" onClick={() => removeConnector(conn.id)}
-                        style={{ background: '#FEF2F2', color: '#dc2626', border: '1px solid #FECACA', fontSize: 12, padding: '4px 12px' }}>Remove</button>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
 
         {/* Connector Catalogue by Category */}
         {categories.map(category => (
@@ -1212,6 +1268,8 @@ export default function ConnectorsPage() {
             </div>
           </div>
         ))}
+          </>
+        )}
       </div>
 
       {/* Config Modal */}

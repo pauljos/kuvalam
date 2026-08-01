@@ -175,7 +175,9 @@ ${text.slice(0, 3000)}`
   try {
     const response = await complete({
       messages: [{ role: 'user', content: prompt }],
-      model: llmConfig?.model || 'gpt-4o-mini',
+      // No hardcoded model — routeModel() resolves the tenant's Settings
+      // default when llmConfig.model is unset; fails loudly if none configured.
+      model: llmConfig?.model || null,
       llmConfig,
       provider: provider || 'openai',
       temperature: 0.1,

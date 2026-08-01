@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700" width="900" height="700" font-family="Arial, sans-serif">
+  <!-- Background -->
+  <rect width="900" height="700" fill="#f8fafc"/>
+  <!-- Title -->
+  <text x="450" y="42" text-anchor="middle" font-size="22" font-weight="bold" fill="#0f172a">Residential Site Plan — 5 Villa Development</text>
+  <text x="450" y="62" text-anchor="middle" font-size="13" fill="#64748b">Total plot: 1.2 acres | 5 × 3-bedroom villas | Central garden | Access road</text>
+  <!-- Plot boundary -->
+  <rect x="50" y="80" width="800" height="570" rx="4" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="10,5"/>
+  <!-- Garden -->
+  <ellipse cx="450" cy="350" rx="130" ry="95" fill="#dcfce7" stroke="#86efac" stroke-width="2"/>
+  <text x="450" y="344" text-anchor="middle" font-size="14" font-weight="bold" fill="#166534">Central</text>
+  <text x="450" y="362" text-anchor="middle" font-size="14" fill="#166534">Garden</text>
+  <!-- Path lines to garden -->
+  <line x1="190" y1="160" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>
+  <line x1="710" y1="160" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>
+  <line x1="790" y1="340" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>
+  <line x1="710" y1="530" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>
+  <line x1="190" y1="530" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>
+  <!-- Villas -->
+  
+  <rect x="120" y="110" width="140" height="100" rx="8" fill="#bfdbfe" stroke="#3b82f6" stroke-width="2.5"/>
+  <text x="190" y="152" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">V1</text>
+  <text x="190" y="172" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
+  <text x="190" y="186" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>
+  <rect x="640" y="110" width="140" height="100" rx="8" fill="#bbf7d0" stroke="#22c55e" stroke-width="2.5"/>
+  <text x="710" y="152" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">V2</text>
+  <text x="710" y="172" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
+  <text x="710" y="186" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>
+  <rect x="720" y="290" width="140" height="100" rx="8" fill="#fef9c3" stroke="#eab308" stroke-width="2.5"/>
+  <text x="790" y="332" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">V3</text>
+  <text x="790" y="352" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
+  <text x="790" y="366" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>
+  <rect x="640" y="480" width="140" height="100" rx="8" fill="#fce7f3" stroke="#ec4899" stroke-width="2.5"/>
+  <text x="710" y="522" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">V4</text>
+  <text x="710" y="542" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
+  <text x="710" y="556" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>
+  <rect x="120" y="480" width="140" height="100" rx="8" fill="#e0e7ff" stroke="#6366f1" stroke-width="2.5"/>
+  <text x="190" y="522" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">V5</text>
+  <text x="190" y="542" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
+  <text x="190" y="556" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>
+  <!-- Access road -->
+  <rect x="50" y="630" width="800" height="30" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="450" y="651" text-anchor="middle" font-size="13" fill="#475569" font-weight="bold">ACCESS ROAD</text>
+  <!-- Road entry arrows -->
+  <polygon points="100,655 85,642 85,668" fill="#94a3b8"/>
+  <polygon points="800,655 815,642 815,668" fill="#94a3b8"/>
+  <!-- North indicator -->
+  <circle cx="845" cy="115" r="22" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="845" y="101" text-anchor="middle" font-size="11" font-weight="bold" fill="#0f172a">N</text>
+  <polygon points="845,106 840,126 845,120 850,126" fill="#0f172a"/>
+  <!-- Scale bar -->
+  <line x1="680" y1="600" x2="780" y2="600" stroke="#475569" stroke-width="2"/>
+  <line x1="680" y1="595" x2="680" y2="605" stroke="#475569" stroke-width="2"/>
+  <line x1="780" y1="595" x2="780" y2="605" stroke="#475569" stroke-width="2"/>
+  <text x="730" y="618" text-anchor="middle" font-size="11" fill="#475569">50 m</text>
+  <!-- Legend -->
+  <rect x="55" y="90" width="120" height="88" rx="4" fill="white" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="115" y="106" text-anchor="middle" font-size="11" font-weight="bold" fill="#0f172a">Legend</text>
+  <rect x="62" y="112" width="14" height="10" fill="#bfdbfe" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="82" y="122" font-size="10" fill="#334155">Villa unit</text>
+  <ellipse cx="69" cy="140" rx="7" ry="5" fill="#dcfce7" stroke="#86efac" stroke-width="1.5"/>
+  <text x="82" y="144" font-size="10" fill="#334155">Garden</text>
+  <rect x="62" y="155" width="14" height="8" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="82" y="163" font-size="10" fill="#334155">Road</text>
+</svg>

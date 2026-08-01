@@ -19,12 +19,13 @@ const PROVIDERS: Array<{
 }> = [
   { id: 'openai', name: 'OpenAI', icon: '🤖', color: '#10a37f', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.openai.com/v1' },
   { id: 'anthropic', name: 'Anthropic', icon: '🧠', color: '#c07000', models: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'], keyLabel: 'API Key', keyPlaceholder: 'sk-ant-...', baseUrl: null },
-  { id: 'openrouter', name: 'OpenRouter', icon: '🔀', color: '#6366f1', models: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct', 'mistralai/mistral-large'], keyLabel: 'API Key', keyPlaceholder: 'sk-or-v1-...', baseUrl: 'https://openrouter.ai/api/v1' },
+  { id: 'openrouter', name: 'OpenRouter', icon: '🔀', color: '#6366f1', models: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro-1.5', 'meta-llama/llama-3.1-70b-instruct', 'mistralai/mistral-large', 'moonshotai/kimi-k3', 'moonshotai/kimi-k2', 'moonshotai/kimi-k2-thinking', 'moonshotai/kimi-k2.5', 'moonshotai/kimi-k2.6', 'moonshotai/kimi-k2.7-code'], keyLabel: 'API Key', keyPlaceholder: 'sk-or-v1-...', baseUrl: 'https://openrouter.ai/api/v1' },
   { id: 'opencode', name: 'OpenCode', icon: '💻', color: '#10b981', models: ['deepseek-v4-pro', 'minimax-m3', 'qwen3.7-max', 'mimo-v2-pro'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://opencode.ai/zen/go/v1' },
   { id: 'deepseek', name: 'DeepSeek', icon: '🔍', color: '#4f46e5', models: ['deepseek-chat', 'deepseek-reasoner'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.deepseek.com/v1' },
   { id: 'kimi', name: 'Kimi (Moonshot)', icon: '🌙', color: '#8b5cf6', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-auto'], keyLabel: 'API Key', keyPlaceholder: 'sk-...', baseUrl: 'https://api.moonshot.cn/v1' },
-  { id: 'groq', name: 'Groq (Fast)', icon: '⚡', color: '#f59e0b', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it'], keyLabel: 'API Key', keyPlaceholder: 'gsk_...', baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'groq', name: 'Groq (Fast)', icon: '⚡', color: '#f59e0b', models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it', 'deepseek-r1-distill-llama-70b', 'deepseek-r1-distill-qwen-32b', 'qwen-2.5-32b', 'qwen-2.5-coder-32b', 'llama-3.2-3b-preview', 'llama-3.2-1b-preview', 'llama-3.2-11b-vision-preview', 'mistral-saba-24b', 'llama-guard-3-8b', 'whisper-large-v3'], keyLabel: 'API Key', keyPlaceholder: 'gsk_...', baseUrl: 'https://api.groq.com/openai/v1' },
   { id: 'mistral', name: 'Mistral AI', icon: '🌊', color: '#3b82f6', models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest'], keyLabel: 'API Key', keyPlaceholder: 'your-mistral-key', baseUrl: 'https://api.mistral.ai/v1' },
+
   // ── Local / self-hosted OpenAI-compatible servers ──────────────────────────
   { id: 'ollama', name: 'Ollama (Local)', icon: '🦙', color: '#3f8a43', kind: 'local', models: ['llama3.2', 'llama3.1', 'mistral', 'gemma2', 'phi3', 'qwen2.5', 'deepseek-r1'], keyLabel: 'Base URL', keyPlaceholder: 'http://localhost:11434/v1', baseUrl: 'http://localhost:11434/v1', description: 'Run open models on your own machine with Ollama. No API key required.' },
   { id: 'lmstudio', name: 'LM Studio (Local)', icon: '🖥️', color: '#3f8a43', kind: 'local', models: ['local-model'], keyLabel: 'Base URL', keyPlaceholder: 'http://localhost:1234/v1', baseUrl: 'http://localhost:1234/v1', description: 'Uses LM Studio\u2019s built-in OpenAI-compatible server (enable it in the Server tab).' },
@@ -32,7 +33,7 @@ const PROVIDERS: Array<{
   { id: 'custom', name: 'Custom OpenAI-Compatible', icon: '🛠️', color: '#3f8a43', kind: 'local', models: ['gpt-4o-mini', 'gpt-4o', 'Meta-Llama-3-70B', 'Mistral-7B', 'deepseek-coder-6.7b', 'Qwen-14B'], keyLabel: 'Base URL', keyPlaceholder: 'https://your-server/v1', baseUrl: '', description: 'Point at any OpenAI-compatible endpoint (vLLM, llama.cpp, TGI, Together, Fireworks, etc.).' },
 ]
 
-function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
+function ProviderCard({ provider, config, tenantId, onSaved, toast, defaultProvider, onSetDefault }: any) {
   const { confirm, ConfirmDialog } = useConfirm()
   const [open, setOpen] = useState(false)
   const isLocal = provider.kind === 'local'
@@ -46,11 +47,12 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
   const [testResult, setTestResult] = useState<any>(null)
   const [dynamicModels, setDynamicModels] = useState<string[]>([])
   const [removing, setRemoving] = useState(false)
+  const [customModelMode, setCustomModelMode] = useState(false)
 
   const isConfigured = !!config
   const set = (k: string) => (e: any) => setForm(f => ({ ...f, [k]: e.target.value }))
 
-  // Auto-fetch models when a local provider card opens
+  // Auto-fetch models when a local provider card opens (or its base URL changes)
   useEffect(() => {
     if (!open || !isLocal || !provider.id) return
     let cancelled = false
@@ -61,11 +63,13 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
         const result = await api.testLLMProvider(tenantId, { provider: provider.id, baseUrl, model: form.model || provider.models[0] })
         if (!cancelled && result?.models?.length > 0) {
           setDynamicModels(result.models)
+          // If the current value isn't a real model, prefill the first available one
+          setForm(f => !f.model || !result.models.includes(f.model) ? { ...f, model: result.models[0] } : f)
         }
       } catch {}
     })()
     return () => { cancelled = true }
-  }, [open, provider.id])
+  }, [open, provider.id, form.baseUrl])
 
   async function save(e: any) {
     e.preventDefault(); setSaving(true); setTestResult(null)
@@ -135,6 +139,55 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
     } catch (err: any) { toast('error', 'Remove failed', err.message) } finally { setRemoving(false) }
   }
 
+  // ── Model picker JSX (extracted to avoid nested ternaries that TSX can't parse) ──
+  const modelPicker = !isLocal ? (
+    <>
+      <select className="input" value={form.model} onChange={set('model')}>
+        {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <p className="form-hint">Choose the model for your agents. Start with smaller/faster options for testing to save cost.</p>
+    </>
+  ) : dynamicModels.length > 0 && !customModelMode ? (
+    <>
+      <select
+        className="input"
+        value={form.model}
+        onChange={e => {
+          const v = e.target.value
+          if (v === '__custom__') { setCustomModelMode(true); return }
+          setForm(f => ({ ...f, model: v }))
+        }}
+        required
+      >
+        {dynamicModels.map(m => <option key={m} value={m}>{m}</option>)}
+        <option value="__custom__">✏️ Type custom model name…</option>
+      </select>
+      <p className="form-hint">Live models found on your Ollama server ({dynamicModels.length}).</p>
+    </>
+  ) : (
+    <>
+      <input
+        className="input"
+        list={`models-${provider.id}`}
+        value={form.model}
+        onChange={set('model')}
+        placeholder="e.g. llama3.2, deepseek-r1:7b, qwen2.5-coder:32b"
+        required
+      />
+      {(dynamicModels.length > 0 ? dynamicModels : provider.models).length > 0 && (
+        <datalist id={`models-${provider.id}`}>
+          {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m} />)}
+        </datalist>
+      )}
+      {dynamicModels.length > 0 && (
+        <button type="button" className="btn btn-secondary btn-sm" style={{ marginTop: 6 }} onClick={() => setCustomModelMode(false)}>
+          ⬆ Show live models ({dynamicModels.length})
+        </button>
+      )}
+      <p className="form-hint">Enter the exact model name available on your server (e.g. from <code>ollama list</code>).</p>
+    </>
+  )
+
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden', border: isConfigured ? `1px solid ${provider.color}30` : undefined }}>
       {/* Header */}
@@ -151,6 +204,20 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {defaultProvider === provider.id && (
+            <span style={{ fontSize: 12, padding: '3px 10px', background: '#f59e0b18', color: '#f59e0b', borderRadius: 20, border: '1px solid #f59e0b30' }}>⭐ Default</span>
+          )}
+          {isConfigured && defaultProvider !== provider.id && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={async () => { if (onSetDefault) await onSetDefault(provider.id) }}
+              style={{ fontSize: 12 }}
+              title="Set this provider as the system default"
+            >
+              ⭐ Set as default
+            </button>
+          )}
           {isConfigured && <span style={{ fontSize: 12, padding: '3px 10px', background: '#10b98118', color: '#10b981', borderRadius: 20, border: '1px solid #10b98130' }}>Active</span>}
           <button className="btn btn-secondary btn-sm" onClick={() => setOpen(!open)}>
             {open ? 'Close' : isConfigured ? 'Edit' : 'Configure'}
@@ -203,31 +270,7 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
             {/* Model — free-form for local providers, dropdown for cloud */}
             <div>
               <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>Model</label>
-              {isLocal ? (
-                <>
-                  <input
-                    className="input"
-                    list={`models-${provider.id}`}
-                    value={form.model}
-                    onChange={set('model')}
-                    placeholder="e.g. llama3.2, deepseek-r1:7b, qwen2.5-coder:32b"
-                    required
-                  />
-                  {(dynamicModels.length > 0 ? dynamicModels : provider.models).length > 0 && (
-                    <datalist id={`models-${provider.id}`}>
-                      {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m} />)}
-                    </datalist>
-                  )}
-                  <p className="form-hint">Enter the exact model name available on your server (e.g. from <code>ollama list</code>).</p>
-                </>
-              ) : (
-                <>
-                  <select className="input" value={form.model} onChange={set('model')}>
-                    {(dynamicModels.length > 0 ? dynamicModels : provider.models).map((m: string) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                  <p className="form-hint">Choose the model for your agents. Start with smaller/faster options for testing to save cost.</p>
-                </>
-              )}
+              {modelPicker}
             </div>
 
             {testResult && (
@@ -257,10 +300,155 @@ function ProviderCard({ provider, config, tenantId, onSaved, toast }: any) {
   )
 }
 
+// ── Prompt Templates Panel ────────────────────────────────────────────────────
+function PromptTemplatesPanel({ tenantId, toast }: { tenantId: string; toast: (type: string, title: string, msg: string) => void }) {
+  const [templates, setTemplates] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [editingArchetype, setEditingArchetype] = useState<string | null>(null)
+  const [editPrompt, setEditPrompt] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await api.request(`/tenants/${tenantId}/settings/prompt-templates`)
+      setTemplates(Array.isArray(data) ? data : [])
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [tenantId])
+
+  useEffect(() => { load() }, [load])
+
+  const startEdit = (t: any) => {
+    setEditingArchetype(t.archetype)
+    setEditPrompt(t.system_prompt)
+  }
+
+  const cancelEdit = () => {
+    setEditingArchetype(null)
+    setEditPrompt('')
+  }
+
+  const save = async (archetype: string) => {
+    setSaving(true)
+    try {
+      const data = await api.request(`/tenants/${tenantId}/settings/prompt-templates/${archetype}`, {
+        method: 'PUT',
+        body: JSON.stringify({ system_prompt: editPrompt })
+      })
+      // api.request() unwraps the envelope — data is the saved template object
+      setTemplates(prev => prev.map(t => t.archetype === archetype ? data : t))
+      toast('success', 'Saved', `Template for "${templates.find(t => t.archetype === archetype)?.label || archetype}" saved.`)
+      cancelEdit()
+    } catch {
+      toast('error', 'Error', 'Network error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const reset = async (archetype: string) => {
+    try {
+      await api.request(`/tenants/${tenantId}/settings/prompt-templates/${archetype}/reset`, {
+        method: 'POST'
+      })
+      load()
+      toast('success', 'Reset', `Template reset to built-in default.`)
+      cancelEdit()
+    } catch {
+      toast('error', 'Error', 'Network error')
+    }
+  }
+
+  if (loading) return <div className="skeleton" style={{ height: 400, borderRadius: 12 }} />
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="card" style={{ padding: 18 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>📝 Agent System Prompt Templates</h2>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+          Customize the system prompt template for each agent archetype. Use <code>{"{{name}}"}</code>, <code>{"{{description}}"}</code>,
+          and <code>{"{{honesty}}"}</code> as placeholders that will be replaced at runtime. Changes take effect immediately for new agent runs.
+        </p>
+      </div>
+
+      {templates.map(t => {
+        const isEditing = editingArchetype === t.archetype
+        return (
+          <div key={t.archetype} className="card" style={{ padding: 18, border: isEditing ? '1px solid var(--green-border)' : undefined }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isEditing ? 12 : 0 }}>
+              <div>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>{t.label}</span>
+                <code style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8, background: 'var(--surface)', padding: '2px 6px', borderRadius: 4 }}>{t.archetype}</code>
+                {t.is_active === false && (
+                  <span style={{ fontSize: 11, color: '#f59e0b', marginLeft: 8 }}>⚠️ Inactive</span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {!isEditing ? (
+                  <button className="btn btn-secondary btn-sm" style={{ fontSize: 11 }} onClick={() => startEdit(t)}>
+                    ✏️ Edit
+                  </button>
+                ) : (
+                  <>
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 11 }} onClick={() => reset(t.archetype)}>
+                      ↺ Reset to Default
+                    </button>
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 11 }} onClick={cancelEdit}>
+                      Cancel
+                    </button>
+                    <button className="btn btn-primary btn-sm" style={{ fontSize: 11 }} onClick={() => save(t.archetype)} disabled={saving}>
+                      {saving ? 'Saving...' : '💾 Save'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {isEditing && (
+              <textarea
+                className="input"
+                value={editPrompt}
+                onChange={e => setEditPrompt(e.target.value)}
+                style={{
+                  width: '100%',
+                  minHeight: 280,
+                  fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  resize: 'vertical',
+                  marginTop: 8
+                }}
+              />
+            )}
+
+            {!isEditing && (
+              <pre style={{
+                margin: '10px 0 0 0',
+                padding: '10px 12px',
+                background: 'var(--surface)',
+                borderRadius: 6,
+                fontSize: 11,
+                lineHeight: 1.5,
+                whiteSpace: 'pre-wrap',
+                maxHeight: 140,
+                overflowY: 'auto',
+                color: 'var(--text-secondary)'
+              }}>
+                {t.system_prompt.slice(0, 400)}{t.system_prompt.length > 400 ? '...' : ''}
+              </pre>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function SettingsPage() {
   const { tenantId, toast } = useApp()
   const [settings, setSettings] = useState<any>(null)
-  const [tab, setTab] = useState<'llm' | 'general' | 'members' | 'custom_models' | 'knowledge_infra' | 'system'>('llm')
+  const [tab, setTab] = useState<'llm' | 'general' | 'members' | 'prompts' | 'custom_models' | 'knowledge_infra' | 'system' | 'security'>('llm')
   const [loadingSettings, setLoadingSettings] = useState(true)
   const [loadingMembers, setLoadingMembers] = useState(true)
   const [members, setMembers] = useState<any[]>([])
@@ -290,6 +478,10 @@ export default function SettingsPage() {
   const [scanResults, setScanResults] = useState<any>(null)
   const [scanning, setScanning] = useState(false)
   const [installingId, setInstallingId] = useState<string | null>(null)
+
+  // Security Audit state
+  const [securityResults, setSecurityResults] = useState<any>(null)
+  const [runningSecurityAudit, setRunningSecurityAudit] = useState(false)
 
   // Knowledge Infrastructure state
   const [infraStatus, setInfraStatus] = useState<any>(null)
@@ -437,22 +629,65 @@ export default function SettingsPage() {
     if (tenantId && tab === 'knowledge_infra') loadInfraStatus()
   }, [tenantId, tab])
 
-  // Show message if sysadmin without tenant
+  // Show limited view for sysadmin without tenant — only security & install scan
   if (!tenantId) {
     return (
       <div className="page">
         <div className="page-header">
           <h1>Settings</h1>
         </div>
-        <div className="card" style={{ padding: 40, textAlign: 'center' }}>
-          <Shield size={48} style={{ color: 'var(--green)', margin: '0 auto 16px' }} />
-          <h2 style={{ fontSize: 18, marginBottom: 8 }}>System Administrator</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: 20 }}>
-            You're logged in as a system administrator without an organization.
-          </p>
-          <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-            Settings are organization-specific. Use the <strong>System Portal</strong> to manage all organizations.
-          </p>
+        <div className="card" style={{ padding: 24, marginBottom: 16, background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.2)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Shield size={24} style={{ color: 'var(--green)' }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>System Administrator</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Org-specific settings require selecting an organization. Security tools below are global.</div>
+            </div>
+          </div>
+        </div>
+        {/* Security Audit — available to sysadmin globally */}
+        <div className="card" style={{ padding: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>🔐 Security Audit</h2>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>Scan npm and Python packages for known CVEs and dependency conflicts.</p>
+            </div>
+            <button className="btn btn-primary" disabled={runningSecurityAudit} onClick={async () => {
+              setRunningSecurityAudit(true); setSecurityResults(null)
+              try {
+                // Use a placeholder tenantId for system-admin — server allows system admins
+                const data = await api.systemSecurityAudit('system')
+                setSecurityResults(data)
+              } catch (err: any) { toast('error', 'Security audit failed', err.message) }
+              finally { setRunningSecurityAudit(false) }
+            }}>
+              {runningSecurityAudit ? '⟳ Scanning...' : '🔍 Run Security Audit'}
+            </button>
+          </div>
+          {!securityResults && !runningSecurityAudit && (
+            <div style={{ padding: 32, textAlign: 'center', border: '1px dashed var(--border)', borderRadius: 8 }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>🔐</div>
+              <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>Click <strong>Run Security Audit</strong> to check for known vulnerabilities.</p>
+            </div>
+          )}
+          {securityResults && (() => {
+            const npm = securityResults.npm; const pip = securityResults.pip
+            const npmTotal = npm?.audit?.total ?? 0; const pipIssues = pip?.audit?.issues?.length ?? 0
+            const allClean = npmTotal === 0 && pip?.installed !== false
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ padding: 16, borderRadius: 8, background: allClean ? 'rgba(16,185,129,0.06)' : 'rgba(245,158,11,0.06)', border: allClean ? '1px solid rgba(16,185,129,0.2)' : '1px solid rgba(245,158,11,0.2)', display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ fontSize: 22 }}>{allClean ? '✅' : '⚠️'}</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: allClean ? '#10b981' : '#f59e0b' }}>{allClean ? 'No vulnerabilities found' : 'Issues detected'}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>npm: {npmTotal === 0 ? 'clean' : `${npmTotal} vulnerability/vulnerabilities`} · Python: {pipIssues === 0 ? 'clean' : `${pipIssues} conflict(s)`}</div>
+                  </div>
+                </div>
+                {npm && <div className="card" style={{ padding: 16 }}><div style={{ fontWeight: 600, marginBottom: 4 }}>npm: {npm.version}</div><div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{npm.description}</div></div>}
+                {pip && <div className="card" style={{ padding: 16 }}><div style={{ fontWeight: 600, marginBottom: 4 }}>Python: {pip.version}</div><div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{pip.description}</div></div>}
+              </div>
+            )
+          })()}
         </div>
       </div>
     )
@@ -515,12 +750,19 @@ export default function SettingsPage() {
   const TABS = [
     { id: 'llm', label: 'LLM Providers' },
     { id: 'general', label: 'General' },
-    { id: 'members', label: 'Members' }
+    { id: 'members', label: 'Members' },
+    { id: 'prompts', label: 'Prompt Templates' }
   ]
   if (isLocalEnv) {
     TABS.push({ id: 'custom_models', label: 'Custom Models (Local)' })
     TABS.push({ id: 'knowledge_infra', label: 'Knowledge Backends' })
-    TABS.push({ id: 'system', label: 'System Scan' })
+    TABS.push({ id: 'system', label: '📦 Install Scan' })
+  }
+  // Security tab available to all local users (including system admin)
+  if (isLocalEnv || typeof window !== 'undefined') {
+    if (!TABS.find(t => t.id === 'security')) {
+      TABS.push({ id: 'security', label: '🔐 Security' })
+    }
   }
 
   async function startTraining(e: any) {
@@ -867,6 +1109,8 @@ export default function SettingsPage() {
                 provider={p}
                 config={providers[p.id]}
                 tenantId={tenantId}
+                defaultProvider={defaultProvider}
+                onSetDefault={setDefault}
                 onSaved={(updatedConfig?: any) => {
                   if (updatedConfig) {
                     setSettings((s: any) => ({ ...s, llm_config: updatedConfig }))
@@ -1569,16 +1813,44 @@ export default function SettingsPage() {
               </div>
 
               {/* Category sections */}
-              {['runtime', 'devtools', 'infra', 'ml', 'services'].map(cat => {
+              {[
+                { id: 'runtime',       label: 'Runtime (Required)',      icon: '⚙️' },
+                { id: 'devtools',      label: 'Developer Tools',         icon: '🛠️' },
+                { id: 'infra',         label: 'Infrastructure',          icon: '🏗️' },
+                { id: 'ml',            label: 'ML / AI Tools',           icon: '🧠' },
+                { id: 'npm-workspace', label: 'npm Packages',            icon: '📦' },
+                { id: 'pip-package',   label: 'Python Packages (pip)',   icon: '🐍' },
+                { id: 'docker-image',  label: 'Docker Images',           icon: '🐳' },
+                { id: 'services',      label: 'Runtime Services',        icon: '📡' },
+              ].map(({ id: cat, label: catLabel, icon: catIcon }) => {
                 const items = scanResults.results.filter((r: any) => r.category === cat)
                 if (items.length === 0) return null
-                const catLabel = cat === 'runtime' ? 'Runtime (Required)' : cat === 'devtools' ? 'Developer Tools' : cat === 'infra' ? 'Infrastructure' : cat === 'ml' ? 'ML / AI' : 'Runtime Services'
-                const catIcon = cat === 'runtime' ? '⚙️' : cat === 'devtools' ? '🛠️' : cat === 'infra' ? '🏗️' : cat === 'ml' ? '🧠' : '📡'
+
+                // "Install All" shortcut for pip and npm
+                const showInstallAll = (cat === 'pip-package' && items.some((r: any) => !r.installed))
+                  || (cat === 'npm-workspace' && items.some((r: any) => !r.installed))
+                const installAllId = cat === 'pip-package' ? 'pip-all' : 'ws-npm-root'
+                const installAllLabel = cat === 'pip-package' ? 'pip install -r requirements.txt' : 'npm ci'
                 return (
                   <div key={cat} className="card" style={{ padding: 20 }}>
-                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span>{catIcon}</span> {catLabel}
-                    </h3>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span>{catIcon}</span> {catLabel}
+                        <span style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)' }}>
+                          ({items.filter((r: any) => r.installed).length}/{items.length} installed)
+                        </span>
+                      </h3>
+                      {showInstallAll && (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          style={{ fontSize: 11 }}
+                          disabled={installingId === installAllId}
+                          onClick={() => installDep(installAllId, installAllLabel)}
+                        >
+                          {installingId === installAllId ? '⟳ Installing...' : `🔧 Install All`}
+                        </button>
+                      )}
+                    </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                       {items.map((r: any) => (
                         <div
@@ -1654,12 +1926,165 @@ export default function SettingsPage() {
               {/* Install hint footer */}
               <div className="card" style={{ padding: 18, background: 'rgba(255,255,255,0.02)' }}>
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                  💡 <strong>Tip:</strong> Install <a href="https://brew.sh" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--green)' }}>Homebrew</a> first — it simplifies installing all other dependencies on macOS and Linux with a single <code>brew install</code> command.
+                  💡 <strong>Tip:</strong> Install <a href="https://brew.sh" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--green)' }}>Homebrew</a> first — it simplifies installing system tools on macOS. For Docker images and Python packages, make sure Docker Desktop and Python 3.10+ are installed first.
                 </p>
               </div>
             </>
           )}
         </div>
+
+      ) : tab === 'security' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>🔐 Security Audit</h2>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                Scan npm and Python packages for known CVEs and dependency conflicts. Run this after installation.
+              </p>
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={async () => {
+                if (!tenantId) return
+                setRunningSecurityAudit(true); setSecurityResults(null)
+                try {
+                  const data = await api.systemSecurityAudit(tenantId)
+                  setSecurityResults(data)
+                } catch (err: any) {
+                  toast('error', 'Security audit failed', err.message)
+                } finally { setRunningSecurityAudit(false) }
+              }}
+              disabled={runningSecurityAudit}
+            >
+              {runningSecurityAudit ? '⟳ Scanning...' : '🔍 Run Security Audit'}
+            </button>
+          </div>
+
+          {!securityResults && !runningSecurityAudit && (
+            <div className="card" style={{ padding: 32, textAlign: 'center', border: '1px dashed var(--border)' }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>🔐</div>
+              <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>
+                Click <strong>Run Security Audit</strong> to check for known vulnerabilities in npm and Python packages.
+              </p>
+            </div>
+          )}
+
+          {securityResults && (() => {
+            const sevColors: Record<string, string> = {
+              critical: '#ef4444', high: '#f97316', moderate: '#f59e0b', low: '#3b82f6', info: '#6b7280'
+            }
+            const npm = securityResults.npm
+            const pip = securityResults.pip
+            const npmTotal = npm?.audit?.total ?? 0
+            const pipIssues = pip?.audit?.issues?.length ?? 0
+            const allClean = npmTotal === 0 && pip?.installed !== false
+
+            return (
+              <>
+                {/* Summary banner */}
+                <div className="card" style={{ padding: 16, background: allClean ? 'rgba(16,185,129,0.06)' : 'rgba(245,158,11,0.06)', border: allClean ? '1px solid rgba(16,185,129,0.2)' : '1px solid rgba(245,158,11,0.2)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <span style={{ fontSize: 22 }}>{allClean ? '✅' : '⚠️'}</span>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: allClean ? '#10b981' : '#f59e0b' }}>
+                        {allClean ? 'No vulnerabilities found' : `Issues detected — review below`}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                        npm: {npmTotal === 0 ? 'clean' : `${npmTotal} vulnerability/vulnerabilities`} · Python: {pipIssues === 0 ? 'clean' : `${pipIssues} conflict(s)`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* npm audit */}
+                {npm && (
+                  <div className="card" style={{ padding: 20 }}>
+                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>📦</span> npm Package Vulnerabilities
+                      <code style={{ fontSize: 11, fontWeight: 400, color: npm.installed ? '#10b981' : '#f59e0b', background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: 4 }}>
+                        {npm.version}
+                      </code>
+                    </h3>
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>{npm.description}</p>
+
+                    {npm.audit?.total > 0 && (
+                      <>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                          {(['critical', 'high', 'moderate', 'low', 'info'] as const).map(sev => {
+                            const count = npm.audit[sev] || 0
+                            if (!count) return null
+                            return (
+                              <span key={sev} style={{ padding: '3px 12px', borderRadius: 20, fontSize: 12, fontWeight: 700, background: `${sevColors[sev]}22`, color: sevColors[sev], border: `1px solid ${sevColors[sev]}44` }}>
+                                {count} {sev}
+                              </span>
+                            )
+                          })}
+                        </div>
+
+                        {npm.audit.advisories?.length > 0 && (
+                          <div style={{ marginBottom: 14 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Advisories</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                              {npm.audit.advisories.map((adv: any, i: number) => (
+                                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '6px 10px', borderRadius: 6, background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)' }}>
+                                  <span style={{ color: sevColors[adv.severity] || 'var(--text-muted)', fontWeight: 700, minWidth: 70, fontSize: 11 }}>{adv.severity}</span>
+                                  <span style={{ fontWeight: 600, color: 'var(--text-secondary)', minWidth: 120 }}>{adv.name}</span>
+                                  <span style={{ color: 'var(--text-muted)', flex: 1, fontSize: 11 }}>{adv.title}</span>
+                                  {adv.url && <a href={adv.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', fontSize: 11 }}>↗ advisory</a>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <div style={{ padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
+                          <code style={{ fontSize: 12 }}>npm audit fix</code>
+                          <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 10 }}>— auto-fix compatible issues (non-breaking)</span>
+                        </div>
+                        <div style={{ marginTop: 6, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
+                          <code style={{ fontSize: 12 }}>npm audit fix --force</code>
+                          <span style={{ fontSize: 12, color: '#f59e0b', marginLeft: 10 }}>— fix including breaking changes (review changelog first)</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* pip check */}
+                {pip && (
+                  <div className="card" style={{ padding: 20 }}>
+                    <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>🐍</span> Python Package Health
+                      <code style={{ fontSize: 11, fontWeight: 400, color: pip.installed ? '#10b981' : '#f59e0b', background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: 4 }}>
+                        {pip.version}
+                      </code>
+                    </h3>
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>{pip.description}</p>
+
+                    {pip.audit?.issues?.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Conflicts</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {pip.audit.issues.map((issue: string, i: number) => (
+                            <div key={i} style={{ fontSize: 12, color: '#f59e0b', fontFamily: 'monospace', background: 'rgba(245,158,11,0.06)', padding: '5px 10px', borderRadius: 5, border: '1px solid rgba(245,158,11,0.2)' }}>
+                              {issue}
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 6, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
+                          <code style={{ fontSize: 12 }}>pip install -r apps/ml-service/requirements.txt --upgrade</code>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </>
+            )
+          })()}
+        </div>
+
+      ) : tab === 'prompts' ? (
+        <PromptTemplatesPanel tenantId={tenantId} toast={toast} />
       ) : null}
 
 

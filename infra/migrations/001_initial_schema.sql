@@ -418,4 +418,23 @@ CREATE TRIGGER update_workflows_updated_at BEFORE UPDATE ON workflows
 CREATE TRIGGER update_tool_connections_updated_at BEFORE UPDATE ON tool_connections
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+-- ─────────────────────────────────────────
+-- SYSTEM PROMPT TEMPLATES (per-tenant archetype overrides)
+-- ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  archetype       VARCHAR(100) NOT NULL,
+  label           VARCHAR(255) NOT NULL,
+  system_prompt   TEXT NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT true,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(tenant_id, archetype)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_templates_tenant ON prompt_templates(tenant_id, archetype);
+CREATE TRIGGER update_prompt_templates_updated_at BEFORE UPDATE ON prompt_templates
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 SELECT 'Kuvalam schema v1 created successfully' AS status;

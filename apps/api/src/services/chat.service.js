@@ -284,6 +284,34 @@ async function _executeChatDbTool(toolName, args, options) {
   }
 }
 
+async function _executeChatPlatformTool(toolName, args, { tenantId, userId }) {
+  try {
+    switch (toolName) {
+      case 'createKnowledgeBase': {
+        const { createKnowledgeBase } = await import('./knowledge.service.js')
+        const kb = await createKnowledgeBase({ tenantId, name: args.name, description: args.description || '', userId })
+        return { success: true, knowledgeBaseId: kb.id, message: `Knowledge Base "${kb.name}" created.` }
+      }
+      case 'uploadFile': {
+        const { ingestFile } = await import('./knowledge.service.js')
+        const { kbId, filename, contentBase64 } = args
+        const fileBuffer = Buffer.from(contentBase64, 'base64')
+        await ingestFile({ tenantId, knowledgeBaseId: kbId, filename, fileBuffer, mimeType: 'application/octet-stream', userId })
+        return { success: true, message: `File "${filename}" uploaded and ingestion started.` }
+      }
+      case 'createWorkflow': {
+        const { createWorkflow } = await import('./workflow.service.js')
+        const wf = await createWorkflow(tenantId, { name: args.name, description: args.description || '', trigger: { type: 'MANUAL' }, steps: [], onFailure: 'STOP', userId })
+        return { success: true, workflowId: wf.id, message: `Workflow "${wf.name}" created. You can now add steps in the workflow builder.` }
+      }
+      default:
+        return { error: `Unknown platform tool: ${toolName}` }
+    }
+  } catch (err) {
+    return { error: `Platform tool failed: ${err.message}` }
+  }
+}
+
 // ── Database exploration tool definitions ─────────────────────────────────────
 const DB_TOOLS = [
   {
@@ -334,10 +362,50 @@ const MULTI_DB_TOOLS = [
       },
     },
   },
+];
+
+const PLATFORM_TOOLS = [
+  {
+    name: 'createKnowledgeBase',
+    description: 'Create a new knowledge base.',
+    inputSchema: {
+      type: 'object',
+      required: ['name'],
+      properties: {
+        name: { type: 'string', description: 'Name of the knowledge base' },
+        description: { type: 'string', description: 'Description' }
+      }
+    }
+  },
+  {
+    name: 'uploadFile',
+    description: 'Upload a file to a knowledge base. (Use this when the user attaches a file)',
+    inputSchema: {
+      type: 'object',
+      required: ['kbId', 'filename', 'contentBase64'],
+      properties: {
+        kbId: { type: 'string', description: 'The ID of the knowledge base' },
+        filename: { type: 'string', description: 'Name of the file' },
+        contentBase64: { type: 'string', description: 'Base64 encoded file content (use the content from the attachment)' }
+      }
+    }
+  },
+  {
+    name: 'createWorkflow',
+    description: 'Create a new empty workflow.',
+    inputSchema: {
+      type: 'object',
+      required: ['name'],
+      properties: {
+        name: { type: 'string', description: 'Name of the workflow' },
+        description: { type: 'string', description: 'Description' }
+      }
+    }
+  }
 ]
 
 /**
- * Try to extract a JSON tool call from plain text (Ollama fallback).
+ * Parse LLM text output into a tool call (fallback for models that fail JSON schema).
  * Many smaller models output prose like '{"name":"listTables","arguments":{}}'
  * embedded in a larger response. Returns a tool-call-shaped object or null.
  */
@@ -392,6 +460,7 @@ export async function streamChatResponse({
   llmConfig,
   knowledgeBaseIds = null,
   graphIds = null,
+  attachments = null,
   onToken,
 }) {
   // ── Knowledge Base RAG: search vector DB for relevant context ─────────
@@ -548,39 +617,93 @@ export async function streamChatResponse({
     // If the lookup fails, fall back to normal mode — non-critical
   }
 
-  // ── Normal mode: no database tools, just stream ────────────────────────
+  // ── Normal mode: platform tools and basic chat ────────────────────────
   if (!dbConnectionString) {
-    const augmentedMessages = allContext
-      ? [
-          {
-            role: 'system',
-            content: `You have access to the following relevant information. Use this to answer the user's question accurately. If the information doesn't fully answer the question, supplement with your own knowledge but clearly distinguish between sourced information and your own knowledge.\n\n${allContext}`
-          },
-          ...messages
-        ]
-      : messages
+    let currentMessages = [...messages]
+    
+    // Add attachments to the last user message if any
+    if (attachments && attachments.length > 0) {
+      const lastUserMsgIndex = currentMessages.findLastIndex(m => m.role === 'user')
+      if (lastUserMsgIndex !== -1) {
+        const fileList = attachments.map(a => `Filename: ${a.name}`).join('\n')
+        currentMessages[lastUserMsgIndex].content += `\n\n[System: The user has attached the following files. You can upload them using the uploadFile tool by passing their contentBase64 from the attachment data (do not hallucinate the base64, use the exact data provided).]\n${fileList}`
+        // Add actual attachment data in a system message for the tool to access, to prevent LLM from hallucinating base64
+        currentMessages.push({
+          role: 'system',
+          content: `Attachment Data: ${JSON.stringify(attachments)}`
+        })
+      }
+    }
 
-    const response = await completeStream({
-      tenantId,
-      agentId: userId,
-      messages: augmentedMessages,
-      model,
-      llmConfig,
-      provider,
-      temperature: 0.7,
-      onToken,
-    })
+    if (allContext) {
+      currentMessages.unshift({
+        role: 'system',
+        content: `You have access to the following relevant information. Use this to answer the user's question accurately. If the information doesn't fully answer the question, supplement with your own knowledge but clearly distinguish between sourced information and your own knowledge.\n\n${allContext}`
+      })
+    }
+
+    let finalContent = ''
+    let totalPromptTokens = 0
+    let totalCompletionTokens = 0
+
+    for (let iter = 0; iter < 3; iter++) {
+      const response = await complete({
+        tenantId,
+        agentId: userId,
+        messages: currentMessages,
+        tools: PLATFORM_TOOLS,
+        model,
+        llmConfig,
+        provider,
+        temperature: 0.7,
+        goal: 'Assist the user and use platform tools when needed.'
+      })
+
+      totalPromptTokens += response.usage?.prompt || 0
+      totalCompletionTokens += response.usage?.completion || 0
+
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        finalContent = response.content || ''
+        break
+      }
+
+      currentMessages.push({
+        role: 'assistant',
+        content: response.content || '',
+        tool_calls: response.toolCalls,
+      })
+
+      for (const tc of response.toolCalls) {
+        let args = {}
+        try { args = JSON.parse(tc.function.arguments || '{}') } catch { }
+        
+        // Inject the base64 content if it's uploadFile (prevents hallucination)
+        if (tc.function.name === 'uploadFile' && attachments) {
+          const matchedAttachment = attachments.find(a => a.name === args.filename)
+          if (matchedAttachment) {
+            args.contentBase64 = matchedAttachment.contentBase64
+          }
+        }
+
+        const result = await _executeChatPlatformTool(tc.function.name, args, { tenantId, userId })
+        currentMessages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify(result)
+        })
+      }
+    }
 
     await addMessage({
       conversationId,
       role: 'assistant',
-      content: response.content,
-      model: response.model || model,
-      promptTokens: response.usage?.prompt || 0,
-      completionTokens: response.usage?.completion || 0,
+      content: finalContent,
+      model: model,
+      promptTokens: totalPromptTokens,
+      completionTokens: totalCompletionTokens,
     })
 
-    return response
+    return finalContent
   }
 
   // ── Database-tool mode: tool-calling loop with live query execution ────

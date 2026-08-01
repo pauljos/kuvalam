@@ -16,7 +16,7 @@ export const AUTONOMY_LEVELS = {
   AUTONOMOUS: 'AUTONOMOUS',   // Never require approval
 }
 
-// Tools considered high-risk (require approval even in GUARDED mode)
+// Tools considered high-risk (require approval even in GUARDED mode, no manual marking needed)
 export const HIGH_RISK_TOOLS = new Set([
   'ssh_exec',
   'docker_run',
@@ -24,7 +24,7 @@ export const HIGH_RISK_TOOLS = new Set([
   'http_download',
 ])
 
-// Built-in tools that can require approval (when marked via scopes)
+// Built-in tools that automatically require approval in SUPERVISED mode
 export const APPROVABLE_BUILTINS = new Set([
   'ssh_exec',
   'docker_run',
@@ -34,6 +34,8 @@ export const APPROVABLE_BUILTINS = new Set([
   'publish_dashboard_report',
   'a2a_call',
   'delegate_task',
+  'write_artifact',
+  'execute_sql',
 ])
 
 const DEFAULT_TIMEOUT_MINUTES = 5
@@ -43,31 +45,33 @@ const POLL_INTERVAL_MS = 3000
 
 /**
  * Determine whether a tool call requires human approval based on:
- * 1. Agent's autonomy level
- * 2. Tool scopes (requires_approval marking)
- * 3. Tool risk classification
+ * 1. Agent's autonomy level  — primary control
+ * 2. Tool scopes (requires_approval marking) — optional override
+ * 3. Tool risk classification — automatic for GUARDED/SUPERVISED
+ *
+ * Levels:
+ *   AUTONOMOUS  — never ask, run everything without approval
+ *   GUARDED     — ask only for HIGH_RISK_TOOLS (ssh/docker/http) or explicitly marked tools
+ *   SUPERVISED  — ask for ALL tools in APPROVABLE_BUILTINS or explicitly marked tools
  */
 export function requiresApproval({ toolName, autonomyLevel, hasApprovalScope }) {
   const level = autonomyLevel || AUTONOMY_LEVELS.SUPERVISED
 
-  // If tool isn't marked for approval by scopes, no approval needed
-  if (!hasApprovalScope) return false
-
   switch (level) {
     case AUTONOMY_LEVELS.AUTONOMOUS:
-      // Autonomous agents NEVER require approval
+      // Autonomous: never require approval regardless of tool or scope
       return false
 
     case AUTONOMY_LEVELS.GUARDED:
-      // Guarded: only high-risk tools need approval
-      return HIGH_RISK_TOOLS.has(toolName)
+      // Guarded: approve high-risk tools automatically, or any tool explicitly marked
+      return HIGH_RISK_TOOLS.has(toolName) || hasApprovalScope
 
     case AUTONOMY_LEVELS.SUPERVISED:
-      // Supervised: always require approval for marked tools
-      return true
+      // Supervised: approve all approvable built-ins automatically, or any explicitly marked tool
+      return APPROVABLE_BUILTINS.has(toolName) || hasApprovalScope
 
     default:
-      return true
+      return hasApprovalScope
   }
 }
 
@@ -203,6 +207,63 @@ export async function waitForApprovalDecision(approvalId, timeoutMinutes = DEFAU
 }
 
 /**
+ * Supervisor-initiated approval (G5).
+ * Called by the tenant supervisor when it wants human intervention on a running
+ * task without a specific tool call — e.g. "agent looping for 12 min, continue
+ * or cancel?". Reuses the approval_requests table with initiator='SUPERVISOR'.
+ */
+export async function createSupervisorApproval({
+  tenantId, agentId, taskId, reason, timeoutMinutes = DEFAULT_TIMEOUT_MINUTES,
+}) {
+  const deadline = new Date(Date.now() + timeoutMinutes * 60 * 1000)
+  try {
+    const { rows: [approval] } = await query(
+      `INSERT INTO approval_requests
+        (tenant_id, agent_id, task_id, tool_name, tool_input, status, requested_by,
+         context, deadline, timeout_minutes, autonomy_level, initiator, supervisor_reason)
+       VALUES ($1, $2, $3, 'supervisor_review', $4, 'PENDING', $2, $5, $6, $7, 'SUPERVISED', 'SUPERVISOR', $8)
+       RETURNING *`,
+      [
+        tenantId, agentId, taskId,
+        JSON.stringify({ reason }),
+        JSON.stringify({ initiator: 'SUPERVISOR', reason }),
+        deadline.toISOString(), timeoutMinutes, reason,
+      ]
+    )
+
+    await query(
+      `UPDATE agent_tasks
+       SET status = 'AWAITING_APPROVAL', approval_id = $1
+       WHERE id = $2 AND tenant_id = $3 AND status = 'RUNNING'`,
+      [approval.id, taskId, tenantId]
+    )
+
+    try {
+      await auditLog({
+        eventType: 'approval.requested_by_supervisor',
+        tenantId, actorType: 'SYSTEM', actorId: 'tenant-supervisor',
+        resourceType: 'ApprovalRequest', resourceId: approval.id,
+        action: 'SUPERVISOR_REQUEST_APPROVAL', afterState: { reason, agentId, taskId },
+      })
+    } catch { /* non-critical */ }
+
+    try {
+      broadcastTelemetry(tenantId, 'agent.approval_required', {
+        taskId, approvalId: approval.id, tool: 'supervisor_review',
+        input: { reason }, autonomyLevel: 'SUPERVISED',
+        deadline: deadline.toISOString(), timeoutMinutes,
+        initiator: 'SUPERVISOR',
+      })
+    } catch { /* non-critical */ }
+
+    return { approvalId: approval.id, deadline }
+  } catch (err) {
+    console.warn(`[HITL] Supervisor approval creation failed: ${err.message}`)
+    return null
+  }
+}
+
+/**
  * Automatically reject an expired approval request
  */
 export async function autoRejectApproval(approvalId, reason) {
@@ -272,6 +333,7 @@ export async function handleApprovalDecision({
   decisionNote,
   decidedBy,
   modifiedInput,
+  isSystemAdmin = false,
 }) {
   // Get the approval request
   const { rows: [approval] } = await query(
@@ -285,13 +347,16 @@ export async function handleApprovalDecision({
   // ── Security: verify that the deciding user is an active member of THIS tenant ──
   // Without this check a user from Tenant B who knows the approvalId could
   // approve it — their JWT only needs to match any valid tenant, not this one.
-  const { rows: [membership] } = await query(
-    `SELECT id FROM tenant_members
-     WHERE tenant_id = $1 AND user_id = $2 AND status = 'ACTIVE'`,
-    [tenantId, decidedBy]
-  )
-  if (!membership) {
-    throw new AppError('FORBIDDEN', 'You are not a member of this organization', 403)
+  // System admins (isSystemAdmin=true) bypass this check — they have platform-wide access.
+  if (!isSystemAdmin) {
+    const { rows: [membership] } = await query(
+      `SELECT id FROM tenant_members
+       WHERE tenant_id = $1 AND user_id = $2 AND status = 'ACTIVE'`,
+      [tenantId, decidedBy]
+    )
+    if (!membership) {
+      throw new AppError('FORBIDDEN', 'You are not a member of this organization', 403)
+    }
   }
 
 

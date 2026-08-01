@@ -439,7 +439,11 @@ export default function ReportsPage() {
                       </div>
                     ) : reportDetail?.html_content ? (
                       <iframe
-                        srcDoc={reportDetail.html_content}
+                        srcDoc={
+                          reportDetail.html_content.trim().toLowerCase().startsWith('<svg') 
+                            ? `<!DOCTYPE html><html><head><style>body{margin:0;padding:0;overflow:hidden;display:flex;justify-content:center;align-items:center;height:100vh;} svg{max-width:100%;max-height:100%;}</style></head><body>${reportDetail.html_content}</body></html>`
+                            : reportDetail.html_content
+                        }
                         sandbox="allow-scripts"
                         style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }}
                         title={selectedReport.title}

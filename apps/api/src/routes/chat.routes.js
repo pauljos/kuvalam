@@ -85,6 +85,48 @@ export default async function (fastify, opts) {
     return { success: true, data: { messages } }
   })
 
+  // Clear all messages in a conversation (/reset command)
+  fastify.delete('/tenants/:tenantId/chat/conversations/:conversationId/messages', {
+    preValidation: [fastify.authenticate]
+  }, async (request, reply) => {
+    const { tenantId, conversationId } = request.params
+    const userId = request.user.sub
+    await getConversation(tenantId, conversationId, userId)
+    await query('DELETE FROM chat_messages WHERE conversation_id = $1', [conversationId])
+    return { success: true }
+  })
+
+  // Summarize conversation (/compact command)
+  fastify.post('/tenants/:tenantId/chat/conversations/:conversationId/summarize', {
+    preValidation: [fastify.authenticate]
+  }, async (request, reply) => {
+    const { tenantId, conversationId } = request.params
+    const userId = request.user.sub
+    const conversation = await getConversation(tenantId, conversationId, userId)
+    const history = await getMessages(conversationId)
+    if (history.length === 0) {
+      return { success: true, data: { summary: 'No messages to summarize yet.' } }
+    }
+    const { rows } = await query('SELECT llm_config FROM tenants WHERE id = $1', [tenantId])
+    try {
+      const { complete } = await import('../services/llm.service.js')
+      const convText = history.slice(-40).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 500)}`
+      ).join('\n\n')
+      const result = await complete({
+        tenantId,
+        model: conversation.model,
+        provider: conversation.provider,
+        messages: [{ role: 'user', content: `Summarize this conversation in 3-4 concise sentences:\n\n${convText}` }],
+        temperature: 0.3,
+      })
+      const summary = typeof result === 'string' ? result : result?.content || 'Could not summarize.'
+      return { success: true, data: { summary } }
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: { message: err.message } })
+    }
+  })
+
   // Send a message
   fastify.post('/tenants/:tenantId/chat/conversations/:conversationId/messages', {
     preValidation: [fastify.authenticate],
@@ -101,6 +143,18 @@ export default async function (fastify, opts) {
           graphIds: {
             type: 'array',
             items: { type: 'string' }
+          },
+          attachments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['name', 'contentBase64'],
+              properties: {
+                name: { type: 'string' },
+                type: { type: 'string' },
+                contentBase64: { type: 'string' }
+              }
+            }
           }
         }
       }
@@ -108,7 +162,7 @@ export default async function (fastify, opts) {
   }, async (request, reply) => {
     const { tenantId, conversationId } = request.params
     const userId = request.user.sub
-    const { content, knowledgeBaseIds, graphIds } = request.body
+    const { content, knowledgeBaseIds, graphIds, attachments } = request.body
 
     // Verify conversation ownership
     const conversation = await getConversation(tenantId, conversationId, userId)
@@ -144,6 +198,7 @@ export default async function (fastify, opts) {
         llmConfig,
         knowledgeBaseIds: knowledgeBaseIds?.length ? knowledgeBaseIds : null,
         graphIds: graphIds?.length ? graphIds : null,
+        attachments: attachments?.length ? attachments : null,
         onToken: () => {} // No streaming callback for now
       })
 

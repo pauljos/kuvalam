@@ -45,7 +45,8 @@ jobs:
   test-api:
     name: API Tests
     runs-on: ubuntu-latest
-    continue-on-error: true  # Don't fail the workflow if tests fail
+    # Unit tests are enforced (job fails if they fail). Integration tests are
+    # individually non-blocking via continue-on-error on their step.
     
     services:
       postgres:
@@ -97,10 +98,11 @@ jobs:
         run: node src/db/migrate.js
         continue-on-error: true
       
+      # Unit tests are pure (no DB/network) and currently green — enforce them so
+      # a regression fails the build. Integration tests stay non-blocking for now.
       - name: Run unit tests
         working-directory: apps/api
-        run: npm run test:unit || echo "Unit tests failed"
-        continue-on-error: true
+        run: npm run test:unit
       
       - name: Run integration tests
         working-directory: apps/api

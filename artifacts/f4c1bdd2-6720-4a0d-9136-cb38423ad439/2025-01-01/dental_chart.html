@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive Dental Chart</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #f0f4f8; color: #333; }
+  .container { max-width: 960px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; color: #1a5276; font-size: 1.8rem; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+  .patient-row { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; justify-content: center; }
+  .patient-row label { font-weight: 600; color: #1a5276; }
+  .patient-row input { border: 1px solid #bdc6cf; border-radius: 6px; padding: 6px 12px; font-size: 1rem; width: 260px; }
+  .patient-row input:focus { outline: none; border-color: #2e86c1; box-shadow: 0 0 0 2px #d6eaf8; }
+
+  .chart-wrapper { background: white; border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 24px; }
+  .arch-label { text-align: center; font-weight: 700; color: #1a5276; font-size: 0.85rem; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+  .arch { display: flex; justify-content: center; gap: 4px; padding: 8px 0; }
+  .arch.lower { margin-top: 4px; }
+  .divider { text-align: center; color: #aaa; font-size: 0.75rem; letter-spacing: 2px; padding: 6px 0; border-top: 1px dashed #ddd; border-bottom: 1px dashed #ddd; margin: 4px 0; }
+
+  .tooth {
+    display: flex; flex-direction: column; align-items: center; cursor: pointer;
+    width: 44px; user-select: none;
+  }
+  .tooth:hover .tooth-shape { filter: brightness(0.9); transform: scale(1.05); }
+  .tooth-shape {
+    width: 36px; height: 40px; border-radius: 6px 6px 10px 10px;
+    border: 2px solid rgba(0,0,0,0.15);
+    transition: all 0.15s ease;
+    position: relative;
+  }
+  .tooth.upper .tooth-shape { border-radius: 10px 10px 6px 6px; }
+  .tooth-num { font-size: 0.65rem; color: #888; margin-top: 3px; font-weight: 600; }
+  .tooth.upper .tooth-num { margin-top: 0; margin-bottom: 3px; order: -1; }
+
+  /* States */
+  .state-healthy .tooth-shape  { background: #27ae60; border-color: #1e8449; }
+  .state-cavity  .tooth-shape  { background: #e74c3c; border-color: #c0392b; }
+  .state-crown   .tooth-shape  { background: #f0b429; border-color: #d4930a; }
+  .state-missing .tooth-shape  { background: #bdc3c7; border-color: #95a5a6; opacity: 0.5; }
+  .state-missing .tooth-shape::after {
+    content: '✕'; position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 1rem; color: rgba(0,0,0,0.3);
+  }
+
+  /* Selected ring */
+  .tooth.selected .tooth-shape { box-shadow: 0 0 0 3px #2e86c1; }
+
+  /* Legend */
+  .legend { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; margin-top: 20px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+  .legend-dot { width: 16px; height: 16px; border-radius: 4px; border: 2px solid rgba(0,0,0,0.2); }
+  .dot-healthy { background: #27ae60; }
+  .dot-cavity  { background: #e74c3c; }
+  .dot-crown   { background: #f0b429; }
+  .dot-missing { background: #bdc3c7; opacity: 0.7; }
+
+  /* Summary */
+  .summary { margin-top: 20px; background: #f8f9fa; border-radius: 10px; padding: 16px; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .summary-card { background: white; border-radius: 8px; padding: 10px 18px; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,0.08); min-width: 90px; }
+  .summary-card .count { font-size: 1.8rem; font-weight: 700; }
+  .summary-card .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #777; margin-top: 2px; }
+  .count-healthy { color: #27ae60; }
+  .count-cavity  { color: #e74c3c; }
+  .count-crown   { color: #d4930a; }
+  .count-missing { color: #7f8c8d; }
+  .count-total   { color: #1a5276; }
+
+  /* Tooltip */
+  .tooltip { position: fixed; background: rgba(0,0,0,0.8); color: white; padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; pointer-events: none; z-index: 999; display: none; }
+
+  /* Notes */
+  .notes-section { margin-top: 20px; }
+  .notes-section textarea { width: 100%; border: 1px solid #bdc6cf; border-radius: 8px; padding: 10px; font-size: 0.9rem; resize: vertical; min-height: 70px; }
+  .notes-section label { font-weight: 600; color: #1a5276; display: block; margin-bottom: 6px; }
+
+  .reset-btn { display: block; margin: 16px auto 0; padding: 8px 24px; background: #1a5276; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
+  .reset-btn:hover { background: #2e86c1; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🦷 Interactive Dental Chart</h1>
+  <p class="subtitle">FDI Numbering System — Click any tooth to cycle through conditions</p>
+
+  <div class="patient-row">
+    <label for="patientName">Patient Name:</label>
+    <input type="text" id="patientName" placeholder="Enter patient name..." />
+    <label for="examDate">Date:</label>
+    <input type="date" id="examDate" />
+  </div>
+
+  <div class="chart-wrapper">
+    <!-- Upper arch -->
+    <div class="arch-label">Upper Arch (Maxillary)</div>
+    <div class="arch upper" id="upper-arch"></div>
+    <div class="divider">— — — MIDLINE — — —</div>
+    <!-- Lower arch -->
+    <div class="arch lower" id="lower-arch"></div>
+    <div class="arch-label" style="margin-top:8px">Lower Arch (Mandibular)</div>
+
+    <!-- Legend -->
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot dot-healthy"></div> Healthy</div>
+      <div class="legend-item"><div class="legend-dot dot-cavity"></div> Cavity</div>
+      <div class="legend-item"><div class="legend-dot dot-crown"></div> Crown</div>
+      <div class="legend-item"><div class="legend-dot dot-missing"></div> Missing</div>
+    </div>
+
+    <!-- Summary -->
+    <div class="summary">
+      <div class="summary-card"><div class="count count-healthy" id="cnt-healthy">32</div><div class="label">Healthy</div></div>
+      <div class="summary-card"><div class="count count-cavity"  id="cnt-cavity">0</div><div class="label">Cavity</div></div>
+      <div class="summary-card"><div class="count count-crown"   id="cnt-crown">0</div><div class="label">Crown</div></div>
+      <div class="summary-card"><div class="count count-missing" id="cnt-missing">0</div><div class="label">Missing</div></div>
+      <div class="summary-card"><div class="count count-total" id="cnt-total">32</div><div class="label">Total Teeth</div></div>
+    </div>
+
+    <button class="reset-btn" onclick="resetAll()">Reset All to Healthy</button>
+
+    <!-- Notes -->
+    <div class="notes-section" style="margin-top:20px">
+      <label for="clinicalNotes">Clinical Notes:</label>
+      <textarea id="clinicalNotes" placeholder="Enter examination notes, treatment plan, remarks..."></textarea>
+    </div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// FDI tooth numbers
+// Upper: right 18-11, left 21-28  (displayed left to right on screen = 18,17..11,21..28)
+// Lower: right 48-41, left 31-38
+const upperTeeth = [18,17,16,15,14,13,12,11, 21,22,23,24,25,26,27,28];
+const lowerTeeth = [48,47,46,45,44,43,42,41, 31,32,33,34,35,36,37,38];
+
+const STATES = ['healthy','cavity','crown','missing'];
+const STATE_LABELS = { healthy:'Healthy', cavity:'Cavity', crown:'Crown', missing:'Missing' };
+const toothState = {};
+
+function createTooth(num, isUpper) {
+  const el = document.createElement('div');
+  el.className = `tooth ${isUpper ? 'upper' : 'lower'} state-healthy`;
+  el.id = `tooth-${num}`;
+  el.title = `Tooth ${num}`;
+
+  const shape = document.createElement('div');
+  shape.className = 'tooth-shape';
+
+  const label = document.createElement('div');
+  label.className = 'tooth-num';
+  label.textContent = num;
+
+  if (isUpper) {
+    el.appendChild(label);
+    el.appendChild(shape);
+  } else {
+    el.appendChild(shape);
+    el.appendChild(label);
+  }
+
+  toothState[num] = 'healthy';
+
+  el.addEventListener('click', () => cycleTooth(num, el));
+  el.addEventListener('mousemove', (e) => showTooltip(e, num));
+  el.addEventListener('mouseleave', () => hideTooltip());
+
+  return el;
+}
+
+function cycleTooth(num, el) {
+  const cur = toothState[num];
+  const idx = STATES.indexOf(cur);
+  const next = STATES[(idx + 1) % STATES.length];
+  toothState[num] = next;
+  el.className = `tooth ${el.classList.contains('upper') ? 'upper' : 'lower'} state-${next}`;
+  updateSummary();
+}
+
+function updateSummary() {
+  const counts = { healthy:0, cavity:0, crown:0, missing:0 };
+  for (const s of Object.values(toothState)) counts[s]++;
+  document.getElementById('cnt-healthy').textContent = counts.healthy;
+  document.getElementById('cnt-cavity').textContent  = counts.cavity;
+  document.getElementById('cnt-crown').textContent   = counts.crown;
+  document.getElementById('cnt-missing').textContent = counts.missing;
+  document.getElementById('cnt-total').textContent   = 32 - counts.missing;
+}
+
+function resetAll() {
+  for (const num of [...upperTeeth, ...lowerTeeth]) {
+    toothState[num] = 'healthy';
+    const el = document.getElementById(`tooth-${num}`);
+    if (el) {
+      const isUpper = el.classList.contains('upper');
+      el.className = `tooth ${isUpper ? 'upper' : 'lower'} state-healthy`;
+    }
+  }
+  updateSummary();
+}
+
+function showTooltip(e, num) {
+  const tt = document.getElementById('tooltip');
+  tt.textContent = `Tooth ${num} — ${STATE_LABELS[toothState[num]]}`;
+  tt.style.display = 'block';
+  tt.style.left = (e.clientX + 12) + 'px';
+  tt.style.top  = (e.clientY - 28) + 'px';
+}
+function hideTooltip() {
+  document.getElementById('tooltip').style.display = 'none';
+}
+
+// Build arches
+const upperContainer = document.getElementById('upper-arch');
+const lowerContainer = document.getElementById('lower-arch');
+for (const n of upperTeeth) upperContainer.appendChild(createTooth(n, true));
+for (const n of lowerTeeth) lowerContainer.appendChild(createTooth(n, false));
+
+// Set today's date
+document.getElementById('examDate').valueAsDate = new Date();
+</script>
+</body>
+</html>

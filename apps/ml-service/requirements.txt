@@ -1,0 +1,19 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+transformers==4.46.0
+# torch installed separately via CPU wheel (see Dockerfile)
+Pillow==11.0.0
+soundfile==0.12.1
+numpy==1.26.4
+requests==2.32.3
+# Whisper via transformers (no LLVM/numba dependency)
+# openai-whisper replaced with transformers pipeline (uses openai/whisper-* HF models)
+# Forecasting
+prophet==1.1.6
+pandas==2.2.3
+# Anomaly detection / clustering
+scikit-learn==1.5.2
+# CLIP image-text similarity (uses transformers + torch already above)
+ftfy==6.2.3
+regex==2024.11.6

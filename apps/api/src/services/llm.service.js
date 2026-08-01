@@ -58,13 +58,20 @@ export function resolveLlmConfig(llmConfig, preferredProvider, options = {}) {
 }
 
 // ─── Model catalogue ─────────────────────────────────────────────────────────
-// Used by intelligent routing to pick the right model tier
+// Used by intelligent routing to pick the right model tier. NO model name is
+// hardcoded in logic — every tier can be overridden via env, and the real model
+// an agent uses should come from Settings (tenant llm_config) / the agent's own
+// llm_model. These tiers are only the LAST-RESORT routing fallback.
 export const MODEL_TIERS = {
-  FAST:      { model: 'gpt-4o-mini',                  description: 'Fast, cheap — simple tasks' },
-  STANDARD:  { model: 'gpt-4o',                        description: 'Balanced — most tasks' },
-  ADVANCED:  { model: 'claude-3-5-sonnet-20241022',    description: 'Deep reasoning — complex tasks' },
-  REASONING: { model: 'o3-mini',                       description: 'Extended reasoning — hardest tasks' },
+  FAST:      { model: process.env.LLM_TIER_FAST      || 'gpt-4o-mini',               description: 'Fast, cheap — simple tasks' },
+  STANDARD:  { model: process.env.LLM_TIER_STANDARD  || 'gpt-4o',                    description: 'Balanced — most tasks' },
+  ADVANCED:  { model: process.env.LLM_TIER_ADVANCED  || 'claude-3-5-sonnet-20241022', description: 'Deep reasoning — complex tasks' },
+  REASONING: { model: process.env.LLM_TIER_REASONING || 'o3-mini',                   description: 'Extended reasoning — hardest tasks' },
 }
+
+// Model identifiers that mean "no explicit model chosen — route automatically".
+// These are NOT real models; they're sentinels the UI/settings can pass.
+const AUTO_MODEL_SENTINELS = new Set(['auto', 'default', ''])
 
 // Keywords that bump to higher reasoning tiers
 const REASONING_SIGNALS  = /\b(reason|infer|deduce|complex|multi.?step|analyse deeply|strategic|risk|legal|compliance|audit)\b/i
@@ -72,7 +79,7 @@ const FAST_SIGNALS       = /\b(summarise|list|format|convert|translate|extract|s
 
 /** Per-call LLM timeout (ms) — prevents hung calls from stalling tasks forever. */
 const LLM_CALL_TIMEOUT_MS = parseInt(process.env.LLM_CALL_TIMEOUT_MS || '120000') // 2 min default
-/** Local/Ollama models get a longer timeout since they run on CPU without GPU. */
+/** Local/Ollama models get a much longer timeout — qwen3:8b generating large HTML files needs 3-5 min. */
 const LLM_CALL_TIMEOUT_LOCAL_MS = parseInt(process.env.LLM_CALL_TIMEOUT_LOCAL_MS || '300000') // 5 min for local
 
 /** Pick the right timeout: local/Ollama models get 5min, cloud gets 2min. */
@@ -82,19 +89,40 @@ function getLlmTimeout(resolvedConfig) {
 }
 
 /**
- * Auto-select the best model tier based on task complexity.
- * Returns the resolved model string.
+ * Resolve the model to use for a call.
+ * Returns the resolved model string, or null when nothing is configured
+ * (caller must fail loudly rather than silently default to a hardcoded model).
+ *
+ * Priority (NO hardcoded model in logic):
+ *   1. Explicit agent model (preferredModel) — unless it's an 'auto' sentinel.
+ *   2. Tenant Settings default model (llmConfig.model, from the Settings page's
+ *      defaultProvider). THIS is the universal default the user asked for.
+ *   3. Complexity-tier routing (env-overridable MODEL_TIERS) — last resort only
+ *      when the tenant has NOT set a default model in Settings.
  */
 export function routeModel(goal, preferredModel, llmConfig) {
-  // Agent-level model takes priority — allows per-agent LLM selection
-  if (preferredModel && !['gpt-4o', 'auto'].includes(preferredModel)) return preferredModel
-  // Tenant-level model as fallback
+  // 1. Agent-level model takes priority — unless it's an 'auto'/'default' sentinel.
+  if (preferredModel && !AUTO_MODEL_SENTINELS.has(String(preferredModel).toLowerCase())) return preferredModel
+  // 2. Tenant Settings default model — the universal fallback.
   if (llmConfig?.model) return llmConfig.model
 
+  // 3. Last resort: complexity-tier routing (env-overridable, not hardcoded).
   const g = goal || ''
   if (REASONING_SIGNALS.test(g)) return MODEL_TIERS.ADVANCED.model
   if (FAST_SIGNALS.test(g))      return MODEL_TIERS.FAST.model
   return MODEL_TIERS.STANDARD.model
+}
+
+/** Throw a clear, actionable error when no LLM model could be resolved. */
+function assertModelResolved(resolvedModel, agentId) {
+  if (!resolvedModel) {
+    throw new Error(
+      `No LLM model configured${agentId ? ` for agent ${agentId}` : ''}. ` +
+      `Set a model in Settings (choose from your provider's available models) ` +
+      `or on the agent itself. Kuvalam does not hardcode a default model.`
+    )
+  }
+  return resolvedModel
 }
 
 function getOpenAIClient(apiKey, baseUrl) {
@@ -108,10 +136,11 @@ function getOpenAIClient(apiKey, baseUrl) {
   return new OpenAI(options)
 }
 
-export async function complete({ tenantId, agentId, messages, tools = [], model = 'gpt-4o', temperature = 0.1, llmConfig = {}, provider, goal, tool_choice = 'auto', useSystemLlm = false }) {
+export async function complete({ tenantId, agentId, messages, tools = [], model = null, temperature = 0.1, llmConfig = {}, provider, goal, tool_choice = 'auto', useSystemLlm = false, maxTokens }) {
   const resolved = resolveLlmConfig(llmConfig, provider, { useSystem: useSystemLlm })
+  const resolvedModel = assertModelResolved(routeModel(goal, model, resolved), agentId)
+
   const client = getOpenAIClient(resolved.apiKey, resolved.baseUrl)
-  const resolvedModel = routeModel(goal, model, resolved)
 
   // o3/o1 reasoning models: no temperature, no tool streaming, use max_completion_tokens
   const isReasoningModel = /^o[13]/.test(resolvedModel)
@@ -120,8 +149,8 @@ export async function complete({ tenantId, agentId, messages, tools = [], model 
     model: resolvedModel,
     messages,
     ...(isReasoningModel
-      ? { max_completion_tokens: 8192 }
-      : { temperature, max_tokens: 4096 })
+      ? { max_completion_tokens: maxTokens || 8192 }
+      : { temperature, max_tokens: maxTokens || 4096 })
   }
 
   if (tools.length > 0 && !isReasoningModel) {
@@ -132,47 +161,74 @@ export async function complete({ tenantId, agentId, messages, tools = [], model 
     params.tool_choice = tool_choice
   }
 
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), getLlmTimeout(resolved))
-    const response = await client.chat.completions.create(params, { signal: controller.signal })
-    clearTimeout(timer)
-    const usage = response.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  // qwen3 models default to verbose "thinking" mode in Ollama, which makes
+  // every response take minutes and emit huge <think> blocks. Disable thinking
+  // via extra_body { think: false } for Ollama's OpenAI-compat endpoint.
+  // Also inject /nothink at the start of the last user message as a belt-and-suspenders
+  // approach — some Ollama versions don't honour extra_body think:false alone.
+  const isLocal = resolved?.baseUrl && /localhost|127\.0\.0\.1|::1|host\.docker\.internal/i.test(resolved.baseUrl)
+  const isQwen3Local = isLocal && /^qwen3[:.-]/i.test(resolvedModel)
+  if (isQwen3Local) {
+    params.extra_body = { ...(params.extra_body || {}), think: false }
+    // Inject /nothink into the last user message for extra reliability
+    const lastUserIdx = params.messages ? [...params.messages].map((m, i) => m.role === 'user' ? i : -1).filter(i => i >= 0).pop() : -1
+    if (lastUserIdx >= 0 && typeof params.messages[lastUserIdx].content === 'string' && !params.messages[lastUserIdx].content.startsWith('/nothink')) {
+      params.messages = [...params.messages]
+      params.messages[lastUserIdx] = { ...params.messages[lastUserIdx], content: '/nothink\n\n' + params.messages[lastUserIdx].content }
+    }
+  }
 
-    // Log token usage for billing
-    if (tenantId) {
-      try {
-        await auditLog({
-          eventType: 'llm.tokens_used', tenantId,
-          actorId: agentId || 'system', actorType: 'AGENT',
-          resourceType: 'LLM', action: 'LLM_COMPLETE',
-          metadata: {
-            model: resolvedModel,
-            promptTokens: usage.prompt_tokens,
-            completionTokens: usage.completion_tokens,
-            totalTokens: usage.total_tokens
-          }
-        })
-      } catch { /* audit failure must not break LLM call */ }
-    }
+  let _rlAttempt = 0
+  const _RL_BACKOFF = [5000, 15000, 30000]
+  while (true) {
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), getLlmTimeout(resolved))
+      const response = await client.chat.completions.create(params, { signal: controller.signal })
+      clearTimeout(timer)
+      const usage = response.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 
-    return {
-      content: response.choices[0]?.message?.content || '',
-      toolCalls: response.choices[0]?.message?.tool_calls || [],
-      usage: {
-        prompt: usage.prompt_tokens,
-        completion: usage.completion_tokens,
-        total: usage.total_tokens
-      },
-      finishReason: response.choices[0]?.finish_reason
+      // Log token usage for billing
+      if (tenantId) {
+        try {
+          await auditLog({
+            eventType: 'llm.tokens_used', tenantId,
+            actorId: agentId || 'system', actorType: 'AGENT',
+            resourceType: 'LLM', action: 'LLM_COMPLETE',
+            metadata: {
+              model: resolvedModel,
+              promptTokens: usage.prompt_tokens,
+              completionTokens: usage.completion_tokens,
+              totalTokens: usage.total_tokens
+            }
+          })
+        } catch { /* audit failure must not break LLM call */ }
+      }
+
+      return {
+        content: response.choices[0]?.message?.content || '',
+        toolCalls: response.choices[0]?.message?.tool_calls || [],
+        usage: {
+          prompt: usage.prompt_tokens,
+          completion: usage.completion_tokens,
+          total: usage.total_tokens
+        },
+        finishReason: response.choices[0]?.finish_reason
+      }
+    } catch (err) {
+      if (err.name === 'AbortError' || err.code === 'ETIMEDOUT') {
+        throw new Error(`LLM call timed out after ${LLM_CALL_TIMEOUT_MS / 1000}s. The model may be overloaded or unresponsive.`)
+      }
+      if (err.status === 429 && _rlAttempt < _RL_BACKOFF.length) {
+        const delay = _RL_BACKOFF[_rlAttempt++]
+        console.warn(`[LLM] Rate limited (429) — retrying in ${delay / 1000}s (attempt ${_rlAttempt}/${_RL_BACKOFF.length})`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      if (err.status === 429) throw new Error('LLM_RATE_LIMITED')
+      if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
+      throw err
     }
-  } catch (err) {
-    if (err.name === 'AbortError' || err.code === 'ETIMEDOUT') {
-      throw new Error(`LLM call timed out after ${LLM_CALL_TIMEOUT_MS / 1000}s. The model may be overloaded or unresponsive.`)
-    }
-    if (err.status === 429) throw new Error('LLM_RATE_LIMITED')
-    if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
-    throw err
   }
 }
 
@@ -180,10 +236,11 @@ export async function complete({ tenantId, agentId, messages, tools = [], model 
  * Streaming variant of complete(). Calls onToken(chunk) for each text delta.
  * Accumulates tool calls from streaming deltas and returns the same shape as complete().
  */
-export async function completeStream({ tenantId, agentId, messages, tools = [], model = 'gpt-4o', temperature = 0.1, llmConfig = {}, provider, onToken, goal, tool_choice = 'auto' }) {
+export async function completeStream({ tenantId, agentId, messages, tools = [], model = null, temperature = 0.1, llmConfig = {}, provider, onToken, goal, tool_choice = 'auto' }) {
   const resolved = resolveLlmConfig(llmConfig, provider)
+  const resolvedModel = assertModelResolved(routeModel(goal, model, resolved), agentId)
+
   const client = getOpenAIClient(resolved.apiKey, resolved.baseUrl)
-  const resolvedModel = routeModel(goal, model, resolved)
   const isReasoningModel = /^o[13]/.test(resolvedModel)
 
   const params = {
@@ -204,74 +261,97 @@ export async function completeStream({ tenantId, agentId, messages, tools = [], 
     params.tool_choice = tool_choice
   }
 
-  let content = ''
-  let finishReason = null
-  const toolCallsMap = {} // index -> accumulated tool call
-  const usage = { prompt: 0, completion: 0, total: 0 }
+  // Disable qwen3 verbose "thinking" mode for local Ollama (see complete()).
+  const isLocal = resolved?.baseUrl && /localhost|127\.0\.0\.1|::1|host\.docker\.internal/i.test(resolved.baseUrl)
+  const isQwen3Local = isLocal && /^qwen3[:.-]/i.test(resolvedModel)
+  if (isQwen3Local) {
+    params.extra_body = { ...(params.extra_body || {}), think: false }
+    // Inject /nothink into the last user message for extra reliability
+    const lastUserIdx = params.messages ? [...params.messages].map((m, i) => m.role === 'user' ? i : -1).filter(i => i >= 0).pop() : -1
+    if (lastUserIdx >= 0 && typeof params.messages[lastUserIdx].content === 'string' && !params.messages[lastUserIdx].content.startsWith('/nothink')) {
+      params.messages = [...params.messages]
+      params.messages[lastUserIdx] = { ...params.messages[lastUserIdx], content: '/nothink\n\n' + params.messages[lastUserIdx].content }
+    }
+  }
 
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), getLlmTimeout(resolved))
-    const stream = await client.chat.completions.create(params, { signal: controller.signal })
+  let _rlAttempt = 0
+  const _RL_BACKOFF = [5000, 15000, 30000]
+  while (true) {
+    let content = ''
+    let finishReason = null
+    const toolCallsMap = {} // index -> accumulated tool call
+    const usage = { prompt: 0, completion: 0, total: 0 }
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta
-      finishReason = chunk.choices[0]?.finish_reason || finishReason
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), getLlmTimeout(resolved))
+      const stream = await client.chat.completions.create(params, { signal: controller.signal })
 
-      if (delta?.content) {
-        content += delta.content
-        if (onToken) onToken(delta.content)
-      }
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta
+        finishReason = chunk.choices[0]?.finish_reason || finishReason
 
-      // Accumulate streaming tool call fragments
-      if (delta?.tool_calls) {
-        for (const tcDelta of delta.tool_calls) {
-          const idx = tcDelta.index
-          if (!toolCallsMap[idx]) {
-            toolCallsMap[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } }
+        if (delta?.content) {
+          content += delta.content
+          if (onToken) onToken(delta.content)
+        }
+
+        // Accumulate streaming tool call fragments
+        if (delta?.tool_calls) {
+          for (const tcDelta of delta.tool_calls) {
+            const idx = tcDelta.index
+            if (!toolCallsMap[idx]) {
+              toolCallsMap[idx] = { id: '', type: 'function', function: { name: '', arguments: '' } }
+            }
+            if (tcDelta.id) toolCallsMap[idx].id = tcDelta.id
+            if (tcDelta.function?.name) toolCallsMap[idx].function.name += tcDelta.function.name
+            if (tcDelta.function?.arguments) toolCallsMap[idx].function.arguments += tcDelta.function.arguments
           }
-          if (tcDelta.id) toolCallsMap[idx].id = tcDelta.id
-          if (tcDelta.function?.name) toolCallsMap[idx].function.name += tcDelta.function.name
-          if (tcDelta.function?.arguments) toolCallsMap[idx].function.arguments += tcDelta.function.arguments
+        }
+
+        // Usage comes in the final chunk when stream_options.include_usage is set
+        if (chunk.usage) {
+          usage.prompt = chunk.usage.prompt_tokens || 0
+          usage.completion = chunk.usage.completion_tokens || 0
+          usage.total = chunk.usage.total_tokens || 0
         }
       }
 
-      // Usage comes in the final chunk when stream_options.include_usage is set
-      if (chunk.usage) {
-        usage.prompt = chunk.usage.prompt_tokens || 0
-        usage.completion = chunk.usage.completion_tokens || 0
-        usage.total = chunk.usage.total_tokens || 0
+      const toolCalls = Object.values(toolCallsMap)
+
+      if (tenantId) {
+        try {
+          await auditLog({
+            eventType: 'llm.tokens_used', tenantId,
+            actorId: agentId || 'system', actorType: 'AGENT',
+            resourceType: 'LLM', action: 'LLM_STREAM',
+            metadata: {
+              model: resolvedModel,
+              promptTokens: usage.prompt,
+              completionTokens: usage.completion,
+              totalTokens: usage.total
+            }
+          })
+        } catch { /* audit failure must not break LLM call */ }
       }
-    }
 
-    const toolCalls = Object.values(toolCallsMap)
-
-    if (tenantId) {
-      try {
-        await auditLog({
-          eventType: 'llm.tokens_used', tenantId,
-          actorId: agentId || 'system', actorType: 'AGENT',
-          resourceType: 'LLM', action: 'LLM_STREAM',
-          metadata: {
-            model: resolvedModel,
-            promptTokens: usage.prompt,
-            completionTokens: usage.completion,
-            totalTokens: usage.total
-          }
-        })
-      } catch { /* audit failure must not break LLM call */ }
+      clearTimeout(timer)
+      return { content, toolCalls, usage, finishReason }
+    } catch (err) {
+      console.error('[LLM Error]', err)
+      if (err.name === 'AbortError' || err.code === 'ETIMEDOUT') {
+        throw new Error(`LLM streaming call timed out after ${LLM_CALL_TIMEOUT_MS / 1000}s. The model may be overloaded or unresponsive.`)
+      }
+      if (err.status === 429 && _rlAttempt < _RL_BACKOFF.length) {
+        const delay = _RL_BACKOFF[_rlAttempt++]
+        console.warn(`[LLM Stream] Rate limited (429) — retrying in ${delay / 1000}s (attempt ${_rlAttempt}/${_RL_BACKOFF.length})`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      if (err.status === 429) throw new Error('LLM_RATE_LIMITED')
+      if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
+      throw err
     }
-
-    clearTimeout(timer)
-    return { content, toolCalls, usage, finishReason }
-  } catch (err) {
-    console.error('[LLM Error]', err)
-    if (err.name === 'AbortError' || err.code === 'ETIMEDOUT') {
-      throw new Error(`LLM streaming call timed out after ${LLM_CALL_TIMEOUT_MS / 1000}s. The model may be overloaded or unresponsive.`)
-    }
-    if (err.status === 429) throw new Error('LLM_RATE_LIMITED')
-    if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
-    throw err
   }
 }
 

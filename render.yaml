@@ -104,6 +104,13 @@ services:
           name: kuvalam-browser-agent
           type: web
           envVarKey: RENDER_EXTERNAL_URL
+      # ML service — auto-wired when kuvalam-ml-service is deployed.
+      # Enables Whisper, FinBERT, BERT NER, BART, TrOCR, Donut, Prophet, Isolation Forest tools.
+      - key: ML_SERVICE_URL
+        fromService:
+          name: kuvalam-ml-service
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
 
   # ── BullMQ Worker ───────────────────────────────────────────────────────────
   - type: worker
@@ -159,6 +166,12 @@ services:
           name: kuvalam-browser-agent
           type: web
           envVarKey: RENDER_EXTERNAL_URL
+      # ML service — auto-wired when kuvalam-ml-service is deployed.
+      - key: ML_SERVICE_URL
+        fromService:
+          name: kuvalam-ml-service
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
 
   # ── Browser Agent (Playwright) ──────────────────────────────────────────────
   - type: web
@@ -174,6 +187,32 @@ services:
         - apps/browser-agent/**
         - package.json
         - package-lock.json
+
+  # ── ML Microservice (Python FastAPI) — OPTIONAL ─────────────────────────────
+  # Provides Whisper, FinBERT, BERT NER, BART zero-shot, TrOCR OCR as agent tools.
+  # Agents work normally when this service is not deployed.
+  # To enable: deploy this service, then set ML_SERVICE_URL on the API service
+  # pointing to this service's internal URL (fromService below).
+  - type: web
+    name: kuvalam-ml-service
+    runtime: docker
+    dockerfilePath: apps/ml-service/Dockerfile
+    dockerContext: apps/ml-service
+    plan: standard           # Standard ($25/mo) — needs ~2GB RAM for models
+    region: oregon
+    healthCheckPath: /health
+    buildFilter:
+      paths:
+        - apps/ml-service/**
+    disk:
+      name: ml-model-cache
+      mountPath: /app/.hf_cache
+      sizeGB: 10             # HuggingFace model weights cache
+    envVars:
+      - key: WHISPER_MODEL
+        value: base
+      - key: OCR_MODEL
+        value: microsoft/trocr-large-printed
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web
@@ -199,6 +238,18 @@ services:
       - key: NEXT_PUBLIC_API_URL
         fromService:
           name: kuvalam-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      # ML tools status indicator in the Tools page (baked in at build time)
+      - key: NEXT_PUBLIC_ML_SERVICE_URL
+        fromService:
+          name: kuvalam-ml-service
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      # Browser agent status indicator in the Tools page
+      - key: NEXT_PUBLIC_BROWSER_AGENT_URL
+        fromService:
+          name: kuvalam-browser-agent
           type: web
           envVarKey: RENDER_EXTERNAL_URL
 

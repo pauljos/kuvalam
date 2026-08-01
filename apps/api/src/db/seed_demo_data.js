@@ -46,7 +46,7 @@ async function seed() {
       for (const a of agentsToCreate) {
         const { rows: [created] } = await query(
           `INSERT INTO agents (tenant_id, name, description, archetype, status, autonomy_level, llm_provider, llm_model, confidence_threshold, created_by)
-           VALUES ($1, $2, $3, $4, 'ACTIVE', 'SUPERVISED', 'openai', 'gpt-4o', 0.80, $5) RETURNING id`,
+           VALUES ($1, $2, $3, $4, 'ACTIVE', 'SUPERVISED', NULL, 'auto', 0.80, $5) RETURNING id`,
           [TENANT_ID, a.name, a.description, a.archetype, USER_ID]
         )
         agentIds.push(created.id)

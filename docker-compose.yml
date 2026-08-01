@@ -72,7 +72,36 @@ services:
       timeout: 10s
       retries: 5
 
+  # ───────────────────────────────────────────────
+  # ML Microservice (Python FastAPI) — OPTIONAL
+  # Provides Whisper, FinBERT, BERT NER, BART, TrOCR
+  # Start with: docker compose --profile ml up
+  # Once running, set ML_SERVICE_URL=http://ml-service:8000 in the API .env
+  # ───────────────────────────────────────────────
+  ml-service:
+    build:
+      context: apps/ml-service
+      dockerfile: Dockerfile
+    image: kuvalam-ml-service
+    container_name: kuvalam-ml-service
+    restart: unless-stopped
+    profiles: ["ml"]
+    ports:
+      - "8001:8000"
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      OCR_MODEL: ${OCR_MODEL:-microsoft/trocr-large-printed}
+    volumes:
+      - ml_model_cache:/app/.hf_cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
 volumes:
   postgres_data:
   redis_data:
   neo4j_data:
+  ml_model_cache:

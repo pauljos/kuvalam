@@ -148,3 +148,24 @@ export async function deleteMemoryEntry(agentId, tenantId, memoryId) {
     [memoryId, agentId, tenantId]
   )
 }
+
+/**
+ * Delete ALL long-term memory entries for an agent.
+ */
+export async function clearMemory(agentId, tenantId) {
+  await query(
+    `DELETE FROM agent_memory WHERE agent_id = $1 AND tenant_id = $2`,
+    [agentId, tenantId]
+  )
+}
+
+/**
+ * Count long-term memory entries for an agent (for stats badges in the UI).
+ */
+export async function countMemory(agentId, tenantId) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS count FROM agent_memory WHERE agent_id = $1 AND tenant_id = $2`,
+    [agentId, tenantId]
+  )
+  return rows?.[0]?.count ?? 0
+}

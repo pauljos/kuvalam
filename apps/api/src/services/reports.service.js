@@ -280,13 +280,22 @@ export async function prepareDownload(tenantId, reportId, format) {
     }
 
     case 'pdf': {
-      // We return a self-printing HTML document.
-      // The browser/client opens it and calls window.print() which opens the OS PDF dialog.
-      // For server-side PDF, integrate Puppeteer/weasyprint in a future sprint.
-      return {
-        content: buildPrintHtml(report),
-        contentType: 'text/html; charset=utf-8',
-        filename: `${safeName}_print.html`,
+      // Generate a real PDF using Puppeteer (headless Chromium)
+      try {
+        const pdfBuffer = await generatePdf(report)
+        return {
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+          filename: `${safeName}.pdf`,
+        }
+      } catch (pdfErr) {
+        // Fallback: if Puppeteer fails (e.g. no Chromium), return print-optimized HTML
+        console.warn('[reports] Puppeteer PDF generation failed, falling back to print HTML:', pdfErr.message)
+        return {
+          content: buildPrintHtml(report),
+          contentType: 'text/html; charset=utf-8',
+          filename: `${safeName}_print.html`,
+        }
       }
     }
 
@@ -350,6 +359,57 @@ function buildPrintHtml(report) {
   </style>
   <script>window.addEventListener('load', () => setTimeout(() => window.print(), 300))<\/script>
 </head>`)
+}
+
+/** Singleton browser instance for PDF generation */
+let _browser = null
+
+async function getBrowser() {
+  if (_browser && _browser.isConnected()) return _browser
+  try {
+    const puppeteer = await import('puppeteer')
+    _browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+             '--disable-gpu', '--disable-software-rasterizer'],
+    })
+    return _browser
+  } catch (err) {
+    console.warn('[reports] Could not launch Puppeteer browser:', err.message)
+    return null
+  }
+}
+
+/**
+ * Generate a real PDF from report HTML using Puppeteer (headless Chromium).
+ * Falls back to null if Puppeteer/Chromium is unavailable.
+ */
+async function generatePdf(report) {
+  const browser = await getBrowser()
+  if (!browser) throw new Error('Puppeteer browser unavailable')
+
+  const html = wrapDownloadHtml(report)
+  const page = await browser.newPage()
+  try {
+    // Disable images/fonts to avoid network idle timeout, then set content
+    await page.setRequestInterception(true)
+    page.on('request', (req) => {
+      const type = req.resourceType()
+      if (type === 'image' || type === 'font' || type === 'media') req.abort()
+      else req.continue()
+    })
+    await page.setContent(html, { waitUntil: 'load', timeout: 15000 })
+    const pdf = await page.pdf({
+      format: 'A4',
+      landscape: true,
+      margin: { top: '1cm', bottom: '1cm', left: '1cm', right: '1cm' },
+      printBackground: true,
+      preferCSSPageSize: false,
+    })
+    return pdf
+  } finally {
+    await page.close().catch(() => {})
+  }
 }
 
 /** Extract the first <svg> element from HTML content */

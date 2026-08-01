@@ -6,13 +6,27 @@ import assert from 'node:assert/strict'
 import { routeModel, MODEL_TIERS, resolveLlmConfig } from '../../src/services/llm.service.js'
 
 test('routeModel: honours explicit llmConfig.model over everything', () => {
-  const result = routeModel('audit the compliance report', 'gpt-4o', { model: 'gpt-4-turbo' })
+  const result = routeModel('audit the compliance report', 'auto', { model: 'gpt-4-turbo' })
   assert.equal(result, 'gpt-4-turbo')
 })
 
-test('routeModel: honours explicit preferredModel when not gpt-4o/auto', () => {
+test('routeModel: honours explicit preferredModel when set (de-hardcoded: any real model name is respected)', () => {
   const result = routeModel('summarise this document', 'claude-3-5-sonnet-20241022', {})
   assert.equal(result, 'claude-3-5-sonnet-20241022')
+})
+
+test('routeModel: a real model name (e.g. gpt-4o) is now RESPECTED, not treated as auto', () => {
+  // De-hardcoding change: previously 'gpt-4o' was a magic "auto" sentinel that
+  // fell through to tier routing. Now an explicitly-configured model is honoured.
+  const result = routeModel('audit the compliance report', 'gpt-4o', {})
+  assert.equal(result, 'gpt-4o')
+})
+
+test('routeModel: auto/default/empty sentinels trigger tier routing', () => {
+  assert.equal(routeModel('audit the compliance report', 'auto', {}), MODEL_TIERS.ADVANCED.model)
+  assert.equal(routeModel('audit the compliance report', 'default', {}), MODEL_TIERS.ADVANCED.model)
+  assert.equal(routeModel('audit the compliance report', '', {}), MODEL_TIERS.ADVANCED.model)
+  assert.equal(routeModel('audit the compliance report', null, {}), MODEL_TIERS.ADVANCED.model)
 })
 
 test('routeModel: routes compliance/legal/audit goals to ADVANCED model', () => {
@@ -23,7 +37,7 @@ test('routeModel: routes compliance/legal/audit goals to ADVANCED model', () => 
     'perform a multi-step analysis of the data',
   ]
   for (const goal of cases) {
-    const result = routeModel(goal, 'gpt-4o', {})
+    const result = routeModel(goal, 'auto', {})
     assert.equal(result, MODEL_TIERS.ADVANCED.model, `Expected ADVANCED for: "${goal}"`)
   }
 })
@@ -37,20 +51,20 @@ test('routeModel: routes simple/fast goals to FAST model', () => {
     'extract all email addresses',
   ]
   for (const goal of cases) {
-    const result = routeModel(goal, 'gpt-4o', {})
+    const result = routeModel(goal, 'auto', {})
     assert.equal(result, MODEL_TIERS.FAST.model, `Expected FAST for: "${goal}"`)
   }
 })
 
 test('routeModel: defaults to STANDARD for general goals', () => {
-  const result = routeModel('write a follow-up email to the client', 'gpt-4o', {})
+  const result = routeModel('write a follow-up email to the client', 'auto', {})
   assert.equal(result, MODEL_TIERS.STANDARD.model)
 })
 
 test('routeModel: handles empty/null goal gracefully', () => {
-  assert.equal(routeModel('', 'gpt-4o', {}), MODEL_TIERS.STANDARD.model)
-  assert.equal(routeModel(null, 'gpt-4o', {}), MODEL_TIERS.STANDARD.model)
-  assert.equal(routeModel(undefined, 'gpt-4o', {}), MODEL_TIERS.STANDARD.model)
+  assert.equal(routeModel('', 'auto', {}), MODEL_TIERS.STANDARD.model)
+  assert.equal(routeModel(null, 'auto', {}), MODEL_TIERS.STANDARD.model)
+  assert.equal(routeModel(undefined, 'auto', {}), MODEL_TIERS.STANDARD.model)
 })
 
 test('MODEL_TIERS has all required keys', () => {

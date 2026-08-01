@@ -54,6 +54,7 @@ import builderRoutes from './routes/builder.routes.js'
 import systemRoutes from './routes/system.routes.js'
 import knowledgeInfraRoutes from './routes/knowledge-infra.routes.js'
 import knowledgeGraphRoutes from './routes/knowledge-graph.routes.js'
+import supervisorRoutes from './routes/supervisor.routes.js'
 import { initQueues, getQueueStats, shutdownQueues } from './services/queue.service.js'
 import { startScheduler, stopScheduler, getSchedulerStatus } from './services/scheduler.service.js'
 import { initTelemetry } from './services/telemetry.service.js'
@@ -139,11 +140,11 @@ await fastify.register(multipart, {
 await fastify.register(rateLimit, {
   max: 200,
   timeWindow: '1 minute',
-  allowList: (req) => req.url === '/health'
+  allowList: (req) => req.url === '/health' || req.url === '/metrics'
 })
 
 // ─── RLS Context Hook ──────────────────────────────────────────────────────
-import { tenantContextStore, releaseTenantClient, query as _q } from './db/pool.js'
+import { tenantContextStore, releaseTenantClient, poolStats, query as _q } from './db/pool.js'
 
 const TENANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -154,7 +155,11 @@ fastify.addHook('onRequest', (request, reply, done) => {
   if (tenantId && TENANT_UUID_RE.test(tenantId)) {
     // Store an object so we can cache a per-request DB client on it.
     // tenantContextStore.getStore() is now { tenantId, client? }
-    tenantContextStore.run({ tenantId }, done)
+    // Also stash on `request` as a fallback so onResponse can release
+    // deterministically even if the ALS context is lost.
+    const store = { tenantId }
+    request._tenantStore = store
+    tenantContextStore.run(store, done)
   } else {
     done()
   }
@@ -163,7 +168,7 @@ fastify.addHook('onRequest', (request, reply, done) => {
 // Release the per-request tenant DB client when the response is sent.
 // This is the complement to the lazy-acquire in pool.js → query().
 fastify.addHook('onResponse', (request, reply, done) => {
-  releaseTenantClient()
+  releaseTenantClient(request._tenantStore)
   done()
 })
 
@@ -186,7 +191,9 @@ fastify.decorate('authenticate', async function (request, reply) {
 
   // Enforce tenant IDOR guard immediately after successful auth, whenever a
   // route contains :tenantId. Defence-in-depth in addition to Postgres RLS.
-  if (request.params?.tenantId) {
+  // Use 'in' check — empty string is a valid param value in Fastify but
+  // must be rejected before it reaches a UUID-typed DB column.
+  if (request.params && 'tenantId' in request.params) {
     await fastify.validateTenantAccess(request, reply)
     if (reply.sent) throw new Error('Tenant access denied')
   }
@@ -233,7 +240,13 @@ async function _isTenantMember(userId, tenantId) {
 
 fastify.decorate('validateTenantAccess', async function (request, reply) {
   const urlTenantId = request.params?.tenantId
-  if (!urlTenantId) return // no tenant in URL, nothing to check
+  // Reject missing *and* empty tenantId — both would cause UUID errors downstream
+  if (!urlTenantId || urlTenantId.trim() === '') {
+    return reply.status(400).send({
+      success: false,
+      error: { code: 'INVALID_TENANT_ID', message: 'A valid tenant identifier is required' }
+    })
+  }
   if (!TENANT_UUID_RE.test(urlTenantId)) {
     return reply.status(400).send({
       success: false,
@@ -275,6 +288,73 @@ fastify.get('/health', async () => {
     queue,
     scheduler
   }
+})
+
+// ─── Prometheus-style metrics ───────────────────────────────────────────────
+// Public (no auth) endpoint returning process + queue + agent_health metrics
+// in the plaintext exposition format. Fleet-wide aggregates only — no
+// per-tenant PII exposed here.
+fastify.get('/metrics', async (_req, reply) => {
+  const lines = []
+  const mem = process.memoryUsage()
+  lines.push('# HELP kuvalam_process_uptime_seconds Process uptime')
+  lines.push('# TYPE kuvalam_process_uptime_seconds counter')
+  lines.push(`kuvalam_process_uptime_seconds ${process.uptime().toFixed(1)}`)
+  lines.push('# HELP kuvalam_process_memory_bytes Resident memory in bytes')
+  lines.push('# TYPE kuvalam_process_memory_bytes gauge')
+  lines.push(`kuvalam_process_memory_bytes{type="rss"} ${mem.rss}`)
+  lines.push(`kuvalam_process_memory_bytes{type="heap_used"} ${mem.heapUsed}`)
+
+  try {
+    const q = await getQueueStats()
+    if (q && q.available !== false) {
+      for (const queueName of ['tasks', 'workflows']) {
+        const stats = q[queueName]
+        if (!stats || typeof stats !== 'object') continue
+        for (const [state, count] of Object.entries(stats)) {
+          if (typeof count !== 'number') continue
+          lines.push(`kuvalam_queue_jobs{queue="${queueName}",state="${state}"} ${count}`)
+        }
+      }
+    }
+  } catch { /* queue not available */ }
+
+  try {
+    const { rows } = await _q(
+      `SELECT circuit_state, COUNT(*)::int AS n,
+              COALESCE(SUM(running_tasks), 0)::int AS running,
+              COALESCE(SUM(completed_24h), 0)::int AS completed_24h,
+              COALESCE(SUM(failed_24h), 0)::int AS failed_24h
+         FROM agent_health
+         GROUP BY circuit_state`
+    )
+    lines.push('# HELP kuvalam_agent_circuit Agents by circuit state')
+    lines.push('# TYPE kuvalam_agent_circuit gauge')
+    for (const r of rows) {
+      lines.push(`kuvalam_agent_circuit{state="${r.circuit_state}"} ${r.n}`)
+    }
+    const total = rows.reduce((acc, r) => {
+      acc.running += r.running
+      acc.completed_24h += r.completed_24h
+      acc.failed_24h += r.failed_24h
+      return acc
+    }, { running: 0, completed_24h: 0, failed_24h: 0 })
+    lines.push(`kuvalam_agent_tasks_running ${total.running}`)
+    lines.push(`kuvalam_agent_tasks_completed_24h ${total.completed_24h}`)
+    lines.push(`kuvalam_agent_tasks_failed_24h ${total.failed_24h}`)
+  } catch { /* agent_health not populated yet */ }
+
+  // DB pool telemetry — catches connection leaks fast.
+  try {
+    const p = poolStats()
+    lines.push('# HELP kuvalam_db_pool_connections DB pool connection counts')
+    lines.push('# TYPE kuvalam_db_pool_connections gauge')
+    lines.push(`kuvalam_db_pool_connections{state="total"} ${p.totalCount}`)
+    lines.push(`kuvalam_db_pool_connections{state="idle"} ${p.idleCount}`)
+    lines.push(`kuvalam_db_pool_connections{state="waiting"} ${p.waitingCount}`)
+  } catch { /* pool stats unavailable */ }
+
+  reply.type('text/plain; version=0.0.4').send(lines.join('\n') + '\n')
 })
 
 fastify.get('/', async () => ({
@@ -355,6 +435,7 @@ await fastify.register(builderRoutes, { prefix: '/api/v1' })
 await fastify.register(systemRoutes, { prefix: '/api/v1' })
 await fastify.register(knowledgeInfraRoutes, { prefix: '/api/v1' })
 await fastify.register(knowledgeGraphRoutes, { prefix: '/api/v1' })
+await fastify.register(supervisorRoutes, { prefix: '/api/v1' })
 
 // ─── Global error handler ──────────────────────────────────────────────────
 fastify.setErrorHandler(async (error, request, reply) => {
@@ -416,7 +497,7 @@ try {
     // exceed TASK_TIMEOUT_MS. Uses the pool (not the raw client, which is
     // already closed after orphan recovery). Handles tasks stuck mid-execution
     // (e.g. hanging Ollama calls that outlive the AbortController).
-    const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS || '600000') // 10 min
+    const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS || '120000') // 2 min
     const CLEANUP_INTERVAL_MS = 30_000
     // Store handle so gracefulShutdown can clear it (fix #14)
     _staleTaskCleanupInterval = setInterval(async () => {

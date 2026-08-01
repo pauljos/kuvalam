@@ -1,0 +1,28 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'>
+  <rect width='800' height='600' fill='#e0f7fa'/>
+  <text x='400' y='50' font-size='24' text-anchor='middle' fill='#004d40'>5-Villa Residential Plan</text>
+  <line x1='100' y1='100' x2='700' y2='100' stroke='#00796b' stroke-width='4'/>
+  <line x1='100' y1='500' x2='700' y2='500' stroke='#00796b' stroke-width='4'/>
+  <line x1='100' y1='100' x2='100' y2='500' stroke='#00796b' stroke-width='4'/>
+  <line x1='700' y1='100' x2='700' y2='500' stroke='#00796b' stroke-width='4'/>
+  <circle cx='100' cy='100' r='20' fill='#00796b'/>
+  <text x='80' y='80' font-size='14' fill='#004d40'>Villa 1</text>
+  <circle cx='700' cy='100' r='20' fill='#00796b'/>
+  <text x='680' y='80' font-size='14' fill='#004d40'>Villa 5</text>
+  <circle cx='100' cy='500' r='20' fill='#00796b'/>
+  <text x='80' y='520' font-size='14' fill='#004d40'>Villa 2</text>
+  <circle cx='700' cy='500' r='20' fill='#00796b'/>
+  <text x='680' y='520' font-size='14' fill='#004d40'>Villa 4</text>
+  <circle cx='400' cy='300' r='20' fill='#00796b'/>
+  <text x='380' y='320' font-size='14' fill='#004d40'>Villa 3</text>
+  <rect x='100' y='100' width='60' height='60' fill='#00acc1'/>
+  <text x='130' y='130' font-size='12' fill='#004d40'>Garage</text>
+  <rect x='100' y='500' width='60' height='60' fill='#00acc1'/>
+  <text x='130' y='530' font-size='12' fill='#004d40'>Pool</text>
+  <rect x='700' y='100' width='60' height='60' fill='#00acc1'/>
+  <text x='730' y='130' font-size='12' fill='#004d40'>Landscape</text>
+  <rect x='700' y='500' width='60' height='60' fill='#00acc1'/>
+  <text x='730' y='530' font-size='12' fill='#004d40'>Garden</text>
+  <text x='400' y='580' font-size='14' text-anchor='middle' fill='#004d40'>Scale: 1:100</text>
+  <text x='400' y='595' font-size='12' text-anchor='middle' fill='#004d40'>Legend: Circles = Villas, Rectangles = Features</text>
+</svg>

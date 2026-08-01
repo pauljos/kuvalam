@@ -32,6 +32,12 @@ export async function retrieveKnowledge(agent, goal) {
     // 2. Graph search via Neo4j / ArangoDB (optional, per-agent connector)
     const { getAgentGraphConnectors, searchKnowledgeGraph } = await import('./graph-knowledge.service.js')
     const graphConns = await getAgentGraphConnectors(agent.id, agent.tenant_id)
+    if (graphConns.length > 0) {
+      // ── Dedup (G5): record that the goal was already graph-searched so the
+      // runtime searchGraph tool can short-circuit an identical re-query.
+      agent._graphQueriesRun = agent._graphQueriesRun || new Set()
+      agent._graphQueriesRun.add(String(goal || '').trim().toLowerCase())
+    }
     for (const conn of graphConns) {
       try {
         const graphBlocks = await searchKnowledgeGraph(conn, goal)
@@ -47,10 +53,10 @@ export async function retrieveKnowledge(agent, goal) {
   try {
     // 3. External vector DB search (Pinecone, Weaviate, Qdrant, etc.)
     const { rows: vectorConns } = await query(
-      `SELECT tc.id, tc.name, tc.provider, tc.config FROM tool_connections tc
+      `SELECT tc.id, tc.name, tc.tool_id, tc.config FROM tool_connections tc
        WHERE tc.tenant_id = $1 AND tc.status = 'ACTIVE'
          AND (
-           tc.provider IN ('PINECONE', 'WEAVIATE', 'QDRANT', 'MILVUS', 'VECTORDB', 'VECTOR_DB', 'VECTOR')
+           tc.tool_id IN ('PINECONE', 'WEAVIATE', 'QDRANT', 'MILVUS', 'VECTORDB', 'VECTOR_DB', 'VECTOR')
            OR (tc.name ILIKE '%vector%') OR (tc.name ILIKE '%pinecone%')
            OR (tc.name ILIKE '%weaviate%') OR (tc.name ILIKE '%qdrant%'))
        LIMIT 3`,
@@ -173,4 +179,38 @@ export async function saveEpisodicMemory(agent, task, result, actions) {
   } catch {
     // Non-critical error - episodic memory is best-effort
   }
+}
+
+/**
+ * List all episodic (past-experience) memory entries for an agent.
+ */
+export async function listEpisodicMemory(agentId, tenantId) {
+  const { rows } = await query(
+    `SELECT id, task_id, task_type, goal_summary, outcome, key_actions, result_summary, lessons, created_at
+     FROM agent_episodic_memory
+     WHERE agent_id = $1 AND tenant_id = $2
+     ORDER BY created_at DESC`,
+    [agentId, tenantId]
+  )
+  return rows
+}
+
+/**
+ * Delete a single episodic memory entry.
+ */
+export async function deleteEpisodicMemoryEntry(agentId, tenantId, memoryId) {
+  await query(
+    `DELETE FROM agent_episodic_memory WHERE id = $1 AND agent_id = $2 AND tenant_id = $3`,
+    [memoryId, agentId, tenantId]
+  )
+}
+
+/**
+ * Delete ALL episodic memory entries for an agent.
+ */
+export async function clearEpisodicMemory(agentId, tenantId) {
+  await query(
+    `DELETE FROM agent_episodic_memory WHERE agent_id = $1 AND tenant_id = $2`,
+    [agentId, tenantId]
+  )
 }

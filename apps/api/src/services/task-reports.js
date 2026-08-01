@@ -10,6 +10,52 @@ export const CHART_COLORS = [
 ]
 export const CHART_BG_ALPHA = '33' // ~20%
 
+// Markers that indicate a stored system_prompt contains the GENERATED archetype
+// blob (produced by generateAgentSystemPrompt) rather than only user guardrails.
+// Older agents saved the whole composed prompt at creation; we strip it at
+// runtime so the archetype template is always generated fresh and never frozen.
+const ARCHETYPE_SECTION = /\n{2,}##\s*(YOUR ROLE|HOW TO WORK|CORE RULES|AGENT CREATION GUIDELINES|DATABASE ACCESS)\b/i
+const ARCHETYPE_OPEN = /^\s*You are\s+\*{0,2}[^,\n*]{2,80}\*{0,2}\s*,/i
+
+/**
+ * Return ONLY the user-authored guardrails portion of an agent's system_prompt,
+ * stripping any embedded archetype template that was frozen in at creation time.
+ * Keeps custom sections (e.g. "## Guardrails", domain rules) intact.
+ */
+export function extractUserGuardrails(systemPrompt) {
+  const raw = String(systemPrompt || '').trim()
+  if (!raw) return ''
+
+  // Corrupted output guard — a previous refiner run once saved a JSON template
+  // placeholder ("<the FULL new custom instructions...>"). Drop that line.
+  let text = raw.replace(/^<the FULL new custom instructions[^\n]*>\s*/i, '').trim()
+  if (!text) return ''
+
+  // Only treat as a frozen archetype blob if it BOTH opens like one ("You are
+  // **Name**, a ... agent.") AND contains the archetype section headings. A
+  // hand-written prompt that merely starts with "You are a ... for X" (no `## `
+  // archetype sections) is legitimate custom instructions — keep it verbatim.
+  const looksBlob = ARCHETYPE_OPEN.test(text) && ARCHETYPE_SECTION.test(text)
+  if (looksBlob) {
+    const lines = text.split('\n')
+    let out = []
+    let inCustom = false
+    for (const line of lines) {
+      const isSection = /^##\s+/.test(line.trim())
+      if (isSection) {
+        inCustom = !/^##\s*(YOUR ROLE|HOW TO WORK|CORE RULES|AGENT CREATION GUIDELINES|DATABASE ACCESS)\b/i.test(line.trim())
+      }
+      if (inCustom) out.push(line)
+    }
+    // Whatever custom sections followed the archetype blob are the guardrails.
+    // If none, the prompt WAS purely an archetype blob → no guardrails.
+    return out.join('\n').trim()
+  }
+
+  // Doesn't look like an archetype blob — treat the whole thing as user guardrails.
+  return text
+}
+
 /**
  * Extract a confidence score from a synthesis response.
  * Looks for explicit patterns like "confidence: 0.9" or "95% confident".
@@ -694,17 +740,30 @@ export function synthesiseReportHtml(content) {
 
   const trimmed = content.trim()
 
-  // 0. Content is already raw HTML (no markdown fences)
+  // 0. Content is already raw HTML/SVG (no markdown fences)
   if (trimmed.startsWith('<')) return sanitiseReportHtml(trimmed)
 
-  // 1. Explicit HTML code block (with or without "html" language tag)
+  // 1a. SVG code block — extract raw SVG (check BEFORE generic HTML block
+  //     because ```svg fences contain <svg> which starts with '<')
+  const svgFenceMatch = content.match(/```(?:svg|xml)\s*\n?(<svg[\s\S]*?<\/svg>)\s*```/)
+  if (svgFenceMatch) {
+    return `<div style="display:flex;justify-content:center;align-items:center;min-height:400px;background:#f8fafc;border-radius:8px;padding:24px;overflow-x:auto">${svgFenceMatch[1]}</div>`
+  }
+
+  // 1b. Raw SVG embedded in text (not fenced, just floating in markdown)
+  const svgRawMatch = content.match(/<svg[\s\S]*?<\/svg>/)
+  if (svgRawMatch) {
+    return `<div style="display:flex;justify-content:center;align-items:center;min-height:400px;background:#f8fafc;border-radius:8px;padding:24px;overflow-x:auto">${svgRawMatch[0]}</div>`
+  }
+
+  // 2. Explicit HTML code block (with or without "html" language tag)
   const htmlBlockMatch = content.match(/```(?:html)?\s*([\s\S]*?)\s*```/)
   if (htmlBlockMatch) {
     const candidate = htmlBlockMatch[1].trim()
     if (candidate.startsWith('<')) return sanitiseReportHtml(candidate)
   }
 
-  // 2. Tool-call JSON pasted by the agent — try to grab the html_content parameter
+  // 3. Tool-call JSON pasted by the agent — try to grab the html_content parameter
   const toolCallMatch = content.match(/"publish_dashboard_report"[\s\S]*?"parameters"\s*:\s*(\{[\s\S]*?"html_content"\s*:\s*"[\s\S]*?\}\s*\})/)
   if (toolCallMatch) {
     try {
@@ -713,7 +772,7 @@ export function synthesiseReportHtml(content) {
     } catch { /* ignore malformed JSON */ }
   }
 
-  // 3. Markdown → HTML fallback
+  // 4. Markdown → HTML fallback
   return markdownToReportHtml(content)
 }
 
@@ -830,9 +889,49 @@ export function markdownToReportHtml(md) {
 /**
  * Build the system prompt sent to the LLM at the start of each task.
  * Combines agent configuration, available skills, and database context.
+ *
+ * The stored `system_prompt` holds ONLY the user-authored guardrails. The
+ * rich archetype template (role, how-to-work, core rules) is generated FRESH
+ * each run from the agent's current archetype/name/description, so template
+ * improvements reach existing agents and are never frozen into the row.
  */
-export function buildSystemPrompt(agent, skills, goal = '') {
-  const base = agent.system_prompt || `You are ${agent.name}, an AI agent. ${agent.description || ''}`
+export async function buildSystemPrompt(agent, skills, goal = '') {
+  // ── User guardrails: strip any embedded archetype blob frozen at creation ──
+  const userGuardrails = extractUserGuardrails(agent.system_prompt)
+
+  // ── Archetype template: generated fresh at runtime (not stored) ──
+  let archetypePrompt = ''
+  try {
+    const { generateAgentSystemPrompt } = await import('./agent.service.js')
+    archetypePrompt = await generateAgentSystemPrompt(agent.name, agent.description || '', agent.archetype, agent.tenant_id) || ''
+  } catch {
+    archetypePrompt = ''
+  }
+
+  // ── Concrete task goal: inject it FIRST inside PRIMARY TASK so the agent's
+  // specific objective — including its key metrics ("25 villas", "50 metres",
+  // quantities, counts) — is always front and centre, not just the generic
+  // role/guardrails. The runtime task loop passes task.goal here.
+  const taskGoal = goal && String(goal).trim() ? String(goal).trim() : ''
+
+  // ── Compose: user's custom guardrails FIRST, then archetype role.
+  // Guardrails contain the SPECIFIC project scope and MUST take priority
+  // over the generic archetype template. If the user says "design villas"
+  // and the template mentions beams, the villas instruction wins.
+  const cleanGuardrails = userGuardrails
+    .replace(/^##\s+AGENT[- ]SPECIFIC\s+INSTRUCTIONS\s*/im, '')
+    .replace(/^##\s+Guardrails?\s*(?:\([^)]*\))?\s*/gim, '')
+    .trim()
+  let base
+  if (archetypePrompt && cleanGuardrails) {
+    // Guardrails FIRST — they define the actual project, archetype is supplementary
+    base = `## PRIMARY TASK (follow this exactly)\n${taskGoal ? `TASK GOAL: ${taskGoal}\n\n` : ''}${cleanGuardrails}\n\n## AGENT ROLE & CAPABILITIES\n${archetypePrompt}`
+  } else if (archetypePrompt) {
+    base = `${archetypePrompt}${taskGoal ? `\n\n## CURRENT TASK\n${taskGoal}` : ''}`
+  } else {
+    base = `${cleanGuardrails || `You are ${agent.name}, an AI agent. ${agent.description || ''}`}${taskGoal ? `\n\n## CURRENT TASK\n${taskGoal}` : ''}`
+  }
+
   const skillList = skills.length > 0
     ? `\n\nYour available skills:\n${skills.map(s => `- ${s.name}: ${s.description}`).join('\n')}`
     : ''

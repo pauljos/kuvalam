@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dental Chart</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+        }
+        .chart {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .tooth {
+            width: 50px;
+            height: 50px;
+            background-color: #fff;
+            border: 2px solid #333;
+            margin: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .tooth:hover {
+            background-color: #e0e0e0;
+        }
+        .legend {
+            margin-top: 30px;
+            text-align: center;
+        }
+        .legend div {
+            display: inline-block;
+            margin: 10px;
+        }
+        .legend span {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+        }
+        .count {
+            text-align: center;
+            font-size: 18px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Dental Chart</h1>
+    <div class="chart" id="chart">
+        <!-- Teeth will be dynamically generated here -->
+    </div>
+    <div class="legend">
+        <div><span style="background-color: green;"></span> Healthy</div>
+        <div><span style="background-color: red;"></span> Cavity</div>
+        <div><span style="background-color: gold;"></span> Crown</div>
+        <div><span style="background-color: gray;"></span> Missing</div>
+    </div>
+    <div class="count" id="count">
+        <p>Total Teeth: <span id="totalTeeth">0</span></p>
+        <p>Healthy Teeth: <span id="healthyTeeth">0</span></p>
+        <p>Cavity Teeth: <span id="cavityTeeth">0</span></p>
+        <p>Crown Teeth: <span id="crownTeeth">0</span></p>
+        <p>Missing Teeth: <span id="missingTeeth">0</span></p>
+    </div>
+
+    <script>
+        const chart = document.getElementById('chart');
+        const totalTeeth = document.getElementById('totalTeeth');
+        const healthyTeeth = document.getElementById('healthyTeeth');
+        const cavityTeeth = document.getElementById('cavityTeeth');
+        const crownTeeth = document.getElementById('crownTeeth');
+        const missingTeeth = document.getElementById('missingTeeth');
+
+        const teeth = [
+            { id: 11, state: 'healthy' },
+            { id: 12, state: 'healthy' },
+            { id: 13, state: 'healthy' },
+            { id: 14, state: 'healthy' },
+            { id: 15, state: 'healthy' },
+            { id: 16, state: 'healthy' },
+            { id: 17, state: 'healthy' },
+            { id: 18, state: 'healthy' },
+            { id: 21, state: 'healthy' },
+            { id: 22, state: 'healthy' },
+            { id: 23, state: 'healthy' },
+            { id: 24, state: 'healthy' },
+            { id: 25, state: 'healthy' },
+            { id: 26, state: 'healthy' },
+            { id: 27, state: 'healthy' },
+            { id: 28, state: 'healthy' },
+            { id: 31, state: 'healthy' },
+            { id: 32, state: 'healthy' },
+            { id: 33, state: 'healthy' },
+            { id: 34, state: 'healthy' },
+            { id: 35, state: 'healthy' },
+            { id: 36, state: 'healthy' },
+            { id: 37, state: 'healthy' },
+            { id: 38, state: 'healthy' },
+            { id: 41, state: 'healthy' },
+            { id: 42, state: 'healthy' },
+            { id: 43, state: 'healthy' },
+            { id: 44, state: 'healthy' },
+            { id: 45, state: 'healthy' },
+            { id: 46, state: 'healthy' },
+            { id: 47, state: 'healthy' },
+            { id: 48, state: 'healthy' }
+        ];
+
+        let healthyCount = 0;
+        let cavityCount = 0;
+        let crownCount = 0;
+        let missingCount = 0;
+
+        teeth.forEach(tooth => {
+            const toothDiv = document.createElement('div');
+            toothDiv.className = 'tooth';
+            toothDiv.textContent = tooth.id;
+            toothDiv.dataset.id = tooth.id;
+            toothDiv.dataset.state = tooth.state;
+
+            toothDiv.addEventListener('click', () => {
+                const currentState = toothDiv.dataset.state;
+                let newState;
+
+                if (currentState === 'healthy') {
+                    newState = 'cavity';
+                    cavityCount++;
+                } else if (currentState === 'cavity') {
+                    newState = 'crown';
+                    cavityCount--;
+                    crownCount++;
+                } else if (currentState === 'crown') {
+                    newState = 'missing';
+                    crownCount--;
+                    missingCount++;
+                } else {
+                    newState = 'healthy';
+                    missingCount--;
+                    healthyCount++;
+                }
+
+                toothDiv.dataset.state = newState;
+                toothDiv.style.backgroundColor = getBackgroundColor(newState);
+
+                updateCounts();
+            });
+
+            chart.appendChild(toothDiv);
+        });
+
+        function getBackgroundColor(state) {
+            switch (state) {
+                case 'healthy':
+                    return 'green';
+                case 'cavity':
+                    return 'red';
+                case 'crown':
+                    return 'gold';
+                case 'missing':
+                    return 'gray';
+                default:
+                    return 'white';
+            }
+        }
+
+        function updateCounts() {
+            totalTeeth.textContent = teeth.length;
+            healthyTeeth.textContent = healthyCount;
+            cavityTeeth.textContent = cavityCount;
+            crownTeeth.textContent = crownCount;
+            missingTeeth.textContent = missingCount;
+        }
+
+        updateCounts();
+    </script>
+</body>
+</html>

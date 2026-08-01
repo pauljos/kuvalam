@@ -21,6 +21,115 @@
 			"command": "kill $(lsof -ti :3001) 2>/dev/null; sleep 1; cd apps/api && node --env-file=.env src/index.js",
 			"isBackground": true,
 			"problemMatcher": []
+		},
+		{
+			"label": "kill-port-3000",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; echo 'port 3000 freed'"
+		},
+		{
+			"label": "start-web-fresh",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 2; lsof -ti :3000 || echo 'port clear'; cd /Users/PaulJoseph/pgent/apps/web && rm -rf .next && npx next dev --port 3000",
+			"isBackground": true,
+			"group": "none"
+		},
+		{
+			"label": "web-fresh-2",
+			"type": "shell",
+			"command": "pkill -9 -f 'next dev' 2>/dev/null; pkill -9 -f 'node.*3000' 2>/dev/null; sleep 3; lsof -ti :3000 | xargs kill -9 2>/dev/null; sleep 1; rm -rf /Users/PaulJoseph/pgent/apps/web/.next; cd /Users/PaulJoseph/pgent/apps/web && npx next dev --port 3000",
+			"isBackground": true,
+			"group": "none"
+		},
+		{
+			"label": "clear-cache",
+			"type": "shell",
+			"command": "pkill -9 -f 'next' 2>/dev/null; sleep 2; rm -rf /Users/PaulJoseph/pgent/apps/web/.next && echo 'CLEARED'",
+			"group": "none"
+		},
+		{
+			"label": "restart-api-fresh",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3001) 2>/dev/null; sleep 1; cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env src/index.js",
+			"isBackground": true
+		},
+		{
+			"label": "test-pdf",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && node -e \"const http=require('http');const d=JSON.stringify({email:'admin@kuvalam.ai',password:'admin123'});const r=http.request({hostname:'localhost',port:3001,path:'/api/v1/auth/login',method:'POST',headers:{'Content-Type':'application/json','Content-Length':d.length}},res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>{const t=JSON.parse(b).data.accessToken;http.get({hostname:'localhost',port:3001,path:'/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf',headers:{Cookie:'kuvalam_token='+t}},r2=>{const c=[];r2.on('data',x=>c.push(x));r2.on('end',()=>{const b2=Buffer.concat(c);console.log('HTTP',r2.statusCode,'CT',r2.headers['content-type'],'Size',b2.length,'PDF',b2.toString('utf8',0,5)==='%PDF-')})})})});r.write(d);r.end()\"",
+			"isBackground": false
+		},
+		{
+			"label": "restart-api-debug",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3001) 2>/dev/null; sleep 1; cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env src/index.js",
+			"isBackground": true
+		},
+		{
+			"label": "test-pdf-download",
+			"type": "shell",
+			"command": "sleep 3 && curl -s -c /tmp/kv_cookies.txt -b /tmp/kv_cookies.txt -H \"Content-Type: application/json\" -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login > /dev/null && curl -s -o /tmp/pdf_test_output.bin -w \"HTTP %{http_code} | Content-Type: %{content_type} | Size: %{size_download}\\n\" -b /tmp/kv_cookies.txt \"http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf\" && echo \"First bytes:\" && head -c 50 /tmp/pdf_test_output.bin | xxd | head -5",
+			"isBackground": false
+		},
+		{
+			"label": "test-pdf-final",
+			"type": "shell",
+			"command": "sleep 2 && curl -s -c /tmp/kv_cookies2.txt -b /tmp/kv_cookies2.txt -H \"Content-Type: application/json\" -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null && curl -s -o /tmp/pdf_test3.bin -w \"HTTP %{http_code} CT %{content_type} Size %{size_download}\\n\" -b /tmp/kv_cookies2.txt \"http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf\" && echo \"=== First bytes ===\" && head -c 20 /tmp/pdf_test3.bin | xxd | head -3",
+			"isBackground": false
+		},
+		{
+			"label": "review-villa-svg",
+			"type": "shell",
+			"command": "curl -s -c /tmp/kv_r4.txt -b /tmp/kv_r4.txt -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null && curl -s -b /tmp/kv_r4.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b' | python3 -c \"import sys,json; r=json.load(sys.stdin); d=r.get('data',r); print('Title:',d['title']); h=d.get('html_content',''); print('HTML size:',len(h)); svgs=[s for s in h.split('<svg') if '</svg>' in s]; print('SVG count:',len(svgs)); [print(f'SVG {i+1}: {len(s)} chars') for i,s in enumerate(svgs)]\"",
+			"isBackground": false
+		},
+		{
+			"label": "show-villa-svg",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_r4.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b' | python3 -c \"\nimport sys,json\nr=json.load(sys.stdin)\nd=r.get('data',r)\nh=d.get('html_content','')\n# Extract SVG\nimport re\nm=re.search(r'<svg[\\s\\S]*?</svg>', h, re.I)\nif m:\n    print(m.group(0))\n\"",
+			"isBackground": false
+		},
+		{
+			"label": "verify-pdf-final",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_r4.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf' -o /tmp/final_pdf_test.pdf -w 'HTTP %{http_code} CT %{content_type} Size %{size_download}\\n' && head -c 5 /tmp/final_pdf_test.pdf | xxd | head -1 && echo \"---\" && echo \"PDF verified OK\"",
+			"isBackground": false
+		},
+		{
+			"label": "test-pdf-fresh",
+			"type": "shell",
+			"command": "curl -s -c /tmp/kv_new.txt -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null && curl -s -b /tmp/kv_new.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf' -o /tmp/real_pdf.pdf -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && echo '---' && head -c 10 /tmp/real_pdf.pdf | xxd | head -2",
+			"isBackground": false
+		},
+		{
+			"label": "check-server-state",
+			"type": "shell",
+			"command": "echo \"=== Server PID ===\" && lsof -ti :3001 && echo \"=== Fix in file? ===\" && grep -c 'requestInterception' /Users/PaulJoseph/pgent/apps/api/src/services/reports.service.js && echo \"=== waitUntil value ===\" && grep 'waitUntil' /Users/PaulJoseph/pgent/apps/api/src/services/reports.service.js",
+			"isBackground": false
+		},
+		{
+			"label": "kill-all-servers",
+			"type": "shell",
+			"command": "kill -9 74547 77315 2>/dev/null; sleep 2; lsof -ti :3001 | xargs kill -9 2>/dev/null; sleep 1; echo \"Cleaned. Remaining on :3001:\" && lsof -ti :3001 || echo \"(none - clean)\"",
+			"isBackground": false
+		},
+		{
+			"label": "restart-api-clean",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env src/index.js",
+			"isBackground": true
+		},
+		{
+			"label": "test-pdf-final2",
+			"type": "shell",
+			"command": "curl -s -c /tmp/kv_final.txt -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=pdf' -o /tmp/pdf_final.pdf -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && echo 'First 20 bytes:' && head -c 20 /tmp/pdf_final.pdf | xxd | head -3",
+			"isBackground": false
+		},
+		{
+			"label": "test-all-formats",
+			"type": "shell",
+			"command": "echo \"=== SVG ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=svg' -o /tmp/test.svg -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && head -c 30 /tmp/test.svg && echo \"\" && echo \"=== HTML ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=html' -o /tmp/test.html -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && head -c 30 /tmp/test.html && echo \"\" && echo \"=== CSV (expected 422) ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=csv' -w '\\nHTTP %{http_code} | Size: %{size_download}\\n'",
+			"isBackground": false
 		}
 	]
 }

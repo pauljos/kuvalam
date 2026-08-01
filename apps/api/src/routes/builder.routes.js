@@ -14,7 +14,7 @@ export default async function builderRoutes(fastify) {
   fastify.post('/tenants/:tenantId/builder/chat', auth, async (req, reply) => {
     try {
       const { tenantId } = req.params
-      const { message, history } = req.body || {}
+      const { message, history, attachments } = req.body || {}
 
       if (!message || typeof message !== 'string' || message.trim().length < 3) {
         return reply.status(400).send({
@@ -27,6 +27,7 @@ export default async function builderRoutes(fastify) {
         userId: req.user.sub,
         message: message.trim(),
         history: history || [],
+        attachments: attachments || [],
         userRole: req.user.role,
         isSystemAdmin: req.user.isSystemAdmin || false,
       })
@@ -62,8 +63,8 @@ export default async function builderRoutes(fastify) {
       // Counts for summary
       const { rows: [counts] } = await query(
         `SELECT
-          (SELECT COUNT(*) FROM agents WHERE tenant_id = $1) as agents,
-          (SELECT COUNT(*) FROM workflows WHERE tenant_id = $1) as workflows,
+          (SELECT COUNT(*) FROM agents WHERE tenant_id = $1 AND status != 'ARCHIVED') as agents,
+          (SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND status != 'ARCHIVED') as workflows,
           (SELECT COUNT(*) FROM tool_connections WHERE tenant_id = $1) as connectors,
           (SELECT COUNT(*) FROM knowledge_bases WHERE tenant_id = $1) as knowledge_bases,
           (SELECT COUNT(*) FROM workflow_triggers WHERE tenant_id = $1) as triggers`,
