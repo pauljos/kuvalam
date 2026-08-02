@@ -55,6 +55,10 @@ temp/
 *.png
 scratch/
 
+# Runtime agent output — written by the API at runtime (tenant_id/date/SVG, HTML, ZIP).
+# Never commit agent-generated artifacts; they grow unbounded and contain tenant data.
+artifacts/
+
 # Database
 *.db
 *.sqlite

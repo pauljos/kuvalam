@@ -91,14 +91,21 @@ services:
     environment:
       WHISPER_MODEL: ${WHISPER_MODEL:-base}
       OCR_MODEL: ${OCR_MODEL:-microsoft/trocr-large-printed}
+      # Core models (baked into image at build; override at deploy time).
+      ML_SENTIMENT_MODEL: ${ML_SENTIMENT_MODEL:-ProsusAI/finbert}
+      ML_NER_MODEL: ${ML_NER_MODEL:-dslim/bert-base-NER}
+      ML_CLASSIFY_MODEL: ${ML_CLASSIFY_MODEL:-typeform/distilbert-base-uncased-mnli}
+      ML_PREWARM: ${ML_PREWARM:-1}
+      # Allowed CORS origins for the ML service (comma-separated).
+      ML_ALLOWED_ORIGINS: ${ML_ALLOWED_ORIGINS:-http://localhost:3001,http://api:3001}
     volumes:
       - ml_model_cache:/app/.hf_cache
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ready || exit 1"]
       interval: 30s
       timeout: 10s
-      start_period: 120s
-      retries: 3
+      start_period: 300s
+      retries: 5
 
 volumes:
   postgres_data:

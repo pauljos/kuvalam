@@ -11,11 +11,12 @@
 #   POST /classify                 — zero-shot text classification (BART)
 #   POST /ocr                      — image OCR (TrOCR)
 
-import os, logging, time, io, base64, requests
+import os, logging, time, io, base64, requests, threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -33,10 +34,67 @@ def get_model(key: str, loader_fn):
         log.info(f"Loaded {key} in {time.time()-t:.1f}s")
     return _models[key]
 
+# ── Core model defaults (CPU-friendly, small & fast) ─────────────────────────
+# All defaults are overridable at deploy time via env vars (see README).
+# Core models are pre-downloaded into the image at BUILD time (Dockerfile) into
+# ML_CORE_CACHE (/app/models) so the service boots offline — "deploy anywhere
+# and it just works". Optional/heavy models (Whisper, OCR, Donut) download on
+# demand into the normal HF cache (/app/.hf_cache), which is a volume in
+# docker-compose / Render so it persists across restarts.
+DEFAULT_SENTIMENT_MODEL = os.environ.get("ML_SENTIMENT_MODEL", "ProsusAI/finbert")
+DEFAULT_NER_MODEL = os.environ.get("ML_NER_MODEL", "dslim/bert-base-NER")
+DEFAULT_CLASSIFY_MODEL = os.environ.get("ML_CLASSIFY_MODEL", "typeform/distilbert-base-uncased-mnli")
+ML_CORE_CACHE = os.environ.get("ML_CORE_CACHE", "/app/models")
+
+# Models the service is considered "ready" once loaded.
+CORE_TARGETS = [
+    (f"sentiment:{DEFAULT_SENTIMENT_MODEL}", "sentiment", DEFAULT_SENTIMENT_MODEL),
+    (f"ner:{DEFAULT_NER_MODEL}", "ner", DEFAULT_NER_MODEL),
+    (f"classify:{DEFAULT_CLASSIFY_MODEL}", "classify", DEFAULT_CLASSIFY_MODEL),
+]
+
+def _load_core():
+    """Load the core ML models into memory from the baked cache. Raises on
+    failure (fail-fast) so a broken build fails the readiness check.
+
+    cache_dir is passed via `model_kwargs` (→ from_pretrained), NOT as a direct
+    pipeline kwarg — some pipelines (e.g. NER) reject `cache_dir` in
+    _sanitize_parameters(). This keeps core models on the baked /app/models path
+    while optional models (Whisper/OCR) keep using the mounted /app/.hf_cache."""
+    from transformers import pipeline
+    for key, kind, model in CORE_TARGETS:
+        if key in _models:
+            continue
+        mkw = {"cache_dir": ML_CORE_CACHE}
+        if kind == "sentiment":
+            loader = lambda m=model: pipeline("text-classification", model=m, top_k=None, device=-1, model_kwargs=mkw)
+        elif kind == "ner":
+            loader = lambda m=model: pipeline("ner", model=m, aggregation_strategy="simple", device=-1, model_kwargs=mkw)
+        else:
+            loader = lambda m=model: pipeline("zero-shot-classification", model=m, device=-1, model_kwargs=mkw)
+        get_model(key, loader)
+
+# Readiness flag: set once core models are loaded.
+_ready = threading.Event()
+
+def prewarm_core():
+    """Load core models. Failure is logged but non-fatal (service still serves
+    whatever is loaded; /ready reports true only when all core models are up)."""
+    try:
+        _load_core()
+        _ready.set()
+        log.info("Prewarm complete — core models ready")
+    except Exception as e:
+        log.error(f"Prewarm failed: {e}")
+        _ready.clear()
+
 # ── Lifespan ─────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("ML Service starting — models load lazily on first request")
+    log.info("ML Service starting — pre-warming core models")
+    if os.environ.get("ML_PREWARM", "1") != "0":
+        # Background thread so /health responds immediately while models warm.
+        threading.Thread(target=prewarm_core, daemon=True).start()
     yield
     log.info("ML Service shutting down")
 
@@ -55,9 +113,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# ── Health / Readiness ───────────────────────────────────────────────────────
 @app.get("/health")
 def health():
+    """Liveness — process is up. Always 200 once the server is serving."""
+    return {
+        "status": "ok",
+        "ready": _ready.is_set(),
+        "loaded_models": list(_models.keys()),
+        "required_models": [k for k, _, _ in CORE_TARGETS],
+    }
+
+@app.get("/ready")
+def ready():
+    """Readiness — for orchestrators (Docker HEALTHCHECK, k8s). Returns 503
+    until all core models are loaded so traffic isn't routed to a warming pod."""
+    if _ready.is_set():
+        return {"status": "ready", "loaded_models": list(_models.keys())}
+    return JSONResponse(
+        status_code=503,
+        content={"status": "warming", "loaded_models": list(_models.keys())},
+    )
+
+@app.post("/warmup")
+def warmup():
+    """Explicitly load the core models (sentiment, NER, classify) so the
+    first agent call doesn't hit a cold-start timeout. Blocks until loaded."""
+    prewarm_core()
     return {"status": "ok", "loaded_models": list(_models.keys())}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +203,7 @@ def transcribe(req: TranscribeRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 class SentimentRequest(BaseModel):
     texts: list[str]                              # up to 32 texts at once
-    model: str = "ProsusAI/finbert"               # override with any HF sentiment model
+    model: str = DEFAULT_SENTIMENT_MODEL          # override with any HF sentiment model
 
 @app.post("/sentiment")
 def sentiment(req: SentimentRequest):
@@ -152,7 +234,7 @@ def sentiment(req: SentimentRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 class EntitiesRequest(BaseModel):
     text: str
-    model: str = "dslim/bert-large-NER"
+    model: str = DEFAULT_NER_MODEL
 
 @app.post("/entities")
 def entities(req: EntitiesRequest):
@@ -177,7 +259,7 @@ def entities(req: EntitiesRequest):
         return {
             "success": True,
             "entities": grouped,
-            "raw": [{"entity": e["entity_group"], "word": e["word"], "score": round(e["score"], 3)} for e in raw]
+            "raw": [{"entity": e["entity_group"], "word": e["word"], "score": float(round(float(e["score"]), 3))} for e in raw]
         }
     except Exception as e:
         log.error(f"Entities error: {e}")
@@ -190,7 +272,7 @@ class ClassifyRequest(BaseModel):
     text: str
     labels: list[str]                              # candidate labels
     multi_label: bool = False
-    model: str = "facebook/bart-large-mnli"
+    model: str = DEFAULT_CLASSIFY_MODEL
 
 @app.post("/classify")
 def classify(req: ClassifyRequest):

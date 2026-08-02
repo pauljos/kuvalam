@@ -207,12 +207,27 @@ services:
     disk:
       name: ml-model-cache
       mountPath: /app/.hf_cache
-      sizeGB: 10             # HuggingFace model weights cache
+      sizeGB: 10             # Optional/heavy models (Whisper, OCR, Donut) cache.
+                             # Core models (sentiment/NER/classify) are baked
+                             # into the image at /app/models — no download needed.
     envVars:
       - key: WHISPER_MODEL
         value: base
       - key: OCR_MODEL
         value: microsoft/trocr-large-printed
+      # Core models (baked into image at build time — override at deploy time)
+      - key: ML_SENTIMENT_MODEL
+        value: ProsusAI/finbert
+      - key: ML_NER_MODEL
+        value: dslim/bert-base-NER
+      - key: ML_CLASSIFY_MODEL
+        value: typeform/distilbert-base-uncased-mnli
+      # Allow the web frontend to call this service for status indicators
+      - key: ML_ALLOWED_ORIGINS
+        fromService:
+          name: kuvalam-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
 
   # ── Web Frontend (Next.js) ──────────────────────────────────────────────────
   - type: web

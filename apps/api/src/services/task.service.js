@@ -6090,25 +6090,34 @@ async function executeTool(toolName, input, agent, skills) {
       ml_image_search:    '/image_search',
     }
     const endpoint = endpointMap[toolName]
-    try {
-      const resp = await fetch(`${mlUrl}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-        signal: AbortSignal.timeout(120_000), // 2 min — models can be slow on first load
-      })
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '')
-        return { success: false, error: `ML service returned HTTP ${resp.status}: ${text.slice(0, 200)}` }
+    // Retry with backoff — a cold model load can exceed the first 2-min timeout.
+    const maxAttempts = 3
+    let lastError = null
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const resp = await fetch(`${mlUrl}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+          signal: AbortSignal.timeout(120_000), // 2 min — models can be slow on first load
+        })
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '')
+          return { success: false, error: `ML service returned HTTP ${resp.status}: ${text.slice(0, 200)}` }
+        }
+        const data = await resp.json()
+        return data
+      } catch (err) {
+        lastError = err.name === 'TimeoutError'
+          ? 'ML service timed out. The model may be loading — try again in a moment.'
+          : `ML service unreachable: ${err.message}`
+        if (attempt < maxAttempts) {
+          const backoffMs = attempt * 5000 // 5s, then 10s
+          await new Promise(r => setTimeout(r, backoffMs))
+        }
       }
-      const data = await resp.json()
-      return data
-    } catch (err) {
-      if (err.name === 'TimeoutError') {
-        return { success: false, error: 'ML service timed out. The model may be loading — try again in a moment.' }
-      }
-      return { success: false, error: `ML service unreachable: ${err.message}` }
     }
+    return { success: false, error: lastError || 'ML service call failed.' }
   }
 
   // Find matching skill
