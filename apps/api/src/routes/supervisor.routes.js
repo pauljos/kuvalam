@@ -69,7 +69,7 @@ export default async function supervisorRoutes(fastify) {
         const { tenantId, agentId } = req.params
         const { rowCount } = await query(
           `UPDATE agent_health
-           SET circuit_state = 'CLOSED', circuit_reason = NULL, circuit_opened_at = NULL, updated_at = NOW()
+           SET circuit_state = 'CLOSED', circuit_reason = 'manual_reset', circuit_opened_at = NOW(), updated_at = NOW()
            WHERE agent_id = $1 AND tenant_id = $2`,
           [agentId, tenantId]
         )

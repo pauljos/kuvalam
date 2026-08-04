@@ -94,6 +94,13 @@ services:
         sync: false
       - key: JIRA_CLIENT_SECRET
         sync: false
+      # Connection pool — keep within Render Postgres plan limits
+      # Starter (20 conns): PG_MAX_POOL_SIZE=4 for API + 4 for worker = safe
+      # Standard (97 conns): PG_MAX_POOL_SIZE=10 is fine
+      - key: PG_MAX_POOL_SIZE
+        value: "4"
+      - key: PG_CONNECT_TIMEOUT_MS
+        value: "10000"
       - key: SALESFORCE_CLIENT_ID
         sync: false
       - key: SALESFORCE_CLIENT_SECRET
@@ -160,6 +167,11 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
+      # Connection pool — keep within Render Postgres plan limits
+      - key: PG_MAX_POOL_SIZE
+        value: "4"
+      - key: PG_CONNECT_TIMEOUT_MS
+        value: "10000"
       # Browser agent URL for web automation (browser_use tool)
       - key: BROWSER_AGENT_URL
         fromService:

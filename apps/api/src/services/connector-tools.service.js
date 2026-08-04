@@ -52,6 +52,83 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
   return fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) })
 }
 
+// ─── Content Quality Validation ─────────────────────────────────────────────
+// Shared gate used by write_artifact, gmail__send_email, and any future
+// delivery tool. Prevents placeholders, plan-language, and empty content
+// from reaching disk, email, or any final delivery channel.
+//
+// Returns { valid: boolean, reason?: string }
+// ────────────────────────────────────────────────────────────────────────────
+
+export function validateContentQuality(content, format, _context = {}) {
+  if (!content || typeof content !== 'string') {
+    return { valid: false, reason: 'Content is empty or not a string. Generate actual output.' }
+  }
+
+  const trimmed = content.trim()
+
+  // ── 1. Literal placeholder patterns ──────────────────────────────────
+  const placeholderPatterns = [
+    { pattern: /%%[A-Z_]+%%/,                          label: 'contains %%PLACEHOLDER%% markers (e.g. %%SVG_CONTENT%%)' },
+    { pattern: /\[\[PLACEHOLDER\]\]/i,                  label: 'contains [[PLACEHOLDER]]' },
+    { pattern: /\{\{CONTENT\}\}/i,                       label: 'contains {{CONTENT}} template variable' },
+    { pattern: /\[TODO\]/i,                              label: 'contains [TODO] marker' },
+    { pattern: /\[INSERT_.*?\]/i,                        label: 'contains [INSERT_...] placeholder' },
+    { pattern: /<placeholder/i,                          label: 'contains <placeholder> tag' },
+    { pattern: /\[CONTENT\]/i,                           label: 'contains [CONTENT] placeholder' },
+  ]
+  for (const { pattern, label } of placeholderPatterns) {
+    if (pattern.test(trimmed)) {
+      return { valid: false, reason: `Content ${label}. Generate the ACTUAL complete content — not a placeholder. Call the tool again with real content.` }
+    }
+  }
+
+  // ── 2. Minimum content length by format ──────────────────────────────
+  const minLengths = { svg: 200, html: 200, csv: 30, json: 10, pdf: 100, png: 20, zip: 1 }
+  const minLen = minLengths[format] || 50
+  if (trimmed.length < minLen) {
+    return { valid: false, reason: `Content too short (${trimmed.length} chars, minimum ${minLen} for ${format}). Generate COMPLETE, substantive content with real details.` }
+  }
+
+  // ── 3. Plan / intent language (model is DESCRIBING what it will do, not doing it) ──
+  const planPatterns = [
+    { pattern: /I will (generate|create|draw|write|produce|design|build|make|compose)/i,  label: 'contains "I will..." plan language instead of actual output' },
+    { pattern: /I plan to/i,                                                              label: 'contains "I plan to..." instead of actual output' },
+    { pattern: /I (am|'m) going to/i,                                                     label: 'contains "I am going to..." instead of actual output' },
+    { pattern: /Here('s| is) (a |the )?(plan|approach|strategy|outline|overview)/i,      label: 'reads like a plan description, not final output' },
+    { pattern: /^(Step \d+:|First,|Next,|Then,|Finally,)/im,                             label: 'contains step-by-step instructions instead of final result' },
+    { pattern: /would need to|should be added|not yet implemented|remaining work|to complete this/i, label: 'describes incomplete/remaining work' },
+  ]
+  for (const { pattern, label } of planPatterns) {
+    if (pattern.test(trimmed)) {
+      return { valid: false, reason: `Content ${label}. Output the COMPLETE FINAL result directly — not a description of what you intend to do.` }
+    }
+  }
+
+  // ── 4. Format-specific structural validation ─────────────────────────
+  if (format === 'svg') {
+    if (!/<svg\b/i.test(trimmed)) {
+      return { valid: false, reason: 'SVG content must contain an <svg> tag. Generate a complete SVG diagram starting with <svg> and ending with </svg>.' }
+    }
+    if (!/viewBox/i.test(trimmed)) {
+      return { valid: false, reason: 'SVG must have a viewBox attribute (e.g. viewBox="0 0 800 600") so it scales properly.' }
+    }
+    const drawElems = (trimmed.match(/<(rect|line|path|circle|ellipse|polygon|polyline|g)\b/gi) || []).length
+    if (drawElems < 2) {
+      return { valid: false, reason: `SVG has only ${drawElems} drawing element(s). A meaningful diagram needs at least 5 elements (rect, line, path, circle, text, etc.). Add more visual elements.` }
+    }
+  }
+
+  if (format === 'html') {
+    const hasRealElements = /<(div|table|svg|canvas|h[1-6]|p|section|article|ul|ol|li|img|iframe|pre|code|blockquote)\b/i.test(trimmed)
+    if (!hasRealElements) {
+      return { valid: false, reason: 'HTML content has no meaningful elements (no <div>, <table>, <h1>, <p>, etc.). Include actual structured content.' }
+    }
+  }
+
+  return { valid: true }
+}
+
 // ─── Verification (used by Test endpoint) ─────────────────────────────────
 
 /**
@@ -599,12 +676,13 @@ async function restFetch(baseUrl, cfg, op, input = {}, timeoutMs = 15000) {
   return fetchWithTimeout(url.toString(), { method: op.method, headers, body }, timeoutMs)
 }
 
-async function executeRestTool(toolName, input, tenantId) {
+async function executeRestTool(toolName, input, tenantId, allowedConnectorIds) {
   const parts = toolName.split('__')
   if (parts.length < 3) return { success: false, error: `Malformed REST tool name: ${toolName}` }
   const connSlug = parts[1]
   const opName = parts.slice(2).join('__')
 
+  const hasExplicitScopes = allowedConnectorIds && allowedConnectorIds.size > 0
   const { rows: [conn] } = await query(
     `SELECT id, tenant_id, tool_id, name, config
      FROM tool_connections
@@ -612,10 +690,14 @@ async function executeRestTool(toolName, input, tenantId) {
        AND status = 'ACTIVE'
        AND tool_id = 'rest'
        AND REPLACE(id::text, '-', '_') = $2
+       ${hasExplicitScopes ? 'AND id = ANY($3::uuid[])' : ''}
      LIMIT 1`,
-    [tenantId, connSlug]
+    hasExplicitScopes ? [tenantId, connSlug, [...allowedConnectorIds]] : [tenantId, connSlug]
   )
-  if (!conn) return { success: false, error: 'REST connector not found or not active for this tenant.' }
+  if (!conn) {
+    if (hasExplicitScopes) return { success: false, error: 'REST connector not found or agent is not authorized to use it. Add this connector to the agent\'s tool scopes.' }
+    return { success: false, error: 'REST connector not found or not active for this tenant.' }
+  }
 
   const cfg = decryptCredentials(conn.config || {})
   const op = (cfg.operations || []).map(normaliseRestOp).find(o => o.name === opName)
@@ -1359,11 +1441,15 @@ export async function executeConnectorTool(toolName, input, tenantId, allowedCon
   if (!provider) return { success: false, error: `Malformed connector tool name: ${toolName}` }
 
   // Database tools are namespaced by connector id — parse and dispatch separately.
-  if (provider === 'db') return executeDatabaseTool(toolName, input, tenantId)
+  if (provider === 'db') return executeDatabaseTool(toolName, input, tenantId, allowedConnectorIds)
   // Generic REST tools likewise namespace on the connector id.
-  if (provider === 'rest') return executeRestTool(toolName, input, tenantId)
+  if (provider === 'rest') return executeRestTool(toolName, input, tenantId, allowedConnectorIds)
 
   const toolIdQuery = ['local_dir', 'local_shell', 'local_applescript'].includes(provider) ? provider.replace('_', '-') : provider
+
+  // local_shell is security-critical (arbitrary shell execution) — always require
+  // explicit agent scope. Never fall back to newest connector in the tenant.
+  const requiresExplicitScope = provider === 'local_shell'
 
   // Fetch ACTIVE connectors for this provider on this tenant.
   // When the agent has explicit scope → only scoped connectors are eligible.
@@ -1382,8 +1468,9 @@ export async function executeConnectorTool(toolName, input, tenantId, allowedCon
     )
     conn = rows[0]
   }
-  // Fallback: no explicit scopes → pick newest (original behavior)
-  if (!conn) {
+  // Fallback: no explicit scopes → pick newest connector in tenant.
+  // Security-critical tools (local_shell) always require explicit scope — no fallback.
+  if (!conn && !requiresExplicitScope) {
     const { rows: [fallback] } = await query(
       `SELECT id, tenant_id, tool_id, name, auth_type, config
        FROM tool_connections
@@ -1393,11 +1480,16 @@ export async function executeConnectorTool(toolName, input, tenantId, allowedCon
     )
     // If we had explicit scopes but found no match → the agent is not authorized for this provider
     if (hasExplicitScopes && fallback && !allowedConnectorIds.has(fallback.id)) {
-      return { success: false, error: `Agent is not authorized to use ${provider} connector "${fallback.name}". The agent has explicit connector scopes that do not include this provider.` }
+      return { success: false, error: `Agent is not authorized to use ${provider} connector "${fallback.name}". Add this connector to the agent's tool scopes.` }
     }
     conn = fallback
   }
-  if (!conn) return { success: false, error: `No active ${provider} connector configured for this tenant.` }
+  if (!conn) {
+    if (requiresExplicitScope && !hasExplicitScopes) {
+      return { success: false, error: `Agent is not authorized to use local_shell. Add a local-shell connector to the agent's tool scopes explicitly — this tool requires explicit authorization.` }
+    }
+    return { success: false, error: `No active ${provider} connector configured for this tenant.` }
+  }
 
   const config = decryptCredentials(conn.config || {})
 
@@ -1530,12 +1622,13 @@ export async function executeConnectorTool(toolName, input, tenantId, allowedCon
  * Uses a slug-aware SELECT so we don't have to un-slug a UUID (safer against
  * pathological ids).
  */
-async function executeDatabaseTool(toolName, input, tenantId) {
+async function executeDatabaseTool(toolName, input, tenantId, allowedConnectorIds) {
   const parts = toolName.split('__')
   if (parts.length < 3) return { success: false, error: `Malformed DB tool name: ${toolName}` }
   const connSlug = parts[1]
   const op = parts.slice(2).join('__')
 
+  const hasExplicitScopes = allowedConnectorIds && allowedConnectorIds.size > 0
   const { rows: [conn] } = await query(
     `SELECT id, tenant_id, tool_id, name, config
      FROM tool_connections
@@ -1543,10 +1636,14 @@ async function executeDatabaseTool(toolName, input, tenantId) {
        AND status = 'ACTIVE'
        AND tool_id IN ('database','postgres')
        AND REPLACE(id::text, '-', '_') = $2
+       ${hasExplicitScopes ? 'AND id = ANY($3::uuid[])' : ''}
      LIMIT 1`,
-    [tenantId, connSlug]
+    hasExplicitScopes ? [tenantId, connSlug, [...allowedConnectorIds]] : [tenantId, connSlug]
   )
-  if (!conn) return { success: false, error: 'Database connector not found or not active for this tenant.' }
+  if (!conn) {
+    if (hasExplicitScopes) return { success: false, error: 'Database connector not found or agent is not authorized to use it. Add this connector to the agent\'s tool scopes.' }
+    return { success: false, error: 'Database connector not found or not active for this tenant.' }
+  }
 
   try {
     switch (op) {
@@ -1615,7 +1712,7 @@ async function jiraCreateIssue(conn, config, { projectKey, summary, description,
   return { success: true, key: body.key, id: body.id, url: `${base}/browse/${body.key}` }
 }
 
-async function jiraSearchIssues(conn, config, { jql, maxResults = 10 }) {
+export async function jiraSearchIssues(conn, config, { jql, maxResults = 10, startAt = 0 }) {
   // ── Defensive: strip LIMIT from JQL (common LLM mistake — JQL has no LIMIT) ──
   const limitMatch = jql.match(/\bLIMIT\s+(\d+)/i)
   if (limitMatch) {
@@ -1633,7 +1730,7 @@ async function jiraSearchIssues(conn, config, { jql, maxResults = 10 }) {
   // Jira Cloud v3 /search/jql returns ONLY issue IDs unless fields are
   // explicitly requested. Request the fields the agent needs for reporting.
   const fields = 'key,summary,status,assignee,priority,issuetype,created,updated,resolutiondate,customfield_10001,customfield_10006'
-  const url = `${base}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=${Math.min(maxResults, 50)}&fields=${encodeURIComponent(fields)}`
+  const url = `${base}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=${Math.min(maxResults, 50)}&startAt=${startAt}&fields=${encodeURIComponent(fields)}`
   const res = await fetchWithTimeout(url, { headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' } })
   let bodyText = await res.text()
   let body = {}
@@ -1697,6 +1794,13 @@ async function githubGetRepo(config, { owner, repo }) {
 }
 
 async function gmailSendEmail(conn, { to, cc, bcc, subject, body, html }) {
+  // ── QUALITY GATE: Reject placeholder/poor content before hitting Gmail API ──
+  const contentToCheck = html || body || ''
+  const qualityCheck = validateContentQuality(contentToCheck, html ? 'html' : 'text')
+  if (!qualityCheck.valid) {
+    return { success: false, error: `❌ Email REJECTED — ${qualityCheck.reason}\n\nGenerate the COMPLETE actual content and call gmail__send_email again. Do NOT use placeholders, plan language, or empty bodies.` }
+  }
+
   const token = await getValidAccessToken(conn.tenant_id, conn.id)
   // RFC 5322 message, then base64url-encoded per Gmail API.
   // If html is provided, send multipart/alternative so both plain text and html render.

@@ -17,12 +17,17 @@ function validateTenantId(tenantId) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30000,
+  max: parseInt(process.env.PG_MAX_POOL_SIZE || '10', 10),
+  idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
   // 10s connection timeout: long enough to survive traffic spikes and short
   // failovers without cascading into 500s, while still failing fast for
   // genuinely unresponsive DBs. (Was 2000ms — too tight for cold starts.)
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: parseInt(process.env.PG_CONNECT_TIMEOUT_MS || '10000', 10),
+  // Recycle connections after 30 min — prevents stale/zombie connections
+  // from accumulating when the DB server kills them from its side
+  maxLifetime: 30 * 60 * 1000,
+  // Allow the pool to close idle connections when the pool is shutting down
+  allowExitOnIdle: true,
 })
 
 
@@ -71,33 +76,11 @@ export function poolStats() {
   }
 }
 
-// Helper: run a query (automatically injects RLS tenant context if present in AsyncLocalStorage)
+// Helper: run a query.
+// Each query acquires its own short-lived pool connection, so Promise.all
+// parallelism works correctly. Tenant isolation is enforced via explicit
+// WHERE tenant_id = $N clauses (RLS session-variable path was dead code).
 export async function query(text, params) {
-  const ctx = tenantContextStore.getStore()
-
-  if (ctx?.tenantId) {
-    // ── RLS path: reuse a single per-request client ──────────────────────
-    if (!ctx.client) {
-      // First query in this request — acquire a client and set the session
-      // variable. Using is_local=false makes it SESSION-level, so it survives
-      // across implicit transactions (auto-commit) on this connection.
-      ctx.client = await pool.connect()
-      await ctx.client.query(
-        'SELECT set_config($1, $2, false)',
-        ['app.current_tenant_id', validateTenantId(ctx.tenantId)]
-      )
-    }
-
-    const start = Date.now()
-    const res = await ctx.client.query(text, params)
-    const duration = Date.now() - start
-    if (process.env.NODE_ENV === 'development' && duration > 100) {
-      console.log('Slow tenant query', { text: text.substring(0, 60), duration, rows: res.rowCount, tenantId: ctx.tenantId })
-    }
-    return res
-  }
-
-  // Non-RLS fallback (for auth/system queries)
   const start = Date.now()
   const res = await pool.query(text, params)
   const duration = Date.now() - start

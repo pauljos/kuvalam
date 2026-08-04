@@ -177,6 +177,22 @@ export default async function authRoutes(fastify) {
   fastify.get('/auth/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     return reply.send({ success: true, data: { user: request.user }, meta: ts(request) })
   })
+
+  // GET /api/v1/auth/ws-token — short-lived JWT for WebSocket auth
+  // WebSocket constructors can't set custom headers or rely on httpOnly
+  // SameSite cookies cross-origin, so a query-param token is needed.
+  fastify.get('/auth/ws-token', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const token = fastify.jwt.sign(
+      {
+        sub: request.user.sub,
+        email: request.user.email,
+        tenantId: request.user.tenantId,
+        role: request.user.role
+      },
+      { expiresIn: '2m' }
+    )
+    return reply.send({ success: true, data: { token }, meta: ts(request) })
+  })
 }
 
 const ts = (req) => ({ requestId: req?.id, timestamp: new Date().toISOString() })

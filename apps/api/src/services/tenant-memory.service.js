@@ -70,16 +70,10 @@ export async function searchTenantMemory(tenantId, goal, limit = 15) {
       )
       if (rows.length > 0) return rows
     }
-    // Fallback: most-recent tenant memory (small window).
-    const { rows } = await query(
-      `SELECT entity_type, entity_name, detail, last_seen_at
-       FROM tenant_memory
-       WHERE tenant_id = $1 AND visibility = 'TENANT'
-       ORDER BY last_seen_at DESC
-       LIMIT $2`,
-      [tenantId, Math.min(limit, 10)]
-    )
-    return rows
+    // No keyword match and no goal — return nothing.
+    // Do NOT fall back to most-recent entries: injecting unrelated shared facts
+    // (from a different agent's domain) contaminates context without relevance.
+    return []
   } catch (err) {
     console.warn(`[TenantMemory] Search failed: ${err.message}`)
     return []

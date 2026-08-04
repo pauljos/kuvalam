@@ -1,0 +1,8 @@
+Target Field Name,Target Field Data Type,Target Field Description
+source_system,varchar(11),Source from which the data is coming.
+dbt_batch_id,bigint,Unique Id for LSM data load (It will be different for every job run).
+dap_processed_timestamp,timestamp,Date and time on which data is loaded in LSM.
+dbt_scd_id,varchar(32),Unique Id to identify how a record is changing over time in table.
+dbt_updated_at,timestamp,Date on which the update happened on the record.
+dbt_valid_from,timestamp,The given record is valid from which date or the date on which record started.
+dbt_valid_to,timestamp,The given record is valid till which date or the date on which record expired.

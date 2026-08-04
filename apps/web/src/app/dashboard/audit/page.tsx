@@ -180,12 +180,28 @@ export default function AuditPage() {
                     } else if (log.event_type === 'agent.task_completed') {
                       const st = log.after_state || {}
                       detail = `${st.status || 'done'} · ${st.tokensUsed || 0} tokens · ${st.actionsCount || 0} actions`
+                      if (meta.goal) detail += `
+Goal: ${meta.goal}`
+                      if (meta.toolsUsed?.length) detail += `
+Tools: ${meta.toolsUsed.join(', ')}`
                     } else if (log.event_type === 'workflow.step_completed') {
                       detail = `Step: ${meta.stepId || '?'} (${meta.stepType || '?'}) · ${meta.durationMs ? `${(meta.durationMs/1000).toFixed(1)}s` : ''}`
                     } else if (log.event_type === 'workflow.execution_completed') {
                       detail = `${meta.stepCount || 0} steps · ${meta.durationMs ? `${(meta.durationMs/1000).toFixed(1)}s` : ''}`
                     } else if (log.event_type === 'trigger.fired') {
                       detail = meta.workflowName || meta.triggerType || ''
+                    } else if (log.event_type === 'agent.task_failed') {
+                      const st = log.after_state || {}
+                      detail = `❌ ${st.error ? String(st.error).slice(0, 120) : 'Task failed'}`
+                      if (st.actionsCount !== undefined) detail += ` · ${st.actionsCount} actions`
+                      if (st.durationMs) detail += ` · ${(st.durationMs / 1000).toFixed(1)}s`
+                    } else if (log.event_type === 'agent.task_queued') {
+                      detail = meta.goal ? `${meta.priority || ''} · ${meta.goal.slice(0, 100)}` : ''
+                    } else if (log.event_type === 'agent.task_cancelled_by_supervisor') {
+                      detail = `⛔ ${meta.reason || 'Supervisor cancelled'}`
+                    } else if (log.event_type === 'llm.tokens_used') {
+                      detail = `${meta.model || '?'} · ${meta.totalTokens || (meta.promptTokens || 0) + (meta.completionTokens || 0)} tokens (in: ${meta.promptTokens || 0} / out: ${meta.completionTokens || 0})`
+                      if (meta.goal) detail += ` · ${meta.goal.slice(0, 80)}`
                     } else if (meta.goal) {
                       detail = meta.goal
                     }
@@ -203,24 +219,72 @@ export default function AuditPage() {
                       </td>
                       <td style={{ fontSize: 12, fontWeight: 600 }}>{log.action || '—'}</td>
                       <td>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>{log.actor_type}</div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>ID: {log.actor_id?.substring(0, 8)}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>
+                          {meta.agentName || log.actor_type}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          {meta.archetype ? `${meta.archetype} · ` : ''}{log.actor_type} · ID: {log.actor_id?.substring(0, 8)}
+                        </div>
                       </td>
                       <td>
                         <div style={{ fontSize: 13, fontWeight: 600 }}>{log.resource_type || '—'}</div>
                         {log.resource_id && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>ID: {log.resource_id.substring(0, 8)}</div>}
                       </td>
-                      <td style={{ fontSize: 11, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={detail}>
-                        {detail || '—'}
+                      <td style={{ fontSize: 11, maxWidth: 280 }}>
+                        <div style={{ maxHeight: 80, overflowY: 'auto', overflowX: 'hidden', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }} title={detail}>
+                          {detail || '—'}
+                        </div>
                       </td>
                       <td>
+                        {(log.event_type === 'llm.tokens_used' || log.event_type === 'agent.task_failed' || log.event_type === 'agent.task_completed') && (meta.systemPrompt || meta.lastUserMessage || meta.agentName || meta.goal) ? (
+                          <div style={{ fontSize: 11, maxWidth: 320 }}>
+                            {meta.agentName && (
+                              <div style={{ marginBottom: 4, fontSize: 12, fontWeight: 600 }}>
+                                🤖 {meta.agentName}{meta.archetype ? ` (${meta.archetype})` : ''}{meta.model ? ` · ${meta.model}` : ''}
+                              </div>
+                            )}
+                            {meta.goal && (
+                              <details style={{ marginBottom: 4 }}>
+                                <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--blue)' }}>🎯 Task goal</summary>
+                                <pre style={{ margin: '4px 0 0', fontSize: 10, background: 'var(--bg)', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 200, overflowY: 'auto' }}>
+                                  {meta.goal}
+                                </pre>
+                              </details>
+                            )}
+                            {meta.toolsUsed?.length > 0 && (
+                              <details style={{ marginBottom: 4 }}>
+                                <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--blue)' }}>🔧 {meta.toolsUsed.length} tool{meta.toolsUsed.length > 1 ? 's' : ''} used</summary>
+                                <pre style={{ margin: '4px 0 0', fontSize: 10, background: 'var(--bg)', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 200, overflowY: 'auto' }}>
+                                  {meta.toolsUsed.join('\n')}
+                                </pre>
+                              </details>
+                            )}
+                            {meta.systemPrompt && (
+                              <details style={{ marginBottom: 4 }}>
+                                <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--blue)' }}>🧠 System prompt {meta.messageCount ? `(${meta.messageCount} msgs)` : ''}</summary>
+                                <pre style={{ margin: '4px 0 0', fontSize: 10, background: 'var(--bg)', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 400, overflowY: 'auto' }}>
+                                  {meta.systemPrompt}
+                                </pre>
+                              </details>
+                            )}
+                            {meta.lastUserMessage && (
+                              <details>
+                                <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--blue)' }}>💬 User input</summary>
+                                <pre style={{ margin: '4px 0 0', fontSize: 10, background: 'var(--bg)', padding: '4px 8px', borderRadius: 4, border: '1px solid var(--border)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 400, overflowY: 'auto' }}>
+                                  {meta.lastUserMessage}
+                                </pre>
+                              </details>
+                            )}
+                          </div>
+                        ) : (
                         <pre style={{
                           fontSize: 11, background: 'var(--bg)', padding: '6px 10px', borderRadius: 4,
-                          maxHeight: 100, overflowY: 'auto', border: '1px solid var(--border)', maxWidth: 300,
+                          maxHeight: 160, overflowY: 'auto', overflowX: 'auto', border: '1px solid var(--border)', maxWidth: 320,
                           whiteSpace: 'pre-wrap', wordBreak: 'break-all'
                         }}>
                           {JSON.stringify(Object.keys(meta).length ? meta : (log.after_state || log.before_state || {}), null, 2)}
                         </pre>
+                        )}
                       </td>
                     </tr>
                   )})}

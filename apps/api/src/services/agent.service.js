@@ -27,8 +27,9 @@ export async function createAgent({ tenantId, data, userId }) {
 
   // If no system prompt provided, generate one from the archetype template
   let safeSystemPrompt = sanitizePromptText(data.systemPrompt)
+  const dataStrategy = ['source', 'target', 'both', 'none'].includes(data.dataStrategy) ? data.dataStrategy : 'source'
   if (!safeSystemPrompt && data.archetype) {
-    safeSystemPrompt = await generateAgentSystemPrompt(data.name, data.description, data.archetype, tenantId)
+    safeSystemPrompt = await generateAgentSystemPrompt(data.name, data.description, data.archetype, tenantId, dataStrategy)
   }
 
   // Plan limit check
@@ -40,12 +41,12 @@ export async function createAgent({ tenantId, data, userId }) {
   await checkPlanLimit(tenantId, 'agents', parseInt(countRow?.count || 0))
 
   const { rows: [agent] } = await query(
-    `INSERT INTO agents (tenant_id, name, description, archetype, autonomy_level, llm_provider, llm_model, system_prompt, confidence_threshold, max_actions_per_run, report_dir, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    `INSERT INTO agents (tenant_id, name, description, archetype, autonomy_level, llm_provider, llm_model, system_prompt, confidence_threshold, max_actions_per_run, report_dir, created_by, data_strategy)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [tenantId, safeName, safeDescription, data.archetype, data.autonomyLevel || 'SUPERVISED',
      data.llmProvider || 'openai', data.llmModel || 'auto', safeSystemPrompt,
-     data.confidenceThreshold || 0.75, data.maxActionsPerRun || 20, data.reportDir || null, userId]
+     data.confidenceThreshold || 0.75, data.maxActionsPerRun || 20, data.reportDir || null, userId, dataStrategy]
   )
 
   await auditLog({ eventType: 'agent.created', tenantId, actorId: userId, actorType: 'USER', resourceType: 'Agent', resourceId: agent.id, action: 'CREATE', afterState: { name: safeName } })
@@ -180,7 +181,9 @@ export async function listAgents(tenantId, { status, page = 1, pageSize = 20 } =
 
   const offset = (page - 1) * pageSize
   const { rows } = await query(
-    `SELECT * FROM agents WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    `SELECT a.*,
+      (SELECT status FROM agent_tasks WHERE agent_id = a.id ORDER BY created_at DESC LIMIT 1) AS last_task_status
+     FROM agents a WHERE ${conditions.map(c => c.replace(/^(tenant_id|status)/, 'a.$1')).join(' AND ')} ORDER BY a.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, pageSize, offset]
   )
   const { rows: [{ count }] } = await query(`SELECT COUNT(*) FROM agents WHERE ${conditions.join(' AND ')}`, params)
@@ -196,7 +199,7 @@ export async function updateAgent(tenantId, agentId, updates, userId) {
   )
   if (!before) throw new AppError('AGENT_NOT_FOUND', 'Agent not found', 404)
 
-  const allowed = ['name','description','system_prompt','archetype','autonomy_level','llm_provider','llm_model','confidence_threshold','max_actions_per_run','report_dir','compress_system_prompt','chunked_prompt','local_refine_prompt']
+  const allowed = ['name','description','system_prompt','archetype','autonomy_level','llm_provider','llm_model','confidence_threshold','max_actions_per_run','report_dir','compress_system_prompt','chunked_prompt','local_refine_prompt','data_strategy','use_memory']
   const fields = Object.keys(updates).filter(k => allowed.includes(k) || allowed.includes(toSnakeCase(k)))
   if (fields.length === 0) throw new AppError('NO_VALID_FIELDS', 'No valid fields to update', 400)
 
@@ -391,17 +394,12 @@ export async function refineAgentPrompt(tenantId, agentId, scenario, currentSyst
       : `## AGENT-SPECIFIC INSTRUCTIONS\n${lines}`
   }
 
-  // Build a template-based fallback upfront — used both for LLM errors and
-  // low-quality LLM output (common with smaller models like qwen3:4b).
-  const archetypeKey = (agent.archetype || 'generalist').toLowerCase()
-  const templateGuardrails = expandGuardrailsFromTemplate(cleanScenario, archetypeKey, agent.name || '')
-  const templateGoal = expandGoalFromTemplate(cleanScenario, archetypeKey)
-
+  // Build a simple fallback for when the LLM fails or produces low-quality output
   const fallback = {
-    updatedSystemPrompt: buildSystem(templateGuardrails),
-    refinedGoal: templateGoal,
-    summary: `Auto-generated ${templateGuardrails.length} detailed guardrails for "${cleanScenario.slice(0, 60)}".`,
-    guardrails: templateGuardrails,
+    updatedSystemPrompt: currentSystemPrompt || rawExisting,
+    refinedGoal: cleanGoal,
+    summary: `Could not refine guardrails — LLM returned insufficient output. The original prompt was preserved.`,
+    guardrails: extractUserGuardrails(rawExisting),
     usedFallback: true
   }
 
@@ -488,125 +486,34 @@ ${cleanGoal}`
         ? parsed.guardrails.map(r => String(r).slice(0, 800))
         : []
 
-      // Detect low-quality output from small LLMs (qwen3:4b etc.): if the
-      // guardrails are just the user's input rephrased, expand them via template.
+      // Detect low-quality output from small LLMs (qwen3:4b etc.)
       const isLowQuality = rawGuardrails.length < 3
         || rawGuardrails.every(r => r.length < 40)
         || rawGuardrails.some(r => r.toLowerCase().includes(cleanScenario.toLowerCase()) && r.length < 80)
 
-      const guardrails = isLowQuality
-        ? expandGuardrailsFromTemplate(cleanScenario, agent.archetype || 'generalist', agent.name || '')
-        : rawGuardrails
-      const usedFallback = isLowQuality
+      if (isLowQuality) {
+        console.warn('[refineAgentPrompt] Low-quality LLM output — using original guardrails')
+        return {
+          updatedSystemPrompt: currentSystemPrompt || rawExisting,
+          refinedGoal: cleanGoal,
+          summary: `LLM output was insufficient for "${cleanScenario.slice(0, 60)}". Original guardrails preserved.`,
+          guardrails: extractUserGuardrails(rawExisting),
+          usedFallback: true
+        }
+      }
 
       return {
-        updatedSystemPrompt: buildSystem(guardrails),
-        refinedGoal: isLowQuality
-          ? expandGoalFromTemplate(cleanScenario, agent.archetype || 'generalist')
-          : sanitizePromptText(parsed.refinedGoal).slice(0, 1000),
-        summary: isLowQuality
-          ? `Auto-generated ${guardrails.length} detailed guardrails from template (model output was too sparse).`
-          : String(parsed.summary || `Refined goal and guardrails`).slice(0, 500),
-        guardrails,
-        usedFallback
+        updatedSystemPrompt: buildSystem(rawGuardrails),
+        refinedGoal: sanitizePromptText(parsed.refinedGoal).slice(0, 1000),
+        summary: String(parsed.summary || `Refined goal and guardrails`).slice(0, 500),
+        guardrails: rawGuardrails,
+        usedFallback: false
       }
     }
   } catch (err) {
     console.warn(`[refineAgentPrompt] LLM failed (${err.message}) — using deterministic fallback`)
   }
   return fallback
-}
-
-// ── Template-based guardrail expansion (fallback when small LLMs fail) ──────
-
-const GUARDRAIL_TEMPLATES = {
-  engineering: (scenario, name) => [
-    `Structural analysis: For "${scenario}", begin by identifying all load cases — dead loads (self-weight), live loads (occupancy per local code), wind loads, and seismic loads where applicable. Calculate each separately before combining per the relevant load combination standard (ASCE 7, Eurocode 0, IS 456).`,
-    `Material selection: Specify concrete grade, steel reinforcement grade, and any specialty materials. For a multi-story structure, consider M25-M40 concrete and Fe500-Fe550 reinforcement as starting points. Document the rationale for each material choice with reference to cost, availability, and code compliance.`,
-    `Code compliance: Reference the applicable structural design codes throughout your work — IS 456:2000 and SP 16 for Indian projects, ACI 318 for US, Eurocode 2 for EU. For every calculation, cite the specific clause or table used. Never proceed without stating which code governs.`,
-    `Drawing standards: Produce SVG or HTML drawings with clear labels, dimensions in mm, reinforcement detailing, column/beam schedules, and foundation layout. Every drawing must include: title block, scale bar, north arrow (for plans), revision date, and your name as designer. Use standard line weights — thick for structural elements, thin for dimensions.`,
-    `Safety factors: Always apply the code-specified partial safety factors — typically 1.5 for concrete, 1.15 for steel reinforcement, and appropriate load factors (1.2 DL + 1.6 LL minimum). Never round down safety factors. Flag any assumptions about soil bearing capacity, wind speed, or seismic zone explicitly.`,
-    `Foundation design: Based on the column loads from the superstructure analysis, design appropriate foundations — isolated footings for good soil, raft foundation for weak soil, piles for deep foundations. Calculate bearing pressure, check against allowable, and detail reinforcement accordingly.`,
-    `Quality checks: Before finalizing any output, self-review: (a) Are all units consistent and explicitly stated? (b) Have you run a sanity check on the numbers (e.g., steel percentage within 0.8-4% for columns)? (c) Is every number traceable to a calculation step? If any check fails, go back and fix it.`,
-    `Documentation: Save all work using write_artifact — structural analysis report as HTML/PDF, beam/column schedules as CSV tables, drawings as SVG. Publish a summary dashboard report with publish_dashboard_report showing key metrics: total dead load, total live load, max bending moment, max shear, max deflection.`,
-  ],
-  scientific: (scenario, name) => [
-    `Hypothesis & methodology: For "${scenario}", clearly state the hypothesis or research question before beginning. Define the methodology — experimental, computational, or literature review — and justify why it's appropriate. Outline the steps before executing.`,
-    `Data sources: Identify and fetch data from authoritative sources — PubChem for chemical properties, PDB/GenBank for biomolecular data, NIST for physical constants, arXiv/PubMed for literature. Use http_request or browser_use for web sources. Always record the accession date and URL for every external data source.`,
-    `Calculations & units: Perform calculations step by step with explicit formulas. Use SI units unless the domain standard is different. Include uncertainty estimates (±) for every measurement. For computational work, specify the software/method, basis set (for quantum), force field (for MD), or algorithm used.`,
-    `Error analysis: Quantify errors — systematic vs random, propagation through calculations, significant figures. Never report a result with more precision than the input data warrants. Use the standard deviation or confidence interval appropriate to the method.`,
-    `Visualization: Use write_artifact to generate SVG diagrams — molecular structures, reaction schemes, phylogenetic trees, crystal lattices, Feynman diagrams as appropriate. Use publish_dashboard_report for data charts with properly labeled axes, error bars, and legends.`,
-    `References: Cite all sources in a standard format (APA, ACS, or Vancouver). For each reference, include at minimum: author, year, title, journal/DOI. Distinguish clearly between peer-reviewed sources, preprints, and grey literature.`,
-    `Reproducibility: Document every step so another researcher could reproduce your work. Include: raw data (as CSV/JSON via write_artifact), processing scripts, parameter values, random seeds (for stochastic methods), and software versions.`,
-    `Ethics & limitations: For biology/medical work, note ethical constraints. State limitations honestly — sample size, confounding variables, model assumptions. Never overstate confidence. If the data doesn't support a conclusion, say so.`,
-  ],
-  medical: (scenario, name) => [
-    `Evidence hierarchy: For "${scenario}", prioritize systematic reviews and meta-analyses from Cochrane, then RCTs from PubMed/ClinicalTrials.gov, then observational studies. For each finding, state the level of evidence (I-V) and grade of recommendation. Never present expert opinion as established fact.`,
-    `Source verification: Use http_request to query PubMed, FDA, WHO, or NICE guidelines. For every claim, cite: journal, authors, year, PMID or DOI, sample size, and study design. If a source is behind a paywall, note the abstract findings and the limitation.`,
-    `Drug information: When discussing medications, include: generic name, brand names, mechanism of action, standard dosing, major side effects, contraindications, and drug interactions. Use DailyMed, Drugs.com, or BNF as references. Always include the disclaimer: "This is informational only — consult a healthcare professional."`,
-    `Clinical context: Frame findings in clinical context — patient population, inclusion/exclusion criteria, primary vs secondary endpoints, number needed to treat (NNT), absolute risk reduction, not just relative. Distinguish between statistical significance and clinical significance.`,
-    `Privacy & ethics: NEVER request, store, or process personal health information (PHI) unless explicitly required and encrypted. If a task involves patient data, stop and ask the user to confirm compliance with HIPAA/GDPR/local regulations before proceeding.`,
-    `Output format: For literature reviews, use write_artifact to save structured summaries with: background, methods, results, discussion, limitations. For drug comparisons, use tables with columns: drug, class, dose, efficacy, side effects, cost, guideline recommendation. Publish dashboard reports for executive summaries.`,
-    `Limitations & disclaimers: Begin every output with: "This is AI-generated informational content — not medical advice. Always consult a qualified healthcare professional." Never claim diagnostic or prescriptive capability. End with recommendations for further reading or specialist consultation.`,
-  ],
-  'data-analyst': (scenario, name) => [
-    `Schema discovery: For "${scenario}", first call listTables and describeTable to understand the data model. Never write a query without confirming column names, data types, and relationships. Document the schema you discovered before querying.`,
-    `Query construction: Write SQL with explicit column lists (no SELECT *), appropriate JOINs on indexed foreign keys, WHERE clauses that leverage indexes, and sensible LIMIT clauses. Test edge cases: NULL handling, empty result sets, large date ranges. If a query errors, read the error message, fix the SQL, retry — never fabricate results.`,
-    `Data quality: Before reporting, check for: NULL counts in key columns, duplicate rows, outliers (values > 3σ from mean), date range sanity, and referential integrity (orphaned FK references). Flag any quality issues in the report.`,
-    `Visualization: Use publish_dashboard_report with appropriate chart types — line charts for time series, bar charts for categories, scatter plots for correlations, heatmaps for matrices. Include: title, labeled axes with units, legend, data source note, and generation timestamp.`,
-    `Analysis narrative: For every dashboard or report, include a written narrative: (a) what the data shows, (b) key trends/patterns, (c) anomalies or caveats, (d) actionable recommendations. Never just present numbers without interpretation.`,
-    `Performance: Use EXPLAIN ANALYZE on complex queries. If a query scans >10K rows, add indexes or rewrite. Cache results that don't change between runs. Break large reports into paginated chunks.`,
-  ],
-  developer: (scenario, name) => [
-    `Code analysis: For "${scenario}", first understand the codebase — use file_search to find relevant files, read existing tests, check the README and package.json. Never modify code without understanding its context and dependencies.`,
-    `Implementation plan: Break the task into atomic commits. Write the plan as: (1) what files change, (2) what the change is, (3) how to test it, (4) rollback plan. Share the plan before coding if the change is non-trivial.`,
-    `Code quality: Follow the project's existing conventions — ESLint/Prettier config, TypeScript strictness, naming patterns, folder structure. Write self-documenting code with clear variable names. Add JSDoc/docstrings for public APIs. Run linting and tests before considering any change complete.`,
-    `Testing: Write or update unit tests for new code. Test edge cases: empty inputs, null/undefined, large payloads, error paths. Run the full test suite and confirm all pass. If tests were already failing, note them but don't block on pre-existing failures.`,
-    `Git workflow: Use descriptive commit messages following conventional commits (feat:, fix:, refactor:, test:, docs:). Create a branch if the repo supports it. Never force-push to main/master. Use write_artifact for code review summaries and PR descriptions.`,
-    `Error handling: All async operations must have try/catch with meaningful error messages. HTTP clients must handle: timeouts, 4xx, 5xx, network errors. Never swallow errors silently — log them with context.`,
-    `Deployment awareness: If the task involves deployment, check: environment variables, build scripts, Docker config, CI/CD pipeline. Never deploy to production without explicit confirmation. Use ssh_exec for remote commands only after verifying the target host.`,
-  ],
-  research: (scenario, name) => [
-    `Research strategy: For "${scenario}", plan your research before executing — define search queries, identify authoritative sources, set scope boundaries. Use browser_use for web research and http_request for API access to databases and knowledge bases.`,
-    `Source evaluation: For every source, assess: authority (who published it?), currency (when?), accuracy (peer-reviewed?), purpose (bias?). Prefer .gov, .edu, and established industry sources over blogs and social media. Score sources on a simple A/B/C reliability scale.`,
-    `Synthesis: Don't just list sources — synthesize findings into a coherent narrative. Identify agreements and disagreements across sources. Highlight consensus views vs minority opinions. Note research gaps where evidence is thin.`,
-    `Output format: Use write_artifact for detailed research briefs (HTML with TOC, sections, citations). Use publish_dashboard_report for executive summaries with key findings, source count, confidence rating, and recommended actions.`,
-    `Citation: Every factual claim must have a source. Use inline citations or footnotes. Include: title, author/org, URL, access date. Use http_download to cache PDFs or key pages for offline reference.`,
-  ],
-  iot: (scenario, name) => [
-    `Device inventory: For "${scenario}", first identify the relevant devices — sensors, actuators, gateways, PLCs. Document: device type, communication protocol (MQTT, Modbus, OPC-UA, BLE), data format (JSON, binary, CSV), sampling rate, and physical location.`,
-    `Data pipeline: Use http_request to query device APIs or MQTT brokers. Parse the telemetry — check for timestamp consistency, out-of-range values, and missing data gaps. Use database tools to store and query time-series data with appropriate retention.`,
-    `Anomaly detection: For each metric, establish normal operating ranges. Flag values outside 2σ (warning) and 3σ (critical) bands. Correlate anomalies across sensors — a temperature spike + vibration spike together is more significant than either alone.`,
-    `Safety & reliability: For industrial/safety-critical systems, never assume defaults are safe. Verify: fail-safe modes, watchdog timers, communication timeouts, power-loss behavior. Flag any system that lacks redundancy for critical functions.`,
-    `Reporting: Use publish_dashboard_report to visualize device telemetry — time-series charts for trends, gauges for current values, heatmaps for spatial data. Include device health score (0-100) based on uptime, error rate, and data quality.`,
-  ],
-  generalist: (scenario, name) => [
-    `Task analysis: For "${scenario}", break down what's being asked — what type of task is this (analysis, creation, research, automation)? What tools are needed? What does success look like? Clarify ambiguities before starting.`,
-    `Tool selection: Choose the right tool for each step: browser_use for web interaction, http_request for API calls, file_search for code/docs, write_artifact for persistent output, publish_dashboard_report for visual results. Don't use a complex tool when a simple one works.`,
-    `Step-by-step execution: Work through tasks methodically. Complete each step before moving to the next. Report progress as you go — what you did, what you found, what's next. If a step fails, diagnose the error and try an alternative approach.`,
-    `Quality standards: Every output should be: accurate (fact-checked, not guesswork), complete (addresses all parts of the request), clear (well-structured, jargon explained), and honest (limitations stated, uncertainties flagged).`,
-    `Documentation: Save important intermediate results with write_artifact. Publish final deliverables with publish_dashboard_report. Include: timestamp, your name as the agent, methodology summary, and any assumptions made.`,
-  ],
-}
-
-export function expandGuardrailsFromTemplate(scenario, archetype, agentName = '') {
-  const key = (archetype || 'generalist').toLowerCase()
-  const templateFn = GUARDRAIL_TEMPLATES[key] || GUARDRAIL_TEMPLATES['generalist']
-  return templateFn(scenario, agentName)
-}
-
-export function expandGoalFromTemplate(scenario, archetype) {
-  const key = (archetype || 'generalist').toLowerCase()
-  const goals = {
-    engineering: `Design and document ${scenario} following applicable structural codes. Perform load calculations, material selection, structural analysis, and produce detailed drawings (SVG) and calculation reports. Deliver a comprehensive design package with code references and safety factor justification.`,
-    scientific: `Investigate ${scenario} using rigorous scientific methodology. Gather data from authoritative sources, perform calculations with uncertainty analysis, produce visualizations, and document findings with full reproducibility and proper citations.`,
-    medical: `Research and summarize ${scenario} using evidence-based medical sources. Prioritize systematic reviews and RCTs from PubMed/Cochrane, cite all sources with PMID/DOI, and always include appropriate medical disclaimers.`,
-    'data-analyst': `Analyze ${scenario} by exploring the database schema, writing optimized SQL queries, validating data quality, and publishing an interactive dashboard report with charts, key insights, and actionable recommendations.`,
-    developer: `Implement ${scenario} following software engineering best practices. Understand the codebase, plan atomic changes, write clean tested code with proper error handling, and document the implementation.`,
-    research: `Research ${scenario} by gathering and synthesizing information from authoritative web sources. Evaluate source credibility, cross-reference findings, and produce a structured research brief with citations and confidence ratings.`,
-    iot: `Monitor and analyze ${scenario} by querying device telemetry, detecting anomalies, and publishing operational dashboards with sensor trends, device health scores, and alert summaries.`,
-  }
-  return goals[key] || `Complete ${scenario} using available tools and best practices. Plan each step, execute methodically, verify results, and document the outcome.`
 }
 
 export function parseRefineJson(content) {
@@ -747,7 +654,7 @@ export async function deleteTask(tenantId, agentId, taskId, userId) {
 // tool guidance, and honesty guardrails from day one.
 // ════════════════════════════════════════════════════════════════════════════
 
-export async function generateAgentSystemPrompt(name, description, archetype, tenantId = null) {
+export async function generateAgentSystemPrompt(name, description, archetype, tenantId = null, dataStrategy = 'source') {
   const safeName = sanitizePromptText(name) || 'AI Agent'
   const safeDesc = sanitizePromptText(description) || ''
   // If the description is just a placeholder (auto-generated at creation), leave
@@ -772,15 +679,23 @@ export async function generateAgentSystemPrompt(name, description, archetype, te
     'data-analyst': `You are **${safeName}**, a data analytics agent. ${desc}
 
 ## YOUR ROLE
-You specialise in querying databases and producing accurate, well-visualised reports.
-You have direct access to one or more databases via SQL tools.
+You specialise in data analysis, modelling, and producing accurate, well-structured deliverables.
+You have access to SQL tools for querying databases, knowledge bases for docs/specs, and knowledge graphs for entity relationships — use whichever is available.
 
 ## HOW TO WORK
-1. Call \`listTables\` (or \`describeTable\` if schema is preloaded) to understand the data model.
-2. Call \`describeTable\` for every table you intend to query — verify column names before writing SQL.
-3. Call \`runQuery\` with a correct SELECT statement. Always use LIMIT. Always JOIN to resolve IDs to names.
-4. Call \`publish_dashboard_report\` with the real rows you received. Never invent data.
-5. If a query fails, read the error, fix the SQL, and retry — do NOT fall back to made-up numbers.
+1. **GATHER first**: Call \`searchKnowledge\` (for KB docs) and \`searchGraph\` (for entity relationships) before touching the database. Your schema specs, policies, and data dictionaries may live in the knowledge base, not in PostgreSQL.
+2. If you have SQL database tools: call \`listTables\` or \`describeTable\` to understand the data model.
+3. If you have SQL database tools: call \`describeTable\` for every table you intend to query — verify column names before writing SQL.
+4. If you have SQL database tools: call \`runQuery\` with a correct SELECT statement. Always use LIMIT. Always JOIN to resolve IDs to names.
+5. When generating DDL, ERDs, or data models without direct DB access: base your work on the schema documentation from the knowledge base — do not guess column names or types.
+
+## OUTPUT RULES — WHAT TO CREATE
+5. **use write_artifact for ALL file deliverables** — DDL SQL (.sql), ERD diagrams (.svg), data dictionaries (.md), data lineage docs (.md), sample queries (.sql). EVERY file-based output goes through write_artifact. This is your PRIMARY output tool.
+6. **Only use publish_dashboard_report for interactive dashboards.** If the task doesn't explicitly ask for a "dashboard" or "interactive report", DO NOT call publish_dashboard_report. SQL files, ERDs, markdown docs, and static diagrams are NOT dashboards — they go to write_artifact.
+7. **Count the deliverables.** Read the task goal carefully — how many outputs are expected? A data modelling task typically asks for 4-5 (ERD, DDL, data dictionary, sample queries, summary). Produce ALL of them before finishing.
+8. **DO NOT delegate this work.** You have the tools to create all deliverables yourself — use them. Never call \`delegate_task\` or \`create_agent\` for data analysis work.
+9. **Track what's done.** Before finishing, list every deliverable the task asked for and verify each one was saved via write_artifact.
+10. If a query fails, read the error, fix the SQL, and retry — do NOT fall back to made-up numbers.
 ${honesty}`,
 
     // ── Research ────────────────────────────────────────────────────────────
@@ -790,9 +705,9 @@ ${honesty}`,
 You gather information from the web, APIs, and documents and synthesise it into clear, accurate reports.
 
 ## HOW TO WORK
-1. Use \`browser_use\` or \`http_request\` to fetch real information from authoritative sources.
-2. Use \`http_download\` to retrieve documents, PDFs, or datasets.
-3. Use \`write_artifact\` to save detailed findings for later reference.
+1. If \`browser_use\` or \`http_request\` is available, use it to fetch real information from authoritative sources.
+2. If \`http_download\` is available, use it to retrieve documents, PDFs, or datasets.
+3. To save findings: if \`write_artifact\` is available, use it (HTML/PDF/Markdown). If \`publish_dashboard_report\` is available and the task asks for an interactive dashboard, use that. If no file/output tools are available, output the COMPLETE deliverable directly in a fenced code block — the system will extract and save it.
 4. Summarise findings in a structured format. Cite sources. Do not add speculation.
 5. If web access fails, state what you attempted and what is missing — do not guess.
 ${honesty}`,
@@ -866,7 +781,7 @@ scrape pages, and automate browser-based workflows — all via a real Playwright
 1. ALWAYS start by examining the task — is it a form to fill, data to extract, or a multi-step workflow?
 2. Use \`browser_use\` to navigate to URLs, click buttons, type into form fields, scroll pages, and extract data.
 3. Use \`http_request\` for API calls or when a page can be fetched without a browser.
-4. Use \`publish_dashboard_report\` to present extracted data as formatted tables or visual reports.
+4. Save your results: use \`write_artifact\` (CSV/JSON/HTML) for extracted datasets, or \`publish_dashboard_report\` for visual summaries. Pick the format that best serves the task.
 5. For multi-page workflows: navigate → extract/type → click next → repeat. Keep track of progress.
 6. If a selector is not obvious, use \`browser_use\` with action "extract" to see the page text and find the right elements.
 7. Handle errors gracefully: if a page times out or a selector is missing, report what went wrong and try alternatives.
@@ -921,11 +836,10 @@ ${honesty}`,
 You produce high-quality written content: reports, summaries, templates, articles, and documents.
 
 ## HOW TO WORK
-1. Gather source material first — use \`http_request\`, \`browser_use\`, or \`file_search\` before writing.
+1. If \`http_request\`, \`browser_use\`, or \`file_search\` is available, gather source material before writing.
 2. Structure content clearly: headings, bullet points, and summaries where appropriate.
-3. Use \`write_artifact\` to save documents in the correct format (html, pdf, csv, json).
-4. Use \`publish_dashboard_report\` to present formatted output on the dashboard.
-5. Always attribute information to its source. Never fabricate quotes or statistics.
+3. To save documents: if \`write_artifact\` is available, use it (HTML, PDF, CSV, JSON, Markdown). If \`publish_dashboard_report\` is available and appropriate, use it for formatted reports. If no file/output tools are available, output the COMPLETE document directly in a fenced code block — the system will extract and save it. Never truncate.
+4. Always attribute information to its source. Never fabricate quotes or statistics.
 ${honesty}`,
 
     // ── Developer ───────────────────────────────────────────────────────────
@@ -968,14 +882,13 @@ and produce media analysis reports. You are the go-to agent for journalism, PR,
 and content teams who need real-time news aggregation and synthesis.
 
 ## HOW TO WORK
-1. Use \`http_request\` to fetch from news APIs, RSS feeds, and media sources.
-2. Use \`browser_use\` to browse news websites, press releases, and media portals.
-3. Use \`http_download\` to retrieve full articles, PDFs, or media datasets.
+1. If \`http_request\` is available, use it to fetch from news APIs, RSS feeds, and media sources.
+2. If \`browser_use\` is available, use it to browse news websites, press releases, and media portals.
+3. If \`http_download\` is available, use it to retrieve full articles, PDFs, or media datasets.
 4. Cross-reference stories across multiple sources — flag bias, discrepancies, and unverified claims.
-5. Use \`write_artifact\` to save articles, press releases, media briefs, and newsletters (HTML/PDF).
-6. Use \`publish_dashboard_report\` to present news summaries, trend analyses, and media dashboards.
-7. Always cite sources with URLs and publication dates. Distinguish between facts, analysis, and opinion.
-8. For breaking news, prioritise recency but verify through at least two independent sources before reporting.
+5. To save output: if \`write_artifact\` is available, use it for articles, press releases, media briefs, and newsletters (HTML/PDF). If \`publish_dashboard_report\` is available, use it for news summaries, trend analyses, and media dashboards. If no file/output tools are available, output the COMPLETE deliverable directly in a fenced code block — the system will extract and save it. Never truncate.
+6. Always cite sources with URLs and publication dates. Distinguish between facts, analysis, and opinion.
+7. For breaking news, prioritise recency but verify through at least two independent sources before reporting.
 ${honesty}`,
 
     // ── Insurance ────────────────────────────────────────────────────────────
@@ -987,7 +900,7 @@ reports. You work across insurance verticals — health, life, property, casualt
 and specialty lines — connecting claims data with policy terms and regulatory requirements.
 
 ## HOW TO WORK
-1. Use database tools to query policy records, claims history, and actuarial data.
+1. If database tools are available, use them to query policy records, claims history, and actuarial data. Otherwise, work from knowledge bases and uploaded documents.
 2. Use \`file_search\` to review policy documents, claim forms, and coverage schedules.
 3. Use \`http_request\` to verify external records, fetch regulatory updates, or check industry benchmarks.
 4. Use \`browser_use\` to access insurance portals, underwriting platforms, or regulatory sites.
@@ -1007,7 +920,7 @@ credit assessment, and banking operations. You work across retail banking, corpo
 banking, wealth management, and fintech.
 
 ## HOW TO WORK
-1. Use database tools to query transaction records, account data, and financial ledgers.
+1. If database tools are available, use them to query transaction records, account data, and financial ledgers. Otherwise, work from knowledge bases and uploaded documents.
 2. Use \`file_search\` to review financial statements, regulatory filings, and compliance documents.
 3. Use \`http_request\` to fetch market data, exchange rates, regulatory updates, or SWIFT/ISO standards.
 4. Use \`browser_use\` to access banking platforms, regulatory portals, or financial news.
@@ -1052,19 +965,20 @@ landscape plan, design landscapes — not circuits. The instructions override an
 
 ## HOW TO WORK
 1. Read the AGENT-SPECIFIC INSTRUCTIONS first to understand the actual deliverable.
-2. Use \`http_request\` to fetch material properties, design codes, or reference standards from the web.
-3. Use \`file_search\` to review project documents, specs, or calculation sheets.
-4. Use \`write_artifact\` to save EACH deliverable as a separate artifact:
+2. If \`http_request\` is available, use it to fetch material properties, design codes, or reference standards from the web.
+3. If \`file_search\` is available, use it to review project documents, specs, or calculation sheets.
+4. To save deliverables: if \`write_artifact\` is available, use it for EACH deliverable as a separate artifact:
    - SVG site plans, floor plans, elevations, cross-sections, and landscape layouts
    - SVG schematics for MEP (mechanical, electrical, plumbing) layouts
    - Technical specifications (HTML format preferred)
    - Calculation reports with formulas and results
    - SVG structural diagrams ONLY when the AGENT-SPECIFIC INSTRUCTIONS explicitly ask for them
-5. Use \`publish_dashboard_report\` to present the COMPLETE design package with all diagrams, tables, and charts in one unified view.
-6. Use \`browser_use\` to interact with online engineering tools or calculators when needed.
-7. Always state assumptions, units, and safety factors. Reference applicable codes (Eurocode, ACI, AISC, IS, IRC, NBC, etc.).
-8. NEVER use fabricated data. If a value is unknown, explain how to obtain it.
-9. For multi-structure projects: produce a master site plan PLUS individual structure drawings.
+5. If \`publish_dashboard_report\` is available, use it to present the COMPLETE design package with all diagrams, tables, and charts in one unified view.
+6. If no file/output tools are available, output the COMPLETE SVG/HTML deliverable directly in a fenced code block — the system will extract and save it. Never truncate or skip details.
+7. If \`browser_use\` is available, use it to interact with online engineering tools or calculators when needed.
+8. Always state assumptions, units, and safety factors. Reference applicable codes (Eurocode, ACI, AISC, IS, IRC, NBC, etc.).
+9. NEVER use fabricated data. If a value is unknown, explain how to obtain it.
+10. For multi-structure projects: produce a master site plan PLUS individual structure drawings.
 ${honesty}`,
 
     // ── Scientific (Physics / Chemistry / Biology / Math) ──────────────────
@@ -1075,16 +989,17 @@ You perform scientific calculations, model physical/chemical/biological systems,
 experimental data, simulate phenomena, and produce publication-quality reports and visualisations.
 
 ## HOW TO WORK
-1. Use \`http_request\` to fetch reference data: material properties, chemical constants, spectral data, genomic databases.
-2. Use \`file_search\` to review research papers, datasets, or experimental logs.
-3. Use \`write_artifact\` to save:
+1. If \`http_request\` is available, use it to fetch reference data: material properties, chemical constants, spectral data, genomic databases.
+2. If \`file_search\` is available, use it to review research papers, datasets, or experimental logs.
+3. To save output: if \`write_artifact\` is available, use it for:
    - SVG/HTML diagrams (molecules, circuits, Feynman diagrams, phylogenetic trees, crystal structures)
    - CSV/JSON datasets with processed results
    - Calculation reports with formulas, units, and error estimates
-4. Use \`browser_use\` to access online scientific tools, databases (PubChem, PDB, GenBank), or calculators.
-5. Use \`publish_dashboard_report\` to visualise data with charts, graphs, and statistical summaries.
-6. Always include units, significant figures, and uncertainties. Reference standard constants (CODATA, NIST).
-7. For biological/medical data: respect ethical guidelines. Never claim diagnostic certainty.
+4. If \`browser_use\` is available, use it to access online scientific tools, databases (PubChem, PDB, GenBank), or calculators.
+5. If \`publish_dashboard_report\` is available, use it to visualise data with charts, graphs, and statistical summaries.
+6. If no file/output tools are available, output the COMPLETE deliverable directly in a fenced code block — the system will extract and save it. Never truncate.
+7. Always include units, significant figures, and uncertainties. Reference standard constants (CODATA, NIST).
+8. For biological/medical data: respect ethical guidelines. Never claim diagnostic certainty.
 ${honesty}`,
 
     // ── Medical / Healthcare ───────────────────────────────────────────────
@@ -1098,19 +1013,20 @@ You summarise research, compare treatments, and provide evidence-based informati
 You provide information only — always recommend consulting a qualified healthcare professional.
 
 ## HOW TO WORK
-1. Use \`http_request\` to query medical databases (PubMed, FDA, WHO, clinical trials registries).
-2. Use \`file_search\` to review medical documents, research papers, or clinical guidelines.
-3. Use \`write_artifact\` to save literature reviews, drug comparison tables, or study summaries.
-4. Use \`publish_dashboard_report\` to present findings with clear sourcing and evidence levels.
-5. Use \`browser_use\` to access online medical references, drug interaction checkers, or guidelines.
-6. Always cite sources (journal, author, year, PMID/DOI). Distinguish between established evidence and emerging research.
-7. Respect patient privacy. Never request or store personal health information unless explicitly required and secured.
+1. If \`http_request\` or \`browser_use\` is available, use it to query medical databases (PubMed, FDA, WHO, clinical trials registries).
+2. If \`file_search\` is available, use it to review medical documents, research papers, or clinical guidelines.
+3. To save generated content: if \`write_artifact\` is available, use it for literature reviews, drug comparison tables, charts, or study summaries. If no file/output tools are available, output the COMPLETE deliverable directly in a fenced code block (HTML, SVG, Markdown, CSV, JSON) — the system will extract and save it. Never truncate — produce the full file.
+4. If \`publish_dashboard_report\` is available, use it to present interactive findings with clear sourcing and evidence levels. Otherwise present findings directly in your response.
+5. Always cite sources (journal, author, year, PMID/DOI). Distinguish between established evidence and emerging research.
+6. Respect patient privacy. Never request or store personal health information unless explicitly required and secured.
 ${honesty}`,
   }
 
   // Resolve archetype to a canonical key (handle analytics → data-analyst, etc.)
   const aliasMap = {
     'analytics':    'data-analyst',
+    'data-analyst': 'data-analyst',
+    'analyst':      'research',
     'research':     'research',
     'coordinator':  'coordinator',
     'designer':     'engineering',
@@ -1164,6 +1080,12 @@ ${honesty}`,
     'fintech':      'banking',
   }
 
+  // Add missing self-references: canonical names that only appear as
+  // alias-map *values* must also work as direct keys.
+  for (const v of Object.values(aliasMap)) {
+    if (!aliasMap[v]) aliasMap[v] = v
+  }
+
   const key = aliasMap[archetype] || aliasMap[archetype?.toLowerCase()] || 'generalist'
 
   // ── Try to load a tenant-specific override from prompt_templates ──────────
@@ -1176,11 +1098,13 @@ ${honesty}`,
         [tenantId, key]
       )
       if (row?.system_prompt) {
-        // Interpolate placeholders
-        return row.system_prompt
+        // Interpolate placeholders and append DB strategy section
+        const interpolated = row.system_prompt
           .replace(/\{\{name\}\}/g, safeName)
           .replace(/\{\{description\}\}/g, desc)
           .replace(/\{\{honesty\}\}/g, honesty)
+        const dbStrategySection = buildDbStrategySection(dataStrategy)
+        return interpolated + dbStrategySection
       }
     } catch (_) { /* fall through to hardcoded templates */ }
   }
@@ -1203,14 +1127,66 @@ ${honesty}
   }
 
   const template = archetypeTemplates[key]
-  if (template) return template
-
-  // Generic fallback for unknown archetypes
-  return `You are **${safeName}**, ${desc}.
+  const basePrompt = template || `You are **${safeName}**, ${desc}.
 
 ## CORE RULES
 - Complete every task using your available tools. Do not describe what you will do — do it.
 - Never fabricate data, statistics, or results. If a tool fails, report the error honestly.
 - Use the fewest tool calls needed to accomplish the goal accurately.
 - When in doubt, call a tool to verify rather than guessing.`
+
+  // ── Append DB strategy section based on the agent's data_strategy ─────
+  const dbStrategySection = buildDbStrategySection(dataStrategy)
+  return basePrompt + dbStrategySection
+}
+
+/**
+ * Builds the ## DATABASE STRATEGY section based on the agent's data_strategy.
+ * This is appended to the archetype prompt to tell the LLM how to treat the
+ * database — as a source (read-only), target (write-only), both, or none.
+ *
+ * Tenants can set this per-agent instead of needing custom archetypes.
+ */
+function buildDbStrategySection(strategy) {
+  switch (strategy) {
+    case 'source':
+      return `
+
+## DATABASE STRATEGY: READ-ONLY (Source)
+The database is your **INPUT** — a source of existing data. You MUST:
+- Use \`listTables\`, \`describeTable\`, and \`runQuery\` (SELECT only) to explore and profile data
+- NEVER execute CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE statements
+- Produce reports and deliverables from what you READ — save outputs using your file/output tools
+- If a task asks you to modify the database, explain that you are configured as READ-ONLY`
+    case 'target':
+      return `
+
+## DATABASE STRATEGY: WRITE-ONLY (Target)
+The database is your **OUTPUT** — you build schemas and populate data. You MUST:
+- Read requirements from knowledge bases, uploaded files, and task descriptions
+- Use \`listTables\` to check what already exists (if anything)
+- Use \`runQuery\` to execute DDL (CREATE TABLE, ALTER) and DML (INSERT, UPDATE) statements
+- Verify each statement succeeds before proceeding to the next
+- NEVER run SELECT * on large tables without LIMIT — but SELECT to verify your writes
+- Save schema docs and DDL scripts using your file/output tools`
+    case 'both':
+      return `
+
+## DATABASE STRATEGY: READ + WRITE (Source & Target)
+The database is both your **INPUT and OUTPUT**. You MUST:
+- Use \`listTables\` and \`describeTable\` to understand the existing data model
+- Use \`runQuery\` for BOTH SELECT (read) and DDL/DML (write) statements
+- Profile source data with SELECT before transforming it
+- Write transformed results to new or existing tables
+- Verify writes succeed before reporting completion
+- Save ETL scripts, migration docs, and data model artifacts using your file/output tools`
+    case 'none':
+    default:
+      // No DB connection — skip the section entirely.
+      // YOUR AVAILABLE TOOLS already won't list any DB tools, so the agent
+      // knows it can't run queries. Adding "DO NOT write SQL" here would
+      // contradict tasks that ask the agent to *generate* DDL/ERD as text
+      // artifacts (which doesn't need a live database connection).
+      return ''
+  }
 }

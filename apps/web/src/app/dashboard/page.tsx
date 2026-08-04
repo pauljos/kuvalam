@@ -1,26 +1,43 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { api } from '@/lib/api'
 import { useApp } from '@/lib/context'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
-  Bot, Library, RefreshCw, CheckCircle2, Plus, Activity, ArrowRight
+  Bot, Library, RefreshCw, CheckCircle2, Plus, Activity, ArrowRight,
+  ChevronDown, ChevronRight, Clock, Zap, AlertTriangle, Play, Loader2
 } from 'lucide-react'
 
-type AuditEntry = {
+type AgentGroup = {
   id: string
-  event_type: string
-  actor_type?: string
-  actor_id?: string
-  resource_type?: string | null
-  resource_id?: string | null
-  action?: string | null
-  created_at: string
-  metadata?: Record<string, unknown>
+  name: string
+  archetype: string | null
+  status: string
+  llmModel: string | null
+  llmProvider: string | null
+  tasks: TaskSummary[]
+  runningCount: number
+  recentCompleted: number
+  recentFailed: number
+}
+
+type TaskSummary = {
+  id: string
+  goal: string
+  status: string
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+  tokenUsage: any
+  actionCount: number
+  hasCheckpoint: boolean
+  error: string | null
+  resultPreview: string | null
 }
 
 function timeAgo(iso: string): string {
+  if (!iso) return ''
   const then = new Date(iso).getTime()
   if (!Number.isFinite(then)) return ''
   const diff = Math.max(0, Date.now() - then)
@@ -34,10 +51,35 @@ function timeAgo(iso: string): string {
   return `${d}d ago`
 }
 
-function humaniseEvent(ev: string): string {
-  // Turn "connector.tested" / "AGENT_CREATED" into "Connector tested" / "Agent created"
-  const s = ev.replace(/[._]/g, ' ').toLowerCase()
-  return s.charAt(0).toUpperCase() + s.slice(1)
+function elapsed(iso: string): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const diff = Math.max(0, Date.now() - then)
+  const s = Math.floor(diff / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  RUNNING: '#3b82f6',
+  PENDING: '#f59e0b',
+  COMPLETED: '#22c55e',
+  FAILED: '#ef4444',
+  CANCELLED: '#6b7280',
+  QUEUED: '#8b5cf6',
+}
+
+const STATUS_ICONS: Record<string, string> = {
+  RUNNING: '⟳',
+  PENDING: '⏳',
+  COMPLETED: '✓',
+  FAILED: '✗',
+  CANCELLED: '⊘',
+  QUEUED: '⏱',
 }
 
 export default function DashboardPage() {
@@ -50,7 +92,11 @@ export default function DashboardPage() {
   const [pendingApprovals, setPendingApprovals] = useState(0)
   const [runningTasks, setRunningTasks] = useState(0)
   const [providerCount, setProviderCount] = useState(0)
-  
+  const [agentLogs, setAgentLogs] = useState<AgentGroup[]>([])
+  const [expandedAgents, setExpandedAgents] = useState<Set<string>>(new Set())
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const initialExpandDone = useRef<Set<string>>(new Set()) // track which agents got initial auto-expand
+
   // Redirect sysadmins without tenant to admin portal
   useEffect(() => {
     if (!tenantId && user?.isSystemAdmin && typeof window !== 'undefined') {
@@ -58,8 +104,34 @@ export default function DashboardPage() {
     }
   }, [tenantId, user])
   const [workflowCount, setWorkflowCount] = useState(0)
-  const [activity, setActivity] = useState<AuditEntry[]>([])
   const [showAllAgents, setShowAllAgents] = useState(false)
+
+  // Load agent logs with auto-poll for running tasks
+  async function loadAgentLogs(tid: string) {
+    try {
+      const res = await api.getAgentLogs(tid, { limit: '40' })
+      // request() already unwraps .data, so res is { agents, totalRunning }
+      const groups: AgentGroup[] = res?.agents || []
+      setAgentLogs(groups)
+      // Auto-expand agents with running tasks on first discovery (respects user collapse after)
+      setExpandedAgents(prev => {
+        const next = new Set(prev)
+        for (const g of groups) {
+          if (g.runningCount > 0 && !initialExpandDone.current.has(g.id)) {
+            next.add(g.id)
+            initialExpandDone.current.add(g.id)
+          }
+        }
+        return next
+      })
+      const running = groups.reduce((s, g) => s + g.runningCount, 0)
+      setRunningTasks(running)
+      return running
+    } catch (e) {
+      console.error('loadAgentLogs failed:', e)
+    }
+    return 0
+  }
 
   useEffect(() => {
     const tid = tenantId
@@ -73,22 +145,42 @@ export default function DashboardPage() {
       api.listWorkflowExecutions(tid).catch(() => ({ executions: [] })),
       api.getSettings(tid).catch(() => null),
       api.listWorkflows(tid).catch(() => ({ workflows: [] })),
-      api.listAuditLog(tid, { limit: '8' }).catch(() => ({ logs: [] })),
-    ]).then(([t, a, k, appvs, execData, settings, wfs, audit]) => {
+      loadAgentLogs(tid),
+    ]).then(([t, a, k, appvs, execData, settings, wfs]) => {
       setTenant(t)
       setAgents(a?.agents || [])
       setKbs(k?.knowledgeBases || [])
       setPendingApprovals((appvs?.approvals || appvs || []).length)
-      const execsList = execData?.executions || execData || []
-      setRunningTasks(execsList.filter((e: any) => e && ['RUNNING', 'PENDING_APPROVAL'].includes(e.status)).length)
       setProviderCount(Object.keys(settings?.llm_config?.providers || {}).length)
       setWorkflowCount((wfs?.workflows || wfs || []).length)
-      setActivity(Array.isArray(audit?.logs) ? audit.logs : [])
       setLoading(false)
     })
+
+    // Auto-poll agent logs every 5s while tasks are running
+    pollRef.current = setInterval(async () => {
+      const running = await loadAgentLogs(tid)
+      if (running === 0 && pollRef.current) {
+        // Slow polling when nothing is running
+        clearInterval(pollRef.current)
+        pollRef.current = setInterval(() => loadAgentLogs(tid), 15000)
+      }
+    }, 5000)
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
   }, [tenantId])
 
   const activeAgents = agents.filter(a => a.status === 'ACTIVE').length
+
+  function toggleAgent(id: string) {
+    setExpandedAgents(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   return (
     <div className="animate-in">
@@ -251,49 +343,185 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* Recent Activity */}
+          {/* Agent Execution Log — grouped by agent, running tasks first */}
           <div className="card" style={{ padding: 22, display: 'flex', flexDirection: 'column' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
               <h2 style={{ fontSize: 15, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <Activity size={15} strokeWidth={2.5} /> Recent Activity
+                <Activity size={15} strokeWidth={2.5} /> Agent Execution Log
+                {runningTasks > 0 && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, background: '#3b82f6', color: '#fff',
+                    padding: '2px 8px', borderRadius: 99, display: 'inline-flex', alignItems: 'center', gap: 4
+                  }}>
+                    <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> {runningTasks} running
+                  </span>
+                )}
               </h2>
               <Link href="/dashboard/audit" style={{ color: 'var(--green-dark)', fontWeight: 700, textDecoration: 'none', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                Audit log <ArrowRight size={12} strokeWidth={2.5} />
+                Full audit log <ArrowRight size={12} strokeWidth={2.5} />
               </Link>
             </div>
+
             {loading ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {[1, 2, 3, 4].map(i => <div key={i} className="skeleton" style={{ height: 34 }} />)}
+                {[1, 2, 3, 4].map(i => <div key={i} className="skeleton" style={{ height: 48 }} />)}
               </div>
-            ) : activity.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '18px 4px', lineHeight: 1.5 }}>
-                No activity yet. Actions performed by you and your agents will appear here.
+            ) : agentLogs.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '18px 4px', lineHeight: 1.5, textAlign: 'center' }}>
+                <Play size={24} strokeWidth={1.5} style={{ opacity: 0.3, marginBottom: 8 }} />
+                <div>No task executions yet.</div>
+                <div style={{ fontSize: 11, marginTop: 4 }}>Dispatch a task to an agent to see it here.</div>
               </div>
             ) : (
-              <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2, margin: 0, padding: 0 }}>
-                {activity.slice(0, 8).map(entry => (
-                  <li key={entry.id} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 10,
-                    padding: '10px 4px', borderBottom: '1px solid var(--border)',
-                  }}>
-                    <div style={{
-                      width: 8, height: 8, borderRadius: '50%', marginTop: 6, flexShrink: 0,
-                      background: entry.actor_type === 'SYSTEM' ? 'var(--text-muted)' :
-                                  entry.actor_type === 'AGENT' ? 'var(--green)' : '#0891b2'
-                    }} />
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {humaniseEvent(entry.event_type)}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: '70vh', overflowY: 'auto' }}>
+                {agentLogs.map(group => {
+                  const isExpanded = expandedAgents.has(group.id)
+                  const isRunning = group.runningCount > 0
+                  const isDeleted = group.status === 'DELETED'
+
+                  return (
+                    <div key={group.id} style={{
+                      border: `1px solid ${isRunning ? 'rgba(59,130,246,0.3)' : 'var(--border)'}`,
+                      borderRadius: 10,
+                      overflow: 'hidden',
+                      background: isRunning ? 'rgba(59,130,246,0.03)' : 'transparent',
+                    }}>
+                      {/* Agent header */}
+                      <div
+                        onClick={() => toggleAgent(group.id)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px',
+                          cursor: 'pointer', userSelect: 'none',
+                          background: isRunning ? 'rgba(59,130,246,0.06)' : 'var(--bg-secondary)',
+                        }}
+                      >
+                        {isExpanded
+                          ? <ChevronDown size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                          : <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                        }
+                        <Bot size={15} strokeWidth={2} style={{ color: isDeleted ? 'var(--text-muted)' : 'var(--green)', flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {isDeleted ? group.name : (
+                              <Link
+                                href={`/dashboard/agents/${group.id}`}
+                                onClick={e => e.stopPropagation()}
+                                style={{ color: 'var(--text)', textDecoration: 'none' }}
+                                onMouseOver={e => e.currentTarget.style.color = 'var(--green-dark)'}
+                                onMouseOut={e => e.currentTarget.style.color = 'var(--text)'}
+                              >
+                                {group.name}
+                              </Link>
+                            )}
+                            {group.archetype && (
+                              <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>{group.archetype}</span>
+                            )}
+                          </div>
+                          {(group.llmModel || group.llmProvider) && (
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <Zap size={10} style={{ flexShrink: 0 }} />
+                              {group.llmProvider && <span style={{ opacity: 0.7 }}>{group.llmProvider}/</span>}
+                              <span style={{ fontWeight: 500 }}>{group.llmModel}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Mini stats */}
+                        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}>
+                          {group.runningCount > 0 && (
+                            <span style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', display: 'flex', alignItems: 'center', gap: 3 }}>
+                              <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} />
+                              {group.runningCount} running
+                            </span>
+                          )}
+                          {group.recentCompleted > 0 && (
+                            <span style={{ fontSize: 11, color: '#22c55e' }}>{group.recentCompleted} done</span>
+                          )}
+                          {group.recentFailed > 0 && (
+                            <span style={{ fontSize: 11, color: '#ef4444' }}>{group.recentFailed} failed</span>
+                          )}
+                          <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>
+                            {group.tasks.length} tasks
+                          </span>
+                        </div>
                       </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <span>{timeAgo(entry.created_at)}</span>
-                        {entry.resource_type && <span>· {entry.resource_type.toLowerCase()}</span>}
-                        {entry.actor_type && entry.actor_type !== 'SYSTEM' && <span>· {entry.actor_type.toLowerCase()}</span>}
-                      </div>
+
+                      {/* Task list (collapsible) */}
+                      {isExpanded && (
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          {group.tasks.slice(0, 10).map(task => {
+                            const isTaskRunning = task.status === 'RUNNING' || task.status === 'PENDING'
+                            const taskColor = STATUS_COLORS[task.status] || 'var(--text-muted)'
+                            const taskIcon = STATUS_ICONS[task.status] || '·'
+                            const tokens = task.tokenUsage?.total_tokens || task.tokenUsage?.totalTokens || 0
+
+                            return (
+                              <Link
+                                key={task.id}
+                                href={`/dashboard/agents/${group.id}`}
+                                onClick={e => {
+                                  // Store task ID in sessionStorage so the agent page can load it
+                                  try { sessionStorage.setItem(`task-select-${group.id}`, task.id) } catch {}
+                                }}
+                                style={{
+                                  display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 14px 9px 36px',
+                                  borderTop: '1px solid var(--border)', textDecoration: 'none', color: 'inherit',
+                                  opacity: task.status === 'CANCELLED' ? 0.5 : 1,
+                                }}
+                                onMouseOver={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                                onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                              >
+                                {/* Status indicator */}
+                                <div style={{
+                                  width: 20, height: 20, borderRadius: '50%', flexShrink: 0, marginTop: 1,
+                                  background: taskColor, color: '#fff', fontSize: 10,
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                  fontWeight: 900,
+                                  ...(isTaskRunning ? { animation: 'pulse 2s infinite' } : {})
+                                }}>
+                                  {isTaskRunning ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : taskIcon}
+                                </div>
+
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {task.goal || '(untitled)'}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span style={{ color: taskColor, fontWeight: 700 }}>{task.status}</span>
+                                    {isTaskRunning && task.startedAt && (
+                                      <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                                        <Clock size={10} /> {elapsed(task.startedAt)}
+                                      </span>
+                                    )}
+                                    {!isTaskRunning && <span>{timeAgo(task.completedAt || task.createdAt)}</span>}
+                                    {task.actionCount > 0 && <span>· {task.actionCount} actions</span>}
+                                    {tokens > 0 && <span>· {tokens.toLocaleString()} tokens</span>}
+                                    {task.error && (
+                                      <span style={{ color: '#ef4444', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}
+                                        title={task.error}>
+                                        <AlertTriangle size={10} style={{ display: 'inline', marginRight: 2 }} />
+                                        {task.error.replace(/\n.*/s, '').slice(0, 80)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </Link>
+                            )
+                          })}
+                          {group.tasks.length > 10 && (
+                            <div style={{ padding: '8px 14px 8px 36px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
+                              +{group.tasks.length - 10} more tasks —
+                              <Link href={`/dashboard/agents/${group.id}`} style={{ color: 'var(--green-dark)', fontWeight: 600, marginLeft: 4 }}>
+                                view all
+                              </Link>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </li>
-                ))}
-              </ul>
+                  )
+                })}
+              </div>
             )}
           </div>
         </div>

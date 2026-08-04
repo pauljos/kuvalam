@@ -56,6 +56,100 @@ export function extractUserGuardrails(systemPrompt) {
   return text
 }
 
+// ─── Shared hallucination pattern libraries ──────────────────────────────────
+// Used by task synthesis quality scoring. Keep in one place so all paths
+// (normal synthesis, artifact-only, future shortcuts) stay consistent.
+export const HALLUCINATION_FABRICATION_PATTERNS = [
+  'I deployed', 'I published', 'I launched', 'I released',
+  'I finalized', 'I shipped', 'I rolled out',
+]
+export const HALLUCINATION_FUTURE_TENSE_PATTERNS = [
+  'I will provide', 'I will implement', 'I will create',
+  'I will develop', 'I will need to', 'I would need to',
+  'I will continue', 'should be implemented',
+  'would require additional', 'next steps',
+]
+export const HALLUCINATION_DEFLECTION_PATTERNS = [
+  'a revised response', 'in the correct format',
+  'let me try again', 'I apologize',
+  'I hope this', 'let me know if', 'feel free to',
+  'please let me know', 'if you have any questions',
+  'I would be happy to', "please don't hesitate",
+]
+
+export const HALLUCINATION_VAGUENESS_PATTERNS = [
+  'could potentially', 'might possibly', 'may or may not',
+  'it is worth noting', 'it should be noted', 'generally speaking',
+  'in general', 'broadly speaking', 'for the most part',
+]
+
+// Convenience bundle for callers that need all three
+export const HALLUCINATION_PATTERNS = {
+  fabrication: HALLUCINATION_FABRICATION_PATTERNS,
+  futureTense: HALLUCINATION_FUTURE_TENSE_PATTERNS,
+  deflection: HALLUCINATION_DEFLECTION_PATTERNS,
+}
+
+/**
+ * Extract expected deliverable types from a task goal string.
+ * Returns an array of unique deliverable type strings (lowercase).
+ * Used by: reflection prompt (deliverable check), artifact scoring
+ * (goal-coverage penalty), and scopeAdherence (deliverable shortfall).
+ *
+ * The `count` is the authoritative "how many things are expected" metric,
+ * based on distinct deliverable keywords found. The `types` array contains
+ * human-readable descriptions for display in reflection prompts.
+ *
+ * @param {string} goal - The task goal text
+ * @returns {{types: string[], count: number}} Extracted deliverable info
+ */
+export function extractGoalDeliverables(goal) {
+  if (!goal || typeof goal !== 'string') return { types: [], count: 0 }
+  const seen = new Set()
+  const types = []
+
+  // ── Primary: count distinct deliverable-type KEYWORDS ─────────────────
+  // Each keyword is a deliverable category the goal asks for.
+  // Stems match plurals: "diagram" ↔ "diagrams", "flow" ↔ "flows", etc.
+  const keywordPattern = /\b(diagrams?|lineage|DDL|ERD|entity[- ]relationships?|data[- ]flows?|flowcharts?|visualizations?|schemas?|blueprints?|drawings?|notebooks?|spreadsheets?|mappings?|plans?|specs?|reports?|charts?|scripts?|summar(y|ies)|analys(e|is)|queries)\b/gi
+  const pluralMap = {
+    'diagrams': 'diagram', 'flows': 'flow', 'flowcharts': 'flowchart',
+    'visualizations': 'visualization', 'schemas': 'schema', 'blueprints': 'blueprint',
+    'drawings': 'drawing', 'notebooks': 'notebook', 'spreadsheets': 'spreadsheet',
+    'mappings': 'mapping', 'plans': 'plan', 'specs': 'spec',
+    'reports': 'report', 'charts': 'chart', 'scripts': 'script',
+    'summaries': 'summary', 'queries': 'query',
+    'entity relationships': 'entity relationship', 'data flows': 'data flow',
+    'analysis': 'analysis', 'analyses': 'analysis',
+  }
+  let kwMatch
+  while ((kwMatch = keywordPattern.exec(goal)) !== null) {
+    const raw = kwMatch[0].toLowerCase().replace(/\s+/g, ' ').replace(/-/g, ' ')
+    const kw = pluralMap[raw] || raw
+    if (!seen.has(kw)) {
+      seen.add(kw)
+      types.push(kw)
+    }
+  }
+  // The keyword count is the authoritative metric for goal-coverage checks
+  const keywordCount = types.length
+
+  // ── Secondary: capture descriptive phrases for display (reflection prompts) ──
+  // These provide richer context but don't increase the count.
+  const creationPattern = /(?:create|generate|produce|build|write|develop)\s+(?:a\s+|an\s+)?([^,.;]{8,60}?(?:diagram|lineage|DDL|schema|report|chart|model|artefact|artifact|script|file|document|summary|analysis|query|statement|ERD|entity[-\s]relationship|data flow|flowchart|visualization|code|drawing|blueprint|plan|spec|mapping|notebook|spreadsheet))/gi
+  let match
+  while ((match = creationPattern.exec(goal)) !== null) {
+    const d = match[1].trim().toLowerCase()
+    if (d.length > 6 && d.length < 80 && !seen.has(d) && !types.some(t => d.includes(t))) {
+      seen.add(d)
+      // Add as supplemental display text only if it adds new info
+      if (types.length < 8) types.push(d)
+    }
+  }
+
+  return { types: types.slice(0, 8), count: keywordCount }
+}
+
 /**
  * Extract a confidence score from a synthesis response.
  * Looks for explicit patterns like "confidence: 0.9" or "95% confident".
@@ -79,8 +173,10 @@ export function extractConfidence(text) {
   const lowCount = (text.match(lowConfidenceSignals) || []).length
   const highCount = (text.match(highConfidenceSignals) || []).length
 
-  // Start at 0.75 baseline and nudge by signal counts
-  return Math.min(0.99, Math.max(0.1, 0.75 + highCount * 0.03 - lowCount * 0.08))
+  // Start at 0.65 baseline and nudge by signal counts.
+  // Lower than the previous 0.85 — matter-of-fact prose shouldn't masquerade
+  // as high-confidence output. Confidence must be earned through explicit signals.
+  return Math.min(0.99, Math.max(0.1, 0.65 + highCount * 0.04 - lowCount * 0.10))
 }
 
 /**
@@ -457,7 +553,7 @@ export function normalizeChartType(type) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SVG Report Builder — renders inline vector graphics for engineering/medical
+// SVG Report Builder — renders inline vector graphics
 // ══════════════════════════════════════════════════════════════════════════════
 export function buildSvgReportHtml(svgContent, title, summary) {
   const summaryHtml = summary ? `<div class="report-summary">${escapeHtml(summary)}</div>` : ''
@@ -887,6 +983,270 @@ export function markdownToReportHtml(md) {
 }
 
 /**
+ * Synthesize the agent's ACTUAL runtime context — what resources are truly
+ * available right now. This section OVERRIDES the generic archetype template
+ * because the archetype doesn't know which KBs are attached, whether a DB
+ * exists, what the data_strategy is, or which output tools are scoped.
+ *
+ * The output is a prescriptive `## YOUR ACTUAL CONTEXT` block that tells
+ * the LLM exactly what workflow to follow given the real resources.
+ */
+function buildRuntimeContext(agent, skills, goal) {
+  const parts = []
+
+  // ── 1. Knowledge Sources ──────────────────────────────────────────────
+  const kbCount = Array.isArray(agent.knowledge_base_ids) ? agent.knowledge_base_ids.length : 0
+  const graphCount = Array.isArray(agent.knowledge_graph_ids) ? agent.knowledge_graph_ids.length : 0
+  const hasKb = kbCount > 0 || !!agent._hasKnowledgeContext
+  const hasGraph = graphCount > 0
+  const fileCount = Array.isArray(agent._files) ? agent._files.length : 0
+  const hasFiles = fileCount > 0
+
+  if (hasKb || hasGraph || hasFiles) {
+    const sources = []
+    if (hasKb) sources.push(`- **${kbCount || '?'} Knowledge Base(s)** attached — SEARCH these FIRST for domain context, requirements, schemas, and reference data`)
+    if (hasGraph) sources.push(`- **${graphCount} Knowledge Graph(s)** attached — query entities and relationships for structured domain knowledge`)
+    if (hasFiles) sources.push(`- **${fileCount} uploaded file(s)** — review these for task-specific data and requirements`)
+    parts.push(`### 📚 Knowledge Sources\n${sources.join('\n')}`)
+  } else {
+    parts.push(`### 📚 Knowledge Sources\n- **No knowledge bases, graphs, or files attached.** Work from the task goal and your training data. If you need domain context, ask the user to attach a KB.`)
+  }
+
+  // ── 2. Database + Strategy ────────────────────────────────────────────
+  const hasDb = !!agent._dbConnectionString
+  const strategy = agent._dataStrategy || 'none'
+  // Only show DB context when strategy isn't explicitly 'none'
+  const showDb = hasDb && strategy !== 'none'
+  const dbType = agent._dbType || 'postgresql'
+
+  if (showDb) {
+    const strategyLabel = { source: 'Source (READ-ONLY)', target: 'Target (WRITE-ONLY)', both: 'Source & Target (READ + WRITE)' }[strategy] || strategy
+    const dbLines = [`- **${dbType.toUpperCase()}** database connected`]
+    if (agent._activeDbName) dbLines.push(`- Active database: \`${agent._activeDbName}\``)
+
+    // Agent actually has DB CLI tools — compute here since skillNames not yet available
+    const _hasDbTools = skills.map(s => (s.name || '').toLowerCase()).some(n => /\b(runQuery|listTables|describeTable|listDatabases|useDatabase)\b/i.test(n))
+
+    if (_hasDbTools) {
+      switch (strategy) {
+        case 'source':
+          dbLines.push(`- **Strategy: ${strategyLabel}**`)
+          dbLines.push(`- Use \`listTables\` → \`describeTable\` → \`runQuery\` (SELECT only) to explore and profile data`)
+          dbLines.push(`- NEVER execute CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE`)
+          dbLines.push(`- Produce reports and deliverables from what you READ — use your file/output tools to save results`)
+          break
+        case 'target':
+          dbLines.push(`- **Strategy: ${strategyLabel}**`)
+          dbLines.push(`- Read requirements from KBs and files — NOT from existing tables`)
+          dbLines.push(`- Use \`runQuery\` for CREATE TABLE, INSERT, UPDATE DML`)
+          dbLines.push(`- Use \`listTables\` to check what exists, \`describeTable\` to verify structure`)
+          dbLines.push(`- Verify every DDL/DML statement succeeds before the next one`)
+          break
+        case 'both':
+          dbLines.push(`- **Strategy: ${strategyLabel}**`)
+          dbLines.push(`- Profile existing data with SELECT (always add LIMIT)`)
+          dbLines.push(`- Transform and write results with CREATE TABLE / INSERT`)
+          dbLines.push(`- Verify writes succeed before reporting completion`)
+          break
+        default:
+          dbLines.push(`- **Strategy: ${strategyLabel}** — treat as read-only by default`)
+      }
+    } else {
+      // DB connection exists but agent has no DB tools — mention it as context only
+      dbLines.push(`- **Strategy: ${strategyLabel}** — database is available as context but you do not have \`runQuery\`/\`listTables\` tools`)
+      dbLines.push(`- If you need to query this database, add \`runQuery\` to the agent's tool scopes`)
+    }
+    parts.push(`### 🗄️ Database\n${dbLines.join('\n')}`)
+  }
+
+  // ── 3. Delivery Channel ──────────────────────────────────────────
+  // TOOL-AWARE: show ALL scoped tools the agent actually has — no goal filtering.
+  // Future tools (email, Jira, IoT, ML, CRM, etc.) automatically appear by
+  // matching their name against the category patterns below.
+  const skillNames = skills.map(s => (s.name || '').toLowerCase())
+  const hasWriteArtifact = skillNames.some(n => /\bwrite.?artifact\b/i.test(n))
+  const hasLocalDir = skillNames.some(n => /\blocal.?dir\b|\bfile.?write\b|\bwrite.?file\b/i.test(n))
+  const hasBrowser = skillNames.some(n => /\bbrowser.?use\b|\bbrowser\b|\bpuppeteer\b|\bplaywright\b/i.test(n))
+  const hasHttp = skillNames.some(n => /\bhttp.?request\b|\brest.?api\b|\bfetch\b/i.test(n))
+  const hasPublishReportSkill = skillNames.some(n => /\bpublish.?dashboard.?report\b/i.test(n))
+  const hasDbTools = skillNames.some(n => /\b(runQuery|listTables|describeTable|listDatabases|useDatabase)\b/i.test(n))
+
+  // Generic tool → delivery category matching. Add new categories here as the
+  // platform grows — no other code changes needed for new tool types to appear
+  // in the delivery channel.
+  //
+  // direction: 'output' → shown in 📤 Delivery Channel (where results GO).
+  // direction: 'input'  → tracked for WORKFLOW ACQUIRE, but hidden from
+  //                        Delivery Channel (these are data sources, not outputs).
+  const TOOL_DELIVERY_CATEGORIES = [
+    { pattern: /\b(write.?artifact|local.?dir|file.?write|write.?file|save.?file|create.?file|export.?file)\b/i,       label: 'File Output',   desc: 'saves generated files (.sql, .svg, .md, .csv, .json) to artifact storage', direction: 'output' },
+    // goalGate: only show Reports as a delivery channel when the goal
+    // actually mentions a dashboard / chart / report. Agents often have
+    // publish_dashboard_report scoped but the task is DDL/ERD/docs.
+    { pattern: /\b(publish.?dashboard.?report|generate.?report|export.?report|create.?dashboard|build.?report)\b/i,    label: 'Reports',       desc: 'creates interactive dashboards, charts, and formatted reports', direction: 'output', goalGate: /\b(dashboard|chart|visualis|visualiz|graph|plot|interactive|BI\b|metric|KPI|report|analytics|analy(?:s[ei]s|ze)|summary|insight|breakdown|ranking|trend)\b/i },
+    { pattern: /\b(browser.?use|browser|puppeteer|playwright|headless|selenium|web.?scrap|page.?snapshot)\b/i,         label: 'Browser',       desc: 'navigates pages, captures screenshots, extracts web data', direction: 'input' },
+    { pattern: /\b(http.?request|rest.?api|fetch|webhook|curl|openapi|api.?call|soap|graphql)\b/i,                     label: 'HTTP/API',      desc: 'calls external APIs and webhooks for enrichment or integration', direction: 'input' },
+    { pattern: /\b(send.?email|gmail|smtp|mail|email|outlook|mailchimp|sendgrid|postmark|mailgun)\b/i,                 label: 'Email',         desc: 'delivers results and notifications via email (Gmail, SMTP)', direction: 'output' },
+    { pattern: /\b(slack|teams|discord|telegram|whatsapp|notify|send.?message|post.?message|webhook.?notify)\b/i,      label: 'Messaging',     desc: 'sends notifications to Slack, Teams, Discord, etc.', direction: 'output' },
+    { pattern: /\b(jira|confluence|trello|asana|linear|monday|notion|clickup|ticket|issue.?track|backlog)\b/i,         label: 'Project Tools', desc: 'updates Jira tickets, Confluence pages, and project trackers', direction: 'output' },
+    { pattern: /\b(iot|mqtt|device.?control|actuator|sensor|arduino|raspberry|embedded|plc|scada|modbus|zigbee|zwave)\b/i, label: 'IoT/MQTT', desc: 'publishes commands and data to IoT devices and control systems', direction: 'output' },
+    { pattern: /\b(ml.?train|ml.?predict|model.?infer|model.?train|train.?model|deploy.?model|fine.?tune|embed|vectorize|classify|ner|sentiment|summarize|translate|transcribe|ocr)\b/i, label: 'ML/AI', desc: 'runs ML models for training, inference, classification, or analysis', direction: 'output' },
+    { pattern: /\b(salesforce|hubspot|zoho|pipedrive|crm|customer|lead|contact.?sync|deal|opportunity)\b/i,            label: 'CRM',           desc: 'syncs data with CRM platforms (Salesforce, HubSpot, etc.)', direction: 'output' },
+    { pattern: /\b(s3|google.?drive|dropbox|sharepoint|one.?drive|blob.?storage|cloud.?storage|upload|bucket)\b/i,     label: 'Cloud Storage', desc: 'uploads files to S3, Google Drive, Dropbox, SharePoint', direction: 'output' },
+    { pattern: /\b(github|gitlab|bitbucket|git|pull.?request|commit|merge|deploy|ci.?cd|jenkins|terraform|pulumi)\b/i, label: 'DevOps/Infra', desc: 'creates PRs, triggers deployments, manages infrastructure', direction: 'output' },
+    { pattern: /\b(gsheet|google.?sheet|airtable|smartsheet|spreadsheet|excel|tabular)\b/i,                            label: 'Spreadsheets',  desc: 'reads and writes Google Sheets, Airtable, Excel files', direction: 'output' },
+    { pattern: /\b(calendar|schedule|meeting|zoom|teams.?meet|google.?meet|appointment|event)\b/i,                     label: 'Calendar',      desc: 'schedules meetings, creates calendar events and appointments', direction: 'output' },
+    { pattern: /\b(searchKnowledge|knowledge.?base.?search|rag.?search|vector.?search|semantic.?search)\b/i,           label: 'Knowledge Search', desc: 'searches knowledge bases (docs, PDFs, policies, Excel) for domain context', direction: 'input' },
+    { pattern: /\b(searchGraph|graph.?search|graph.?query|neo4j|knowledge.?graph)\b/i,                                 label: 'Graph Search',  desc: 'queries knowledge graphs for entity relationships and structured facts', direction: 'input' },
+  ]
+
+  const goalLower = (goal || '').toLowerCase()
+
+  // Goal-aware gating: categories with goalGate should only appear in the
+  // delivery channel when the task goal matches. Reports is the prime example —
+  // many agents have publish_dashboard_report scoped but the task is DDL/ERD/docs.
+  function categoryVisible(cat) {
+    if (!cat.goalGate) return true
+    return cat.goalGate.test(goalLower)
+  }
+
+  // Build delivery channel: iterate ALL scoped skills, match against categories.
+  // Deduplicate — one entry per category, even if multiple tools match.
+  const deliverySeen = new Set()
+  deliverySeen.add('Text response') // always present
+  const deliveryMethods = [
+    '→ **Text response** — your final answer is shown to the user',
+  ]
+
+  for (const skillName of skillNames) {
+    for (const cat of TOOL_DELIVERY_CATEGORIES) {
+      if (deliverySeen.has(cat.label)) continue
+      if (cat.pattern.test(skillName)) {
+        // Always track in deliverySeen — the WORKFLOW section uses it to
+        // decide ACQUIRE / DELIVER phases regardless of direction.
+        deliverySeen.add(cat.label)
+        // Only output channels appear in the Delivery Channel section.
+        // Input channels (Browser, HTTP/API, Knowledge Search, Graph Search)
+        // are data sources — they belong in WORKFLOW's ACQUIRE step.
+        // Goal-gated categories (Reports) are suppressed when the goal
+        // doesn't match — e.g. DDL tasks shouldn't suggest dashboards.
+        if (cat.direction !== 'input' && categoryVisible(cat)) {
+          deliveryMethods.push(`→ **${cat.label}** — ${cat.desc}`)
+        }
+        break // one category per tool, take first match
+      }
+    }
+  }
+
+  // Warn when the agent lacks output tools. Two tiers:
+  //   1. Goal mentions output keywords (generate, create, export…) AND no output tools → suggest write_artifact/report
+  //   2. Agent has ZERO output tools at all → always warn (future-proof — catches under-scoped agents early)
+  const goalNeedsOutput = /\b(generate|create|build|write|export|output|save|produce|publish|deliver|send|push|upload|deploy|report|diagram|chart|dashboard|html|svg|pdf|png|file|document)\b/i.test(goalLower)
+  const _OUTPUT_LABELS = new Set(['File Output', 'Reports', 'Email', 'Messaging', 'Cloud Storage', 'Spreadsheets', 'Project Tools', 'DevOps/Infra', 'IoT/MQTT', 'CRM', 'ML/AI', 'Calendar'])
+  const hasAnyOutputTool = [..._OUTPUT_LABELS].some(l => deliverySeen.has(l))
+  if (goalNeedsOutput && !hasAnyOutputTool) {
+    deliveryMethods.push('→ ⚠️ **No file/report tools configured.** To save outputs, add `write_artifact` or a report tool in agent settings.')
+  } else if (!hasAnyOutputTool) {
+    // No output tools at all — warn regardless of goal to catch under-scoped agents
+    deliveryMethods.push('→ ⚠️ **No output tools configured** — results can only be returned as text. Add `write_artifact` (files), `publish_dashboard_report` (charts), `send_email`, or other output tools in agent settings.')
+  }
+
+  parts.push(`### 📤 Delivery Channel\n${deliveryMethods.join('\n')}`)
+
+  // ── 4. SYNTHESIS: Concrete workflow based on actual resources ──────────
+  // TOOL-AWARE: the WORKFLOW adapts to the tools the agent actually has.
+  // Three phases: ACQUIRE (get the data) → PROCESS (transform/analyze) → DELIVER (output).
+  // Each phase only appears if the agent has the relevant tools.
+  const workflowSteps = []
+  let stepNum = 0
+
+  // ── PHASE 1: ACQUIRE — how the agent gets its data ──
+  const acquireMethods = []
+  if (hasKb || hasGraph || hasFiles) {
+    const resourceNames = []
+    if (hasKb) resourceNames.push('knowledge bases')
+    if (hasGraph) resourceNames.push('knowledge graphs')
+    if (hasFiles) resourceNames.push('uploaded files')
+    acquireMethods.push(`search ${resourceNames.join(' and ')}`)
+  }
+  if (deliverySeen.has('Browser')) {
+    acquireMethods.push('use the **browser** to navigate pages, scrape content, and capture data')
+  }
+  if (deliverySeen.has('HTTP/API')) {
+    acquireMethods.push('use **HTTP/REST** calls to fetch data from external APIs and services')
+  }
+  if (acquireMethods.length > 0) {
+    stepNum++
+    const joined = acquireMethods.join('; ')
+    workflowSteps.push(`**STEP ${stepNum} — ACQUIRE:** ${joined.charAt(0).toUpperCase() + joined.slice(1)}.`)
+  }
+
+  // ── PHASE 2: PROCESS — transform, analyze, build (DB-heavy) ──
+  if (hasDb && hasDbTools) {
+    stepNum++
+    const fromKB = acquireMethods.length > 0 ? ' based on acquired context' : ''
+    switch (strategy) {
+      case 'source':
+        workflowSteps.push(`**STEP ${stepNum} — PROFILE:** Use listTables → describeTable → runQuery (SELECT) to explore the database${fromKB}.`)
+        break
+      case 'target':
+        workflowSteps.push(`**STEP ${stepNum} — BUILD:** Use runQuery (CREATE/INSERT) to build or populate the schema${fromKB}.`)
+        break
+      case 'both':
+        workflowSteps.push(`**STEP ${stepNum} — PROFILE & TRANSFORM:** Profile data with SELECT, then transform and write results with CREATE/INSERT${fromKB}.`)
+        break
+      default:
+        workflowSteps.push(`**STEP ${stepNum} — QUERY:** Use runQuery to interact with the database${fromKB}.`)
+    }
+  }
+
+  // Goal-aware: suppress Reports from DELIVER when the goal doesn't call for a dashboard/chart/report.
+  // Many agents have publish_dashboard_report scoped but the task is purely DDL/ERD/documentation.
+  const hasDashboardGoal = /\b(dashboard|chart|visualis|visualiz|graph|plot|interactive|BI\b|metric|KPI|report|analytics|analy(?:s[ei]s|ze)|summary|insight|breakdown|ranking|trend)\b/i.test(goalLower)
+
+  // ── PHASE 3: DELIVER — how the agent sends results out ──
+  // Match the delivery channel categories to produce the right instruction.
+  // Priority: email/messaging > reports > cloud storage > file output > text.
+  const deliverMethods = []
+  if (deliverySeen.has('Email'))        deliverMethods.push('send results via **email**')
+  if (deliverySeen.has('Messaging'))    deliverMethods.push('post a notification to **Slack/Teams/Discord**')
+  if (deliverySeen.has('Project Tools')) deliverMethods.push('update the relevant **Jira ticket / Confluence page**')
+  if (deliverySeen.has('IoT/MQTT'))     deliverMethods.push('publish commands to the **IoT device/MQTT broker**')
+  if (deliverySeen.has('Reports') && hasDashboardGoal) deliverMethods.push('create a **dashboard or report**')
+  if (deliverySeen.has('Cloud Storage')) deliverMethods.push('upload files to **S3 / Google Drive / SharePoint**')
+  if (deliverySeen.has('Spreadsheets'))  deliverMethods.push('write results to **Google Sheets / Airtable / Excel**')
+  if (deliverySeen.has('File Output'))   deliverMethods.push('save all outputs as **files** (write_artifact or local directory)')
+  if (deliverySeen.has('DevOps/Infra'))  deliverMethods.push('create a **PR / deploy / trigger CI-CD**')
+  if (deliverySeen.has('Calendar'))      deliverMethods.push('schedule a **meeting or calendar event**')
+
+  if (deliverMethods.length > 0) {
+    stepNum++
+    const joined = deliverMethods.join('; ')
+    workflowSteps.push(`**STEP ${stepNum} — DELIVER:** ${joined.charAt(0).toUpperCase() + joined.slice(1)}. Do NOT just describe results — take the action.`)
+  } else if (deliverMethods.length === 0 && stepNum > 0) {
+    // Agent acquired/processed but has no output tools — tell them to respond as text
+    stepNum++
+    workflowSteps.push(`**STEP ${stepNum} — RESPOND:** You have no file/output tools configured. Present your findings in a clear summary.`)
+    workflowSteps.push('→ For file generation tasks: output the COMPLETE content directly in a fenced code block (HTML, SVG, CSV, JSON, Markdown). Do NOT truncate — produce the full file. The system will extract and save it.')
+  }
+
+  // ── Fallback: agent has literally nothing but its training data ──
+  if (workflowSteps.length === 0) {
+    workflowSteps.push('**Work from your training data and the task goal.** You have no external resources or output tools.')
+    workflowSteps.push('→ For informational questions: provide a clear, thorough answer based on your training data.')
+    workflowSteps.push('→ For file generation tasks (HTML, SVG, code, CSV, JSON, Markdown): output the COMPLETE content directly in a fenced code block — do NOT truncate or summarise. The system will extract and save it to the artifacts folder.')
+  }
+
+  if (workflowSteps.length > 0) {
+    parts.push(`### 🛠️ YOUR WORKFLOW (follow this — it reflects your ACTUAL available resources)\n${workflowSteps.join('\n')}`)
+  }
+
+  return parts.length > 0
+    ? `\n\n## YOUR ACTUAL CONTEXT\n${parts.join('\n\n')}`
+    : ''
+}
+
+/**
  * Build the system prompt sent to the LLM at the start of each task.
  * Combines agent configuration, available skills, and database context.
  *
@@ -895,7 +1255,62 @@ export function markdownToReportHtml(md) {
  * each run from the agent's current archetype/name/description, so template
  * improvements reach existing agents and are never frozen into the row.
  */
-export async function buildSystemPrompt(agent, skills, goal = '') {
+export async function buildSystemPrompt(agent, skills, goal = '', builtinToolNames = []) {
+  // ── Merge builtin tool scopes with skills so tool detection works ──
+  // Skills come from agent_skills (custom skills); builtinToolNames come
+  // from agent_tool_scopes (write_artifact, browser_use, etc.). The prompt
+  // generation and tool stripping use the combined set to decide what tools
+  // the agent actually has.
+  const allSkills = [...skills]
+  const existingNames = new Set(skills.map(s => (s.name || '').toLowerCase()))
+  for (const name of builtinToolNames) {
+    if (!existingNames.has(name.toLowerCase())) {
+      allSkills.push({ name, description: `Built-in tool: ${name}` })
+    }
+  }
+
+  // ── Inject runtime tools that are added by the task executor (task.service.js)
+  // based on agent configuration, NOT via scopes. These MUST be present in the
+  // tool list and the strip guards below, otherwise the agent is told to use a
+  // tool that doesn't appear in "YOUR AVAILABLE TOOLS" — confusing the LLM.
+  const hasKbAttached = (Array.isArray(agent.knowledge_base_ids) && agent.knowledge_base_ids.length > 0) || !!agent._hasKnowledgeContext
+  const hasGraphAttached = Array.isArray(agent.knowledge_graph_ids) && agent.knowledge_graph_ids.length > 0
+  if (hasKbAttached && !existingNames.has('searchknowledge')) {
+    allSkills.push({ name: 'searchKnowledge', description: 'Search knowledge bases (documents, runbooks, policies) via semantic vector search' })
+  }
+  if (hasGraphAttached && !existingNames.has('searchgraph')) {
+    allSkills.push({ name: 'searchGraph', description: 'Query knowledge graph for entity relationships and structured domain facts' })
+  }
+
+  // ── Inject DB tools when agent has a scoped database connector ──────────
+  // The task executor (task.service.js) auto-injects runQuery/listTables/
+  // describeTable at runtime when a DB connector is scoped to the agent.
+  // Without this injection, buildRuntimeContext reports "you do NOT have
+  // DB tools" and the available-tool list omits them — contradicting what
+  // the runtime actually provides. Mirror the searchKnowledge/searchGraph
+  // pattern: detect the resource and inject the corresponding tool names.
+  const hasDbConnection = !!agent._dbConnectionString
+  const dbStrategyActive = (agent._dataStrategy || 'none') !== 'none'
+  if (hasDbConnection && dbStrategyActive) {
+    if (!existingNames.has('listtables')) {
+      allSkills.push({ name: 'listTables', description: 'List all tables in the connected database' })
+    }
+    if (!existingNames.has('describetable')) {
+      allSkills.push({ name: 'describeTable', description: 'Describe columns, types, and foreign keys for a table' })
+    }
+    if (!existingNames.has('runquery')) {
+      allSkills.push({ name: 'runQuery', description: 'Run a SELECT SQL query against the connected database' })
+    }
+    if (!!agent._dbConnectionMap) {
+      if (!existingNames.has('listdatabases')) {
+        allSkills.push({ name: 'listDatabases', description: 'List all available databases in a multi-database setup' })
+      }
+      if (!existingNames.has('usedatabase')) {
+        allSkills.push({ name: 'useDatabase', description: 'Switch the active database connection' })
+      }
+    }
+  }
+
   // ── User guardrails: strip any embedded archetype blob frozen at creation ──
   const userGuardrails = extractUserGuardrails(agent.system_prompt)
 
@@ -903,53 +1318,215 @@ export async function buildSystemPrompt(agent, skills, goal = '') {
   let archetypePrompt = ''
   try {
     const { generateAgentSystemPrompt } = await import('./agent.service.js')
-    archetypePrompt = await generateAgentSystemPrompt(agent.name, agent.description || '', agent.archetype, agent.tenant_id) || ''
+    archetypePrompt = await generateAgentSystemPrompt(agent.name, agent.description || '', agent.archetype, agent.tenant_id, agent._dataStrategy || 'none') || ''
   } catch {
     archetypePrompt = ''
   }
 
-  // ── Concrete task goal: inject it FIRST inside PRIMARY TASK so the agent's
-  // specific objective — including its key metrics ("25 villas", "50 metres",
-  // quantities, counts) — is always front and centre, not just the generic
-  // role/guardrails. The runtime task loop passes task.goal here.
-  const taskGoal = goal && String(goal).trim() ? String(goal).trim() : ''
-
-  // ── Compose: user's custom guardrails FIRST, then archetype role.
-  // Guardrails contain the SPECIFIC project scope and MUST take priority
-  // over the generic archetype template. If the user says "design villas"
-  // and the template mentions beams, the villas instruction wins.
-  const cleanGuardrails = userGuardrails
-    .replace(/^##\s+AGENT[- ]SPECIFIC\s+INSTRUCTIONS\s*/im, '')
-    .replace(/^##\s+Guardrails?\s*(?:\([^)]*\))?\s*/gim, '')
-    .trim()
-  let base
-  if (archetypePrompt && cleanGuardrails) {
-    // Guardrails FIRST — they define the actual project, archetype is supplementary
-    base = `## PRIMARY TASK (follow this exactly)\n${taskGoal ? `TASK GOAL: ${taskGoal}\n\n` : ''}${cleanGuardrails}\n\n## AGENT ROLE & CAPABILITIES\n${archetypePrompt}`
-  } else if (archetypePrompt) {
-    base = `${archetypePrompt}${taskGoal ? `\n\n## CURRENT TASK\n${taskGoal}` : ''}`
-  } else {
-    base = `${cleanGuardrails || `You are ${agent.name}, an AI agent. ${agent.description || ''}`}${taskGoal ? `\n\n## CURRENT TASK\n${taskGoal}` : ''}`
+  // ── Fallback: agents without an archetype (null or unrecognised) get a
+  // minimal but complete role prompt. Without this, null-archetype agents
+  // receive bare-bones prompts with no role, capabilities, or rules — the
+  // LLM has no persona and drifts unpredictably.
+  if (!archetypePrompt) {
+    const _agentName = agent.name || 'AI Agent'
+    const _agentDesc = agent.description || 'general-purpose assistant'
+    const hasOutputTools = allSkills.some(s => /\b(write.?artifact|publish.?dashboard|send.?email|slack|teams|webhook.?notify|s3|google.?drive|gsheet|airtable|jira|confluence|github|gitlab|deploy)\b/i.test(s.name))
+    archetypePrompt = `## YOUR ROLE\nYou are **${_agentName}**, a ${_agentDesc}.\n\n## HOW TO WORK\n- Use ONLY the tools listed in YOUR AVAILABLE TOOLS above — never invent tool names\n- Follow the workflow in YOUR ACTUAL CONTEXT exactly\n- Provide clear, thorough, well-structured results\n${hasOutputTools ? '- Use your output tools to save or deliver final results — do NOT just describe what you would do' : '- You have no output tools — deliver results directly in your response (fenced code blocks for files, tables for data)'}\n\n## CORE RULES\n- Only call tools that appear in YOUR AVAILABLE TOOLS\n- If you cannot complete the task with available tools, explain what is missing — do not fabricate results\n- Follow the delivery channel instructions in YOUR ACTUAL CONTEXT`
   }
-
-  const skillList = skills.length > 0
-    ? `\n\nYour available skills:\n${skills.map(s => `- ${s.name}: ${s.description}`).join('\n')}`
-    : ''
 
   // ── Config-driven: DB connection presence alone determines whether DB
   // context is injected. No goal-regex guessing — the agent's system_prompt
   // and tool scopes define what it should do; guardrails catch violations.
   const hasDb = !!agent._dbConnectionString
+  const showDb = hasDb && (agent._dataStrategy || 'none') !== 'none'
+
+  // ── Strip DB-specific tool references from the archetype when the agent
+  // has NO database connection. Prevents the LLM from hallucinating
+  // runQuery / listTables / describeTable calls on agents without DB tools.
+  if (!hasDb && archetypePrompt) {
+    archetypePrompt = archetypePrompt
+      .split('\n')
+      .filter(line => !/\b(listTables|describeTable|runQuery|listDatabases|useDatabase)\b/i.test(line)
+                       && !/^\d+\.\s+(If you have SQL database tools:|Call \`)/i.test(line)
+                       && !/\bIf a query fails\b/i.test(line)
+                       && !/\bread the error, fix the SQL\b/i.test(line))
+      .join('\n')
+      .replace(/before touching the database\.?\s*/gi, '. ')
+      .replace(/,\s*not in PostgreSQL\.?/gi, '.')
+      .replace(/SQL tools for querying databases,\s*/gi, '')
+      .replace(/You have direct access to databases via SQL tools,\s*/gi, '')
+      .replace(/You specialise in querying databases and\s*/gi, 'You specialise in ')
+      .replace(/querying databases and\s*/gi, '')
+  }
+
+  // ── Strip knowledge-graph references when no graph is attached ──
+  // The hardcoded archetype templates may mention searchGraph / knowledge
+  // graphs even when the agent has none. Strip them so the LLM doesn't
+  // hallucinate graph queries on agents without graph access.
+  const hasGraph = Array.isArray(agent.knowledge_graph_ids) && agent.knowledge_graph_ids.length > 0
+  if (!hasGraph && archetypePrompt) {
+    archetypePrompt = archetypePrompt
+      // Inline mentions: "and knowledge graphs for entity relationships"
+      .replace(/,\s*and knowledge graphs for entity relationships\.?/gi, '')
+      .replace(/and knowledge graphs for entity relationships\.?/gi, '')
+      // Inline searchGraph references
+      .replace(/and \`searchGraph\`\s*\(for entity relationships\)\s*/gi, '')
+      .replace(/\`searchGraph\`\s*\(for[^)]*\)\s*/gi, '')
+      // Lines that only mention searchGraph
+      .split('\n')
+      .filter(line => !/\bsearchGraph\b/i.test(line))
+      .join('\n')
+      // Remove orphaned fragment: "knowledge bases for docs/specs," left after
+      // DB stripping removed the preceding "You have direct access to..." text.
+      // The runtime context already declares KBs — archetype doesn't need to repeat.
+      .replace(/^\s*knowledge bases for docs\/specs,?\s*$/gim, '')
+      // Cleanup double punctuation / whitespace
+      .replace(/,\s*,/g, ',')
+      .replace(/,\s*\./g, '.')
+      .replace(/\n{3,}/g, '\n\n')
+  }
+
+  // ── Strip tool mentions the agent doesn't have scoped ──
+  // Archetype templates talk about publish_dashboard_report, browser_use,
+  // http_request, etc. as if the agent always has them. Strip references
+  // to tools that aren't in the agent's actual skill set so the agent
+  // focuses ONLY on tools it actually has.
+  if (archetypePrompt) {
+    const hasPublishReport = allSkills.some(s => /\bpublish.?dashboard.?report\b/i.test(s.name))
+    const hasBrowser = allSkills.some(s => /\bbrowser.?use\b|\bplaywright\b|\bpuppeteer\b/i.test(s.name))
+    const hasHttp = allSkills.some(s => /\bhttp.?request\b|\brest.?api\b|\bfetch\b/i.test(s.name))
+    const hasWriteArtifact = allSkills.some(s => /\bwrite.?artifact\b/i.test(s.name))
+    const hasFileSearch = allSkills.some(s => /\bfile.?search\b/i.test(s.name))
+    // hasKbAttached defined above (after allSkills merge) — reuse it
+    const hasKbSearch = allSkills.some(s => /\bsearchKnowledge\b|\bknowledge.?base.?search\b|\brag.?search\b/i.test(s.name))
+
+    // Strip searchKnowledge references ONLY if the agent has no KBs attached AND no KB search tool
+    if (!hasKbSearch && !hasKbAttached) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bsearchKnowledge\b/i.test(line))
+        .join('\n')
+        .replace(/,?\s*`searchKnowledge`\s*\([^)]*\)/gi, '')
+    }
+
+    if (!hasPublishReport) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bpublish_dashboard_report\b/i.test(line))
+        .join('\n')
+    }
+    // Goal-aware: when the task goal doesn't mention dashboards/charts/reports,
+    // strip publish_dashboard_report references from OUTPUT RULES so the agent
+    // isn't distracted by instructions about a tool irrelevant to this task.
+    // The tool stays listed in YOUR AVAILABLE TOOLS (it IS scoped), but it
+    // won't be presented as a delivery option or workflow step.
+    const _goalLower = (goal || '').toLowerCase()
+    const _hasDashboardGoal = /\b(dashboard|chart|visualis|visualiz|graph|plot|interactive|BI\b|metric|KPI|report|analytics|analy(?:s[ei]s|ze)|summary|insight|breakdown|ranking|trend)\b/i.test(_goalLower)
+    if (hasPublishReport && !_hasDashboardGoal) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bpublish_dashboard_report\b/i.test(line))
+        .join('\n')
+    }
+    if (!hasBrowser) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bbrowser_use\b/i.test(line))
+        .join('\n')
+        .replace(/,\s*\`browser_use\`\s*for[^,.]*/gi, '')
+    }
+    if (!hasHttp) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bhttp_request\b/i.test(line))
+        .join('\n')
+    }
+    if (!hasWriteArtifact) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bwrite_artifact\b/i.test(line))
+        .join('\n')
+    }
+    if (!hasFileSearch) {
+      archetypePrompt = archetypePrompt
+        .split('\n')
+        .filter(line => !/\bfile_search\b/i.test(line))
+        .join('\n')
+    }
+
+    // Collapse multiple blank lines from stripping
+    archetypePrompt = archetypePrompt.replace(/\n{3,}/g, '\n\n')
+
+    // Renumber ordered lists within each section after stripping.
+    // Gaps like "7. 8. 10." become "1. 2. 3." — but scoped per ## section
+    // so HOW TO WORK and OUTPUT RULES each start from 1 independently.
+    archetypePrompt = archetypePrompt.split(/(?=^## )/m).map(section => {
+      let counter = 0
+      return section.replace(/^(\d+)\.\s/gm, () => `${++counter}. `)
+    }).join('')
+
+    // Clean up orphaned fragments left by stripping: ", not in PostgreSQL."
+    // or "Your schema specs..." that was a continuation of removed text.
+    archetypePrompt = archetypePrompt
+      .replace(/,\s*not in PostgreSQL\.?/gi, '')
+      .replace(/\)\s+Your schema specs/gi, '). Your schema specs')
+      .replace(/^\s*Your schema specs, policies, and data dictionaries may live in the knowledge base\.?\s*$/gim, '- Your schema specifications, policies, and data dictionaries live in the knowledge base — search for them.')
+      // Remove empty lines between bullet/list items
+      .replace(/\n{3,}/g, '\n\n')
+      // Remove empty ## sections (heading followed by nothing or only whitespace)
+      .replace(/^##\s+[^\n]+\n{2,}/gm, '')
+  }
+
+  // ── Concrete task goal: inject it FIRST inside PRIMARY TASK so the agent's
+  // specific objective — including its key metrics, quantities, and counts —
+  // is always front and centre, not just the generic role/guardrails.
+  // The runtime task loop passes task.goal here.
+  const taskGoal = goal && String(goal).trim() ? String(goal).trim() : ''
+
+  // ── Compose: user's custom guardrails FIRST, then archetype role.
+  // Guardrails contain the SPECIFIC project scope and MUST take priority
+  // over the generic archetype template. User-defined instructions always
+  // override generic template guidance.
+  const cleanGuardrails = userGuardrails
+    .replace(/^##\s+AGENT[- ]SPECIFIC\s+INSTRUCTIONS\s*/im, '')
+    .replace(/^##\s+Guardrails?\s*(?:\([^)]*\))?\s*/gim, '')
+    .trim()
+  let base
+
+  // ── Tool awareness: inject the actual available skill names at the TOP ──
+  // BEFORE guardrails, so the LLM knows what tools exist and won't attempt to
+  // use external tools mentioned in old guardrail text (Lucidchart, Draw.io,
+  // Apache NiFi, Talend, etc.). This is critical for preventing tool-hallucination.
+  const availableToolNames = allSkills.length > 0
+    ? allSkills.map(s => s.name).join(', ')
+    : ''
+
+  // ── Runtime context: synthesized from ACTUAL available resources ──
+  // (KBs, graphs, DB connection, data_strategy, output tools, uploaded files).
+  // This is PRESCRIPTIVE — it tells the LLM the concrete workflow based on
+  // what it actually has, OVERRIDING the generic archetype template.
+  const runtimeContext = buildRuntimeContext(agent, allSkills, goal)
+
+  if (archetypePrompt && cleanGuardrails) {
+    // Guardrails FIRST — they define the actual project, archetype is supplementary
+    base = `## YOUR AVAILABLE TOOLS (ONLY these exist — do NOT attempt to use any other tools)\n${availableToolNames || 'None configured — add tool scopes in agent settings'}\n\n## PRIMARY TASK (follow this exactly)\n${taskGoal ? `TASK GOAL: ${taskGoal}\n\n` : ''}${cleanGuardrails}${runtimeContext}\n\n## AGENT ROLE & CAPABILITIES\n${archetypePrompt}`
+  } else if (archetypePrompt) {
+    // Goal is the PRIMARY driver — always put it front and centre, even without user guardrails
+    base = `## YOUR AVAILABLE TOOLS (ONLY these exist — do NOT attempt to use any other tools)\n${availableToolNames || 'None configured — add tool scopes in agent settings'}\n\n## PRIMARY TASK (follow this exactly)\n${taskGoal ? `TASK GOAL: ${taskGoal}\n\n` : ''}${runtimeContext}\n\n## AGENT ROLE & CAPABILITIES\n${archetypePrompt}`
+  } else {
+    base = `## YOUR AVAILABLE TOOLS (ONLY these exist — do NOT attempt to use any other tools)\n${availableToolNames || 'None configured — add tool scopes in agent settings'}${runtimeContext}\n\n${cleanGuardrails || `You are ${agent.name}, an AI agent. ${agent.description || ''}`}${taskGoal ? `\n\n## CURRENT TASK\n${taskGoal}` : ''}`
+  }
 
   // ── Database context: inject only when a DB connection exists ──
-  // Include the DB engine type and trained-vs-connector distinction so the
-  // LLM uses the correct SQL dialect and has the right confidence level.
+  // Tailored to the agent's data_strategy: source (read-only), target
+  // (write-only), both (read+write), or none (no DB access).
   let dbContext = ''
-  if (hasDb) {
+  if (showDb) {
     const dbType    = agent._dbType || 'postgresql'
     const dbName    = agent._activeDbName || ''
     const isTrained = !!agent._isTrainedModel
     const multiDb   = !!agent._dbConnectionMap
+    const strategy  = agent._dataStrategy || 'none'
 
     const modelNote = isTrained
       ? `- Model type: TRAINED — fine-tuned specifically for this database. High confidence in SQL.`
@@ -963,15 +1540,31 @@ export async function buildSystemPrompt(agent, skills, goal = '') {
       ? `- MULTI-DATABASE: call listDatabases to see all available databases, then useDatabase to switch.`
       : ''
 
+    // Strategy-specific SQL guidance
+    let strategyNote = ''
+    switch (strategy) {
+      case 'source':
+        strategyNote = `- READ-ONLY: Use SELECT queries only. NEVER execute CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, or TRUNCATE. Always add LIMIT to avoid runaway result sets.`
+        break
+      case 'target':
+        strategyNote = `- WRITE-ONLY (Target): Use runQuery for CREATE TABLE, INSERT, UPDATE statements. Use SELECT only to verify your writes (with LIMIT). Read requirements from KB/files — not from existing tables unless checking structure with describeTable.`
+        break
+      case 'both':
+        strategyNote = `- READ + WRITE: Profile existing data with SELECT (always add LIMIT), then transform and write results with CREATE TABLE / INSERT. Verify writes succeed before proceeding.`
+        break
+      default:
+        strategyNote = `- Only SELECT queries are allowed. Always add LIMIT to avoid runaway result sets.`
+    }
+
     dbContext = `
 
 ## DATABASE ACCESS
 - Engine: ${dbType.toUpperCase()}${dbName ? ` (active database: ${dbName})` : ''}
 ${modelNote}
 ${multiNote ? multiNote + '\n' : ''}- ${schemaNote}
-- NEVER guess column or table names — use describeTable to verify before writing SQL.
-- Only SELECT queries are allowed. Always add LIMIT to avoid runaway result sets.`
+${strategyNote}
+- NEVER guess column or table names — use describeTable to verify before writing SQL.`
   }
 
-  return `${base}${skillList}${dbContext}`
+  return `${base}${dbContext}`
 }

@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 import { query } from '../db/pool.js'
-import { complete, completeStream, embed } from './llm.service.js'
+import { complete, completeStream, embed, probeToolCapability } from './llm.service.js'
 import { searchKnowledge } from './knowledge.service.js'
 import { auditLog } from '../utils/audit.js'
 import { AppError } from '../utils/errors.js'
@@ -26,6 +26,7 @@ import {
   getConnectorToolDefinitions,
   executeConnectorTool,
   CONNECTOR_TOOL_PREFIXES,
+  validateContentQuality,
 } from './connector-tools.service.js'
 import { createWorkflow } from './workflow.service.js'
 import { createAgent, generateAgentSystemPrompt } from './agent.service.js'
@@ -33,7 +34,7 @@ import { executeCustomSkill, executePythonSkill } from './skill-executor.service
 import { cached } from './cache.service.js'
 import { hashKey, safeParseJSON, tryParseToolCallFromText, stripThinkBlocks, signA2ACallToken } from './task-json-repair.js'
 import { retrieveKnowledge, loadEpisodicMemory, saveEpisodicMemory } from './task-knowledge.js'
-import { extractConfidence, buildRichReportHtml, buildSvgReportHtml, buildD3ReportHtml, buildMixedReportHtml, sanitiseReportHtml, synthesiseReportHtml, markdownToReportHtml, buildSystemPrompt } from './task-reports.js'
+import { extractConfidence, extractGoalDeliverables, HALLUCINATION_FABRICATION_PATTERNS, HALLUCINATION_FUTURE_TENSE_PATTERNS, HALLUCINATION_DEFLECTION_PATTERNS, buildRichReportHtml, buildSvgReportHtml, buildD3ReportHtml, buildMixedReportHtml, sanitiseReportHtml, synthesiseReportHtml, markdownToReportHtml, buildSystemPrompt } from './task-reports.js'
 import { resolveAgentScopes, addScope, getArchetypeScopePresets } from './agent-scope.service.js'
 import { searchFiles, assertSafeUrl, isValidDockerImage, isValidHost, safeSpawn } from '../utils/safe-exec.js'
 import {
@@ -41,6 +42,14 @@ import {
   createApprovalRequest,
   AUTONOMY_LEVELS,
 } from './hitl.service.js'
+
+// ── All known database-type connector tool_ids ──────────────────────────────
+// When adding a new database connector type, add its tool_id here so it's
+// recognised as a database (not an action connector) everywhere in the system.
+const ALL_DB_TOOL_IDS = new Set([
+  'database', 'postgres', 'mysql', 'snowflake', 'redshift',
+  'bigquery', 'mssql', 'sqlite', 'mongodb',
+])
 
 // ── Compressed system prompt cache ───────────────────────────────────────────
 // Keyed by `${agentId}:${hash(fullPrompt)}`. Cleared automatically when the
@@ -201,6 +210,72 @@ function generateReportTitle(goal) {
   return title
 }
 
+// ── Context-window management (sliding window for long tool loops) ────────
+// execMessages grows 2+ messages per tool iteration. Small local models
+// (qwen3:4b, 32k context) overflow after ~15-20 turns. Large tool results
+// (DB queries, web scrapes) accelerate the blow-up.
+//
+// Strategy: sliding window. The "foundation" (system prompt, memory blocks,
+// knowledge, user goal) is always preserved. Only runtime assistant/tool
+// messages are trimmed. When the turn count exceeds MAX_TURNS, the oldest
+// turns are dropped and a truncation marker is injected so the LLM knows
+// context was pruned but all upfront instructions are intact.
+//
+// A "turn" = one assistant message with tool_calls + all its tool-result
+// follow-ups (1 assistant can call N tools in one response).
+//
+// Default: keep last 8 turns. Override per-agent via max_context_pairs.
+function manageContextWindow(execMessages, agent, taskId) {
+  const MAX_TURNS = agent?.max_context_pairs || 8
+
+  // Find the first runtime message (assistant with tool_calls). Everything
+  // before this is "foundation" and must never be removed.
+  const firstRuntimeIdx = execMessages.findIndex(m =>
+    m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0
+  )
+  if (firstRuntimeIdx === -1) return // No tool calls yet — nothing to trim
+
+  // Count assistant turns in the runtime segment
+  let turnCount = 0
+  for (let i = firstRuntimeIdx; i < execMessages.length; i++) {
+    if (execMessages[i].role === 'assistant' && Array.isArray(execMessages[i].tool_calls) && execMessages[i].tool_calls.length > 0) {
+      turnCount++
+    }
+  }
+
+  if (turnCount <= MAX_TURNS) return
+
+  // Find the last MAX_TURNS turns from the end
+  let found = 0
+  let cutoff = firstRuntimeIdx
+  for (let i = execMessages.length - 1; i >= firstRuntimeIdx; i--) {
+    if (execMessages[i].role === 'assistant' && Array.isArray(execMessages[i].tool_calls) && execMessages[i].tool_calls.length > 0) {
+      found++
+      if (found === MAX_TURNS) { cutoff = i; break }
+    }
+  }
+
+  const foundation = execMessages.slice(0, firstRuntimeIdx)
+  const kept = execMessages.slice(cutoff)
+  const dropped = turnCount - MAX_TURNS
+
+  // Estimate token savings for the log
+  const droppedChars = execMessages.slice(firstRuntimeIdx, cutoff)
+    .reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0)
+  const keptChars = kept.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : 0), 0)
+
+  // Replace in-place
+  execMessages.length = 0
+  execMessages.push(...foundation)
+  execMessages.push({
+    role: 'user',
+    content: `🔁 Context truncated — ${dropped} earlier tool turns removed. The system prompt, knowledge, and task instructions are fully preserved above. ${MAX_TURNS} most recent turns are shown below. Continue the task from here.`
+  })
+  execMessages.push(...kept)
+
+  console.log(`[Task ${taskId}] Context: dropped ${dropped} turns (~${Math.round(droppedChars / 4)} est. tokens freed), keeping ${foundation.length} foundation + ${kept.length} runtime (${execMessages.length} total, ~${Math.round(keptChars / 4)} runtime tokens)`)
+}
+
 // ── Generic code-artifact extractor ─────────────────────────────────────────
 // When an LLM (especially local Ollama models) cannot emit structured tool
 // calls, it writes the artifact content directly in the response text as a
@@ -257,238 +332,6 @@ function stringifyToolResult(result) {
   return str
 }
 
-// ══════════════════════════════════════════════════════════════════
-// Diagram templates — module scope so both the deterministic diagram
-// fast-path (executeTask) and the auto-report regeneration can use them.
-// ══════════════════════════════════════════════════════════════════
-// Parse a beam goal (e.g. "25 kN/m over a 6 meter span", "Steel") into
-// a spec the beamDiagramTemplate understands. Falls back to sensible
-// defaults when the goal has no numbers.
-function parseBeamSpec(goal) {
-  const g = (goal || '')
-  const lengthMatch = g.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|meters|metre|metres|ft|feet)\b/i)
-  const loadMatch = g.match(/(\d+(?:\.\d+)?)\s*(?:kn\/m|kn\/m2|kpa|kip|lb\/ft|n\/m|kg\/m)\b/i)
-  const matMatch = g.match(/\b(steel|concrete|wood|timber|aluminum|aluminium|composite)\b/i)
-  return {
-    length: lengthMatch ? `${lengthMatch[1]} m` : '6 m',
-    loadType: /point|concentrated/i.test(g) ? 'Point Load' : 'UDL',
-    loadValue: loadMatch ? `${loadMatch[1]} kN/m` : '25 kN/m',
-    supportLeft: /cantilever|fixed\s+left/i.test(g) ? 'Fixed' : 'Pinned',
-    supportRight: /cantilever/i.test(g) ? 'Free' : 'Roller',
-    material: matMatch ? matMatch[1].charAt(0).toUpperCase() + matMatch[1].slice(1) : 'Steel',
-  }
-}
-
-function beamDiagramTemplate(spec) {
-  const L = spec.length || 'L'
-  const load = spec.loadValue || 'w'
-  const loadType = spec.loadType || 'UDL'
-  const supL = spec.supportLeft || 'Fixed'
-  const supR = spec.supportRight || 'Roller'
-  const mat = spec.material || 'Steel'
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="100%" height="100%">
-  <defs>
-    <marker id="arrowRight" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#1e40af"/>
-    </marker>
-    <marker id="arrowDown" markerWidth="7" markerHeight="10" refX="3.5" refY="10" orient="auto">
-      <polygon points="0 0, 7 0, 3.5 10" fill="#dc2626"/>
-    </marker>
-    <marker id="arrowUp" markerWidth="7" markerHeight="10" refX="3.5" refY="0" orient="auto">
-      <polygon points="0 10, 7 10, 3.5 0" fill="#16a34a"/>
-    </marker>
-  </defs>
-  <rect width="800" height="400" fill="#ffffff" rx="4"/>
-  <rect x="100" y="160" width="600" height="24" fill="#1e293b" rx="3" stroke="#0f172a" stroke-width="1.5"/>
-  <line x1="100" y1="172" x2="700" y2="172" stroke="#94a3b8" stroke-width="1" stroke-dasharray="8,6"/>
-  <polygon points="130,184 190,184 160,230" fill="#64748b" stroke="#334155" stroke-width="1.5"/>
-  <line x1="110" y1="230" x2="210" y2="230" stroke="#334155" stroke-width="2"/>
-  <line x1="120" y1="230" x2="125" y2="238" stroke="#334155" stroke-width="1"/>
-  <line x1="135" y1="230" x2="140" y2="238" stroke="#334155" stroke-width="1"/>
-  <line x1="150" y1="230" x2="155" y2="238" stroke="#334155" stroke-width="1"/>
-  <line x1="165" y1="230" x2="170" y2="238" stroke="#334155" stroke-width="1"/>
-  <line x1="180" y1="230" x2="185" y2="238" stroke="#334155" stroke-width="1"/>
-  <line x1="195" y1="230" x2="200" y2="238" stroke="#334155" stroke-width="1"/>
-  <circle cx="670" cy="202" r="10" fill="none" stroke="#334155" stroke-width="2"/>
-  <circle cx="650" cy="202" r="10" fill="none" stroke="#334155" stroke-width="2"/>
-  <line x1="630" y1="222" x2="690" y2="222" stroke="#334155" stroke-width="2"/>
-  <line x1="140" y1="130" x2="140" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="220" y1="130" x2="220" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="300" y1="130" x2="300" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="380" y1="130" x2="380" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="460" y1="130" x2="460" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="540" y1="130" x2="540" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <line x1="620" y1="130" x2="620" y2="160" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <text x="380" y="118" text-anchor="middle" font-size="13" fill="#dc2626" font-weight="600" font-family="system-ui">${load} (${loadType})</text>
-  <line x1="100" y1="260" x2="700" y2="260" stroke="#64748b" stroke-width="1"/>
-  <line x1="100" y1="255" x2="100" y2="265" stroke="#64748b" stroke-width="1"/>
-  <line x1="700" y1="255" x2="700" y2="265" stroke="#64748b" stroke-width="1"/>
-  <text x="400" y="280" text-anchor="middle" font-size="13" fill="#334155" font-weight="500" font-family="system-ui">Span = ${L}</text>
-  <text x="160" y="255" text-anchor="middle" font-size="12" fill="#475569" font-family="system-ui">${supL}</text>
-  <text x="660" y="240" text-anchor="middle" font-size="12" fill="#475569" font-family="system-ui">${supR}</text>
-  <text x="400" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a" font-family="system-ui">Beam Diagram — ${mat}</text>
-  <rect x="20" y="320" width="12" height="12" fill="#1e293b" rx="2"/>
-  <text x="38" y="331" font-size="11" fill="#475569" font-family="system-ui">Beam (${mat})</text>
-  <line x1="140" y1="326" x2="170" y2="326" stroke="#dc2626" stroke-width="1.8" marker-end="url(#arrowDown)"/>
-  <text x="178" y="331" font-size="11" fill="#475569" font-family="system-ui">Applied Load</text>
-  <polygon points="270,320 280,332 260,332" fill="#64748b"/>
-  <text x="295" y="331" font-size="11" fill="#475569" font-family="system-ui">${supL} Support</text>
-  <circle cx="380" cy="326" r="6" fill="none" stroke="#334155" stroke-width="1.5"/>
-  <text x="400" y="331" font-size="11" fill="#475569" font-family="system-ui">${supR} Support</text>
-</svg>`
-}
-
-// Report Format Template — fallback when LLM generates poor output.
-// Returns a proper diagram template for the detected task type.
-function reportTemplateForGoal(goal) {
-  const g = (goal || '').toLowerCase()
-  // Require compound engineering phrases — single words like 'support', 'moment',
-  // 'load', 'structural' are too common in unrelated goals (customer-support, workload, etc.)
-  // Also skip if 'beam' appears only in a negation ("do NOT create a beam diagram").
-  const hasNegatedBeam = /\b(?:not|never|no|don'?t|do\s+not|avoid)\b.{0,50}\bbeam\b/i.test(g)
-  const isBeam = !hasNegatedBeam && (
-    /\bbeam\s+(?:diagram|analysis|design|load|calculation)\b/.test(g)
-    || /\bstructural\s+(?:analysis|diagram|frame|calculation|drawing)\b/.test(g)
-    || /\bbending\s+moment\b/.test(g)
-    || /\bshear\s+force\b/.test(g)
-    || /\bdeflection\s+(?:diagram|analysis|curve)\b/.test(g)
-    || /\bload\s+case\b/.test(g)
-  )
-  // 'workflow' alone matches coordinator/orchestrator goals — exclude it;
-  // only match explicit diagram-drawing requests.
-  const isFlow  = /flow\s*chart|process\s*flow|sequence\s+diagram|decision\s*tree/i.test(g)
-  const isErd   = /er\s*diagram|entity\s*relationship|data\s*model|schema\s*diagram|table\s*relationship/i.test(g)
-  const isOrg   = /org\s*chart|organization\s+chart|hierarchy\s+chart|team\s+structure/i.test(g)
-
-  if (isBeam) {
-    return {
-      format: 'svg',
-      hint: `You MUST generate a proper SVG beam diagram. Use viewBox="0 0 800 400". Draw a horizontal beam (rect), fixed/pinned support (triangle) on left, roller support (circle) on right, distributed load arrows (UDL) pointing down, span dimension line with labels, and a legend. Include at least 5 load arrows, support hatching, and text labels for supports/span/material. Do NOT output just a description — output the raw <svg>...</svg>.`,
-      template: beamDiagramTemplate({ length: 'L', loadType: 'UDL', loadValue: 'w', supportLeft: 'Fixed', supportRight: 'Roller', material: 'Steel' })
-    }
-  }
-  if (isFlow) {
-    return {
-      format: 'svg',
-      hint: `You MUST generate a proper SVG flowchart. Use viewBox="0 0 900 700". Draw rounded rectangles for steps, diamonds for decisions (rhombus), arrows connecting them, and text labels inside each shape. Use colors: #3b82f6 for start/end, #f0fdf4 for steps, #fef3c7 for decisions. Include at least 5 nodes. Do NOT output a description — output raw <svg>...</svg>.`
-    }
-  }
-  if (isErd) {
-    return {
-      format: 'html',
-      hint: `You MUST generate an ER diagram using Mermaid.js. Include: <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>, then <div class="mermaid">erDiagram ...</div> with all entities, attributes, and relationships using proper Mermaid ER syntax. Use the actual table/column names from the describeTable results.`
-    }
-  }
-  if (isOrg) {
-    return {
-      format: 'svg',
-      hint: `You MUST generate a proper SVG org chart. Use viewBox="0 0 800 600". Draw boxes for each role connected by lines, with name/title text inside. CEO at top, then directors, then managers. Use hierarchical layout. Do NOT output a description — output raw <svg>...</svg>.`
-    }
-  }
-
-  const isVilla = /\b(?:villa|site\s*plan|residential\s+(?:layout|plan|design)|housing\s+(?:layout|plan))\b/i.test(g)
-  if (isVilla) {
-    return {
-      format: 'svg',
-      hint: 'villa-site-plan',
-      template: villaSitePlanTemplate(),
-    }
-  }
-
-  return null
-}
-
-/**
- * Deterministic villa site plan SVG — 5 villas (V1-V5) arranged around a
- * central garden, with an access road along the bottom edge.
- */
-function villaSitePlanTemplate() {
-  // Layout: 900×700 canvas
-  // Road: y=640, full width
-  // Garden: centre ellipse at (450,350)
-  // Villas: V1 top-left, V2 top-right, V3 right-mid, V4 bottom-right, V5 bottom-left
-  const villas = [
-    { id: 'V1', x: 120, y: 110, w: 140, h: 100, color: '#bfdbfe', stroke: '#3b82f6' },
-    { id: 'V2', x: 640, y: 110, w: 140, h: 100, color: '#bbf7d0', stroke: '#22c55e' },
-    { id: 'V3', x: 720, y: 290, w: 140, h: 100, color: '#fef9c3', stroke: '#eab308' },
-    { id: 'V4', x: 640, y: 480, w: 140, h: 100, color: '#fce7f3', stroke: '#ec4899' },
-    { id: 'V5', x: 120, y: 480, w: 140, h: 100, color: '#e0e7ff', stroke: '#6366f1' },
-  ]
-  const villaRects = villas.map(v => `
-  <rect x="${v.x}" y="${v.y}" width="${v.w}" height="${v.h}" rx="8" fill="${v.color}" stroke="${v.stroke}" stroke-width="2.5"/>
-  <text x="${v.x + v.w / 2}" y="${v.y + v.h / 2 - 8}" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">${v.id}</text>
-  <text x="${v.x + v.w / 2}" y="${v.y + v.h / 2 + 12}" text-anchor="middle" font-size="11" fill="#64748b">3 Bed / 2 Bath</text>
-  <text x="${v.x + v.w / 2}" y="${v.y + v.h / 2 + 26}" text-anchor="middle" font-size="11" fill="#64748b">180 m²</text>`).join('')
-
-  // Paths from each villa to garden centre (450,350)
-  const pathLines = villas.map(v => {
-    const cx = v.x + v.w / 2
-    const cy = v.y + v.h / 2
-    return `<line x1="${cx}" y1="${cy}" x2="450" y2="350" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4" opacity="0.7"/>`
-  }).join('\n  ')
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700" width="900" height="700" font-family="Arial, sans-serif">
-  <!-- Background -->
-  <rect width="900" height="700" fill="#f8fafc"/>
-  <!-- Title -->
-  <text x="450" y="42" text-anchor="middle" font-size="22" font-weight="bold" fill="#0f172a">Residential Site Plan — 5 Villa Development</text>
-  <text x="450" y="62" text-anchor="middle" font-size="13" fill="#64748b">Total plot: 1.2 acres | 5 × 3-bedroom villas | Central garden | Access road</text>
-  <!-- Plot boundary -->
-  <rect x="50" y="80" width="800" height="570" rx="4" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="10,5"/>
-  <!-- Garden -->
-  <ellipse cx="450" cy="350" rx="130" ry="95" fill="#dcfce7" stroke="#86efac" stroke-width="2"/>
-  <text x="450" y="344" text-anchor="middle" font-size="14" font-weight="bold" fill="#166534">Central</text>
-  <text x="450" y="362" text-anchor="middle" font-size="14" fill="#166534">Garden</text>
-  <!-- Path lines to garden -->
-  ${pathLines}
-  <!-- Villas -->
-  ${villaRects}
-  <!-- Access road -->
-  <rect x="50" y="630" width="800" height="30" rx="3" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
-  <text x="450" y="651" text-anchor="middle" font-size="13" fill="#475569" font-weight="bold">ACCESS ROAD</text>
-  <!-- Road entry arrows -->
-  <polygon points="100,655 85,642 85,668" fill="#94a3b8"/>
-  <polygon points="800,655 815,642 815,668" fill="#94a3b8"/>
-  <!-- North indicator -->
-  <circle cx="845" cy="115" r="22" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
-  <text x="845" y="101" text-anchor="middle" font-size="11" font-weight="bold" fill="#0f172a">N</text>
-  <polygon points="845,106 840,126 845,120 850,126" fill="#0f172a"/>
-  <!-- Scale bar -->
-  <line x1="680" y1="600" x2="780" y2="600" stroke="#475569" stroke-width="2"/>
-  <line x1="680" y1="595" x2="680" y2="605" stroke="#475569" stroke-width="2"/>
-  <line x1="780" y1="595" x2="780" y2="605" stroke="#475569" stroke-width="2"/>
-  <text x="730" y="618" text-anchor="middle" font-size="11" fill="#475569">50 m</text>
-  <!-- Legend -->
-  <rect x="55" y="90" width="120" height="88" rx="4" fill="white" stroke="#e2e8f0" stroke-width="1"/>
-  <text x="115" y="106" text-anchor="middle" font-size="11" font-weight="bold" fill="#0f172a">Legend</text>
-  <rect x="62" y="112" width="14" height="10" fill="#bfdbfe" stroke="#3b82f6" stroke-width="1.5"/>
-  <text x="82" y="122" font-size="10" fill="#334155">Villa unit</text>
-  <ellipse cx="69" cy="140" rx="7" ry="5" fill="#dcfce7" stroke="#86efac" stroke-width="1.5"/>
-  <text x="82" y="144" font-size="10" fill="#334155">Garden</text>
-  <rect x="62" y="155" width="14" height="8" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
-  <text x="82" y="163" font-size="10" fill="#334155">Road</text>
-</svg>`
-}
-
-// ══════════════════════════════════════════════════════════════════
-// Jira sprint dashboard — deterministic fast-path
-// Local LLMs (qwen3) cannot emit structured tool calls, so a Jira
-// analytics goal would never actually call jira__search_issues and
-// would stall then produce prose. Instead we fetch REAL Jira data via
-// the tenant's connector and build an HTML dashboard with Chart.js
-// deterministically — fast and always grounded in live data.
-// ══════════════════════════════════════════════════════════════════
-function detectJiraDashboardGoal(goal) {
-  const g = (goal || '').toLowerCase()
-  const jiraMention = /\bjira\b/.test(g)
-  const sprintMention = /\bsprint\b/.test(g)
-  const dashWords = /\b(velocity|burndown|completion\s*rate|dashboard|sprint\s*report|issue\s*distribution|velocity\s*chart|kpi)\b/.test(g)
-  const reportWords = /\b(report|analytics|analy[sz]e|analysis)\b/.test(g)
-  // Pure diagram/structural goals are handled elsewhere — never hijack them.
-  if (/beam|structural|bending|deflection|moment|shear|flow\s*chart|org\s*chart|er\s*diagram|floor\s*plan/i.test(g)) return false
-  return (jiraMention && (dashWords || reportWords)) || (sprintMention && dashWords)
-}
-
 // ── G2: Goal-relevance tool router (PURE, exported for unit tests) ──────────
 // Small models see a FLAT list of every tool and mis-pick (e.g. calling
 // jira__create_issue for an http task). There is no router — only scope-based
@@ -533,285 +376,7 @@ export function annotateIrrelevantTools(toolDefinitions, goal) {
   return annotated
 }
 
-// Fetch real Jira data via the tenant's ACTIVE jira connector. Returns a
-// structured payload, or null if no Jira connector is configured/reachable.
-async function fetchJiraDashboardData(tenantId, projectKey) {
-  const connRes = await query(
-    `SELECT * FROM tool_connections WHERE tenant_id=$1 AND tool_id='jira' AND status='ACTIVE' ORDER BY updated_at DESC LIMIT 1`,
-    [tenantId]
-  )
-  const conn = connRes.rows[0]
-  if (!conn) return null
-  const cfg = decryptCredentials(conn.config || {})
-  const base = String(cfg.baseUrl || '').replace(/\/$/, '')
-  const key = projectKey || cfg.projectKey
-  if (!base || !cfg.apiKey || !cfg.email || !key) return null
-
-  const basic = Buffer.from(`${cfg.email}:${cfg.apiKey}`).toString('base64')
-  const H = { Authorization: `Basic ${basic}`, Accept: 'application/json' }
-  const FIELDS = 'key,summary,status,priority,issuetype,customfield_10001,customfield_10006,created,resolutiondate,assignee'
-  const jql = `project="${key}" ORDER BY created DESC`
-
-  // 1. Fetch all project issues (Jira Cloud cursor pagination via nextPageToken)
-  let issues = []
-  let nextPageToken = null
-  for (let i = 0; i < 25; i++) {
-    let url = `${base}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&fields=${encodeURIComponent(FIELDS)}&maxResults=100`
-    if (nextPageToken) url += `&nextPageToken=${encodeURIComponent(nextPageToken)}`
-    const res = await fetch(url, { headers: H, signal: AbortSignal.timeout(15000) })
-    if (!res.ok) throw new Error(`Jira search returned HTTP ${res.status}`)
-    const body = await res.json().catch(() => ({}))
-    issues.push(...(body.issues || []))
-    nextPageToken = body.nextPageToken || null
-    if (!nextPageToken) break
-  }
-
-  // 2. Group issues by sprint (customfield_10001 = sprint membership)
-  const sprintMap = new Map()
-  for (const iss of issues) {
-    const f = iss.fields || {}
-    const sprint = Array.isArray(f.customfield_10001) ? f.customfield_10001[0] : null
-    const pts = Number(f.customfield_10006) || 0
-    const status = f.status?.name || 'Unknown'
-    const done = status === 'Done' || status === 'Released'
-    if (sprint && sprint.id != null) {
-      const sid = String(sprint.id)
-      if (!sprintMap.has(sid)) {
-        sprintMap.set(sid, {
-          id: sprint.id, name: sprint.name || `Sprint ${sprint.id}`, state: sprint.state,
-          boardId: sprint.boardId, startDate: sprint.startDate, endDate: sprint.endDate,
-          completeDate: sprint.completeDate, total: 0, doneCount: 0, committedPts: 0, donePts: 0, doneResolutions: [],
-        })
-      }
-      const s = sprintMap.get(sid)
-      s.total++
-      s.committedPts += pts
-      if (done) {
-        s.doneCount++
-        s.donePts += pts
-        if (f.resolutiondate) s.doneResolutions.push({ pts, resolutiondate: f.resolutiondate })
-      }
-    }
-  }
-  const sprints = [...sprintMap.values()].sort((a, b) => a.id - b.id)
-
-  // 3. Overall distributions
-  const byStatus = {}, byPriority = {}, byType = {}
-  for (const iss of issues) {
-    const f = iss.fields || {}
-    byStatus[f.status?.name || 'Unknown'] = (byStatus[f.status?.name || 'Unknown'] || 0) + 1
-    byPriority[f.priority?.name || 'None'] = (byPriority[f.priority?.name || 'None'] || 0) + 1
-    byType[f.issuetype?.name || 'Unknown'] = (byType[f.issuetype?.name || 'Unknown'] || 0) + 1
-  }
-
-  return {
-    connName: conn.name, projectKey: key, fetchedAt: new Date().toISOString(),
-    totalIssues: issues.length, byStatus, byPriority, byType, sprints,
-  }
-}
-
-// Compute dashboard metrics (velocity, completion, burndown) from raw data.
-function computeJiraMetrics(data) {
-  const allSprints = (data.sprints || []).sort((a, b) => a.id - b.id)
-  const last12 = allSprints.slice(-12)
-  const velocity = last12.map(s => ({
-    name: s.name.replace(/^MODE\s*/, ''), committed: Math.round(s.committedPts * 10) / 10,
-    done: Math.round(s.donePts * 10) / 10,
-    completion: s.total ? Math.round((s.doneCount / s.total) * 100) : 0,
-    total: s.total, doneCount: s.doneCount,
-  }))
-
-  const closed = allSprints.filter(s => s.state === 'closed')
-  const avgVelocity = closed.length ? closed.reduce((a, s) => a + s.donePts, 0) / closed.length : 0
-  const totalCommitted = allSprints.reduce((a, s) => a + s.committedPts, 0)
-  const totalDonePts = allSprints.reduce((a, s) => a + s.donePts, 0)
-  const totalIssues = allSprints.reduce((a, s) => a + s.total, 0)
-  const totalDoneCount = allSprints.reduce((a, s) => a + s.doneCount, 0)
-
-  // Burndown for the active sprint (or latest closed if none active)
-  const active = allSprints.find(s => s.state === 'active') || [...closed].sort((a, b) => b.id - a.id)[0]
-  let burndown = null
-  if (active) {
-    const committed = active.committedPts
-    const byDay = {}
-    for (const r of active.doneResolutions || []) {
-      const d = new Date(r.resolutiondate).toISOString().slice(0, 10)
-      byDay[d] = (byDay[d] || 0) + r.pts
-    }
-    const start = active.startDate ? new Date(active.startDate) : new Date()
-    const endRaw = active.endDate ? new Date(active.endDate) : new Date(start.getTime() + 14 * 86400000)
-    const end = endRaw > new Date() ? new Date() : endRaw
-    if (end < start) end.setTime(start.getTime())
-    const totalDur = (endRaw - start) || 1
-    const days = []
-    let running = 0
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      const ds = d.toISOString().slice(0, 10)
-      if (byDay[ds]) running += byDay[ds]
-      const elapsed = (d - start)
-      days.push({
-        day: ds,
-        remaining: Math.round((committed - running) * 10) / 10,
-        ideal: Math.round((committed * (1 - elapsed / totalDur)) * 10) / 10,
-      })
-    }
-    burndown = {
-      name: active.name, state: active.state, committed,
-      done: Math.round(active.donePts * 10) / 10,
-      completion: active.total ? Math.round((active.doneCount / active.total) * 100) : 0,
-      total: active.total, doneCount: active.doneCount, days,
-    }
-  }
-
-  return {
-    velocity, avgVelocity: Math.round(avgVelocity * 10) / 10,
-    totalCommitted: Math.round(totalCommitted * 10) / 10, totalDonePts: Math.round(totalDonePts * 10) / 10,
-    totalIssues, totalDoneCount,
-    completionRate: totalIssues ? Math.round((totalDoneCount / totalIssues) * 100) : 0,
-    closedCount: closed.length, active, burndown,
-  }
-}
-
-// Full HTML dashboard (Chart.js) from the fetched Jira data.
-function jiraDashboardTemplate(data, m) {
-  const statusLabels = Object.keys(data.byStatus)
-  const statusValues = statusLabels.map(k => data.byStatus[k])
-  const priLabels = Object.keys(data.byPriority)
-  const priValues = priLabels.map(k => data.byPriority[k])
-  const typeLabels = Object.keys(data.byType)
-  const typeValues = typeLabels.map(k => data.byType[k])
-
-  const velLabels = m.velocity.map(v => v.name)
-  const velDone = m.velocity.map(v => v.done)
-  const velComm = m.velocity.map(v => v.committed)
-  const compVals = m.velocity.map(v => v.completion)
-
-  const burndownDays = m.burndown ? m.burndown.days.map(d => d.day) : []
-  const burndownActual = m.burndown ? m.burndown.days.map(d => d.remaining) : []
-  const burndownIdeal = m.burndown ? m.burndown.days.map(d => d.ideal) : []
-
-  const sprintsTable = m.burndown && (data.sprints || []).slice(-15).map(s => {
-    const pct = s.total ? Math.round((s.doneCount / s.total) * 100) : 0
-    return `<tr><td>${s.name}</td><td>${s.state}</td><td>${s.total}</td><td>${s.doneCount}</td><td>${Math.round(s.committedPts * 10) / 10}</td><td>${Math.round(s.donePts * 10) / 10}</td><td>${pct}%</td></tr>`
-  }).join('')
-
-  const badge = (m.burndown && m.burndown.state === 'active') ? 'Active' : 'Latest closed'
-  const burndownTitle = m.burndown ? `${m.burndown.name} (${badge}) — Burndown` : 'Burndown (no sprint data)'
-
-  const palette = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#64748b']
-
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Jira Sprint Dashboard — ${data.projectKey}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>
-  :root{--bg:#0f172a;--card:#1e293b;--card2:#334155;--txt:#e2e8f0;--muted:#94a3b8;--accent:#6366f1;}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--txt);padding:28px;line-height:1.5}
-  h1{font-size:22px;margin-bottom:4px}
-  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:22px}
-  .card{background:var(--card);border:1px solid var(--card2);border-radius:12px;padding:16px}
-  .card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-  .card .v{font-size:26px;font-weight:700;margin-top:4px}
-  .card .v small{font-size:14px;color:var(--muted);font-weight:500}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:18px}
-  .chart-box{background:var(--card);border:1px solid var(--card2);border-radius:12px;padding:18px}
-  .chart-box h3{font-size:14px;margin-bottom:12px;color:#cbd5e1}
-  .chart-box .chart-wrap{position:relative;height:300px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--card2)}
-  th{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.04em}
-  .full{grid-column:1/-1}
-  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:var(--accent);color:#fff;margin-left:6px}
-  .active{color:#22c55e}
-</style></head><body>
-<h1>Jira Sprint Dashboard — <span id="proj">${data.projectKey}</span> <span class="tag">${data.connName}</span></h1>
-<div class="sub">Analyzed ${data.totalIssues} issues across ${data.sprints.length} sprints · fetched ${new Date(data.fetchedAt).toLocaleString()}</div>
-<div class="cards">
-  <div class="card"><div class="k">Total issues</div><div class="v">${data.totalIssues}</div></div>
-  <div class="card"><div class="k">Closed sprints</div><div class="v">${m.closedCount}</div></div>
-  <div class="card"><div class="k">Points delivered</div><div class="v">${m.totalDonePts}<small> / ${m.totalCommitted}</small></div></div>
-  <div class="card"><div class="k">Avg velocity</div><div class="v">${m.avgVelocity}<small> pts/sprint</small></div></div>
-  <div class="card"><div class="k">Completion rate</div><div class="v">${m.completionRate}<small>%</small></div></div>
-  ${m.burndown ? `<div class="card"><div class="k">${m.burndown.state === 'active' ? 'Active' : 'Latest'} sprint</div><div class="v active">${m.burndown.completion}<small>% done</small></div></div>` : ''}
-</div>
-<div class="grid">
-  <div class="chart-box"><h3>Sprint Velocity (last 12 sprints) — committed vs delivered</h3><div class="chart-wrap"><canvas id="cVelocity"></canvas></div></div>
-  <div class="chart-box"><h3>Sprint Completion Rate</h3><div class="chart-wrap"><canvas id="cCompletion"></canvas></div></div>
-  <div class="chart-box"><h3>${burndownTitle}</h3><div class="chart-wrap"><canvas id="cBurndown"></canvas></div></div>
-  <div class="chart-box"><h3>Issue distribution by status</h3><div class="chart-wrap"><canvas id="cStatus"></canvas></div></div>
-  <div class="chart-box"><h3>Issue distribution by priority</h3><div class="chart-wrap"><canvas id="cPriority"></canvas></div></div>
-  <div class="chart-box"><h3>Issue distribution by type</h3><div class="chart-wrap"><canvas id="cType"></canvas></div></div>
-  <div class="chart-box full"><h3>Recent sprints</h3><div style="overflow-x:auto"><table><thead><tr><th>Sprint</th><th>State</th><th>Issues</th><th>Done</th><th>Committed pts</th><th>Delivered pts</th><th>Completion</th></tr></thead><tbody>${sprintsTable}</tbody></table></div></div>
-</div>
-<script>
-const DATA = {
-  velLabels: ${JSON.stringify(velLabels)},
-  velDone: ${JSON.stringify(velDone)},
-  velComm: ${JSON.stringify(velComm)},
-  compVals: ${JSON.stringify(compVals)},
-  burndownDays: ${JSON.stringify(burndownDays)},
-  burndownActual: ${JSON.stringify(burndownActual)},
-  burndownIdeal: ${JSON.stringify(burndownIdeal)},
-  statusLabels: ${JSON.stringify(statusLabels)},
-  statusValues: ${JSON.stringify(statusValues)},
-  priLabels: ${JSON.stringify(priLabels)},
-  priValues: ${JSON.stringify(priValues)},
-  typeLabels: ${JSON.stringify(typeLabels)},
-  typeValues: ${JSON.stringify(typeValues)}
-};
-const PAL = ${JSON.stringify(palette)};
-const grid = { color: 'rgba(148,163,184,0.12)' };
-const ticks = { color: '#94a3b8' };
-new Chart(document.getElementById('cVelocity'), {
-  type: 'bar',
-  data: { labels: DATA.velLabels, datasets: [
-    { label: 'Delivered pts', data: DATA.velDone, backgroundColor: '#6366f1', borderRadius: 4 },
-    { label: 'Committed pts', data: DATA.velComm, backgroundColor: 'rgba(148,163,184,0.35)', borderRadius: 4 }
-  ]},
-  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#cbd5e1' } } }, scales: { x: { ticks }, y: { beginAtZero: true, ticks, grid } } }
-});
-new Chart(document.getElementById('cCompletion'), {
-  type: 'line',
-  data: { labels: DATA.velLabels, datasets: [{ label: 'Completion %', data: DATA.compVals, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.15)', fill: true, tension: 0.3 }] },
-  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#cbd5e1' } } }, scales: { x: { ticks }, y: { beginAtZero: true, max: 100, ticks, grid } } }
-});
-new Chart(document.getElementById('cBurndown'), {
-  type: 'line',
-  data: { labels: DATA.burndownDays, datasets: [
-    { label: 'Ideal', data: DATA.burndownIdeal, borderColor: '#f59e0b', borderDash: [6, 4], pointRadius: 0, tension: 0.2 },
-    { label: 'Remaining', data: DATA.burndownActual, borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,0.15)', fill: true, tension: 0.2 }
-  ]},
-  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#cbd5e1' } } }, scales: { x: { ticks }, y: { beginAtZero: true, ticks, grid } } }
-});
-new Chart(document.getElementById('cStatus'), {
-  type: 'doughnut',
-  data: { labels: DATA.statusLabels, datasets: [{ data: DATA.statusValues, backgroundColor: PAL.slice(0, DATA.statusLabels.length) }] },
-  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#cbd5e1', boxWidth: 12 } } } }
-});
-new Chart(document.getElementById('cPriority'), {
-  type: 'bar',
-  data: { labels: DATA.priLabels, datasets: [{ label: 'Issues', data: DATA.priValues, backgroundColor: PAL.slice(0, DATA.priLabels.length), borderRadius: 4 }] },
-  options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, ticks, grid }, y: { ticks } } }
-});
-new Chart(document.getElementById('cType'), {
-  type: 'pie',
-  data: { labels: DATA.typeLabels, datasets: [{ data: DATA.typeValues, backgroundColor: PAL.slice(0, DATA.typeLabels.length) }] },
-  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#cbd5e1', boxWidth: 12 } } } }
-});
-</script>
-</body></html>`
-}
-
-function buildJiraSynthesis(data, m, downloadUrl) {
-  const burndownLine = m.burndown
-    ? `Burndown (${m.burndown.name}): ${m.burndown.committed} pts committed, ${m.burndown.done} pts delivered (${m.burndown.completion}% of issues done).`
-    : 'Burndown: no sprint data available.'
-  return `✅ Jira sprint dashboard generated from live data.\n\nDownload: ${downloadUrl}\n\nProject: ${data.projectKey} (${data.connName}) — ${data.totalIssues} issues across ${data.sprints.length} sprints.\nVelocity: ${m.avgVelocity} pts/sprint average across ${m.closedCount} closed sprints (${m.totalDonePts} pts delivered).\nCompletion: ${m.completionRate}% overall (${m.totalDoneCount}/${m.totalIssues} issues).\n${burndownLine}`
-}
-
-export async function dispatchTask({ tenantId, agentId, goal, context = {}, priority = 'MEDIUM', userId, attachments = [] }) {
+export async function dispatchTask({ tenantId, agentId, goal, context = {}, priority = 'MEDIUM', userId, attachments = [], allowTaskFallback = false }) {
   // Input validation
   if (!goal || typeof goal !== 'string' || goal.trim().length === 0) {
     throw new AppError('MISSING_GOAL', 'Task goal is required and must be a non-empty string', 400)
@@ -842,8 +407,13 @@ export async function dispatchTask({ tenantId, agentId, goal, context = {}, prio
     agent = rows[0]
   }
 
-  // Fallback to active agent if original is not active or not found
+  // ── Fallback gate: only fall back to another agent when explicitly opted-in.
+  // Silent fallback is dangerous — a task intended for Agent A can execute on
+  // Agent B with a completely different scope, memory, and system prompt.
   if (!agent) {
+    if (!allowTaskFallback) {
+      throw new AppError('AGENT_NOT_ACTIVE', `Agent ${agentId || 'unknown'} is not active. Set allowTaskFallback=true to dispatch to any available agent.`, 422)
+    }
     let archetype = null
     if (agentId) {
       const { rows: [orig] } = await query('SELECT archetype FROM agents WHERE id = $1', [agentId])
@@ -965,8 +535,21 @@ export async function executeTask(task, agent) {
   }
 
   if (dbTask?.status === 'FAILED') {
-    console.warn(`[Task ${task.id}] Already failed, skipping duplicate execution`)
-    return { success: false, error: dbTask.error || 'Task has already failed', skipped: true }
+    // Allow resume if the caller set _resumeFromCheckpoint on the task context
+    const taskContext = (typeof dbTask.context === 'string' ? JSON.parse(dbTask.context || '{}') : dbTask.context) || {}
+    if (!taskContext._resumeFromCheckpoint) {
+      console.warn(`[Task ${task.id}] Already failed, skipping duplicate execution`)
+      return { success: false, error: dbTask.error || 'Task has already failed', skipped: true }
+    }
+    console.log(`[Task ${task.id}] Resume-from-checkpoint: bypassing FAILED guard`)
+    // Reset the task to QUEUED so the execution proceeds
+    await query(
+      `UPDATE agent_tasks SET status = 'QUEUED', error = NULL, completed_at = NULL WHERE id = $1 AND tenant_id = $2`,
+      [task.id, tenantId]
+    )
+    // Reload fresh
+    const { rows: [reloaded] } = await query('SELECT * FROM agent_tasks WHERE id = $1 AND tenant_id = $2', [task.id, tenantId])
+    if (reloaded) task = reloaded
   }
 
   // ── HITL RESUME DETECTION ──────────────────────────────────────────────
@@ -1048,6 +631,7 @@ export async function executeTask(task, agent) {
 
   const actions = []
   let totalTokens = { prompt: 0, completion: 0, total: 0 }
+  let _lastLlmInput = null // captured just before each completeStream call for failure auditing
 
   // Task-level timeout — sets a flag checked before LLM calls.
   // Per-call LLM timeouts (llm.service.js) are the primary defence against hangs,
@@ -1082,22 +666,39 @@ export async function executeTask(task, agent) {
     const knowledgeContext = await retrieveKnowledge(agent, task.goal)
 
     // 3. Load agent's episodic memory (past similar tasks)
-    const episodicContext = await loadEpisodicMemory(agent.id, task.goal)
+    // Only when agent.use_memory is explicitly enabled — off by default
+    // so users must opt into cross-task memory.
+    const episodicContext = agent.use_memory
+      ? await loadEpisodicMemory(agent.id, task.goal)
+      : []
 
     // 3b. Load long-term entity memory
-    const longTermMemory = await retrieveMemory(agent.id, task.goal)
+    const longTermMemory = agent.use_memory
+      ? await retrieveMemory(agent.id, task.goal)
+      : []
 
     // 3c. Load tenant-shared memory (G3) — facts other agents have written.
     // Read-only by default; the write path is opt-in via the
     // 'write_tenant_memory' built-in scope on the agent.
+    // Respects tenant-wide `settings.allow_shared_memory` toggle — when
+    // explicitly false, shared memory is disabled for all agents in the tenant.
     let tenantMemoryContext = []
     try {
-      const { searchTenantMemory, formatTenantMemoryForPrompt } = await import('./tenant-memory.service.js')
-      const rows = await searchTenantMemory(agent.tenant_id, task.goal, 10)
-      const block = formatTenantMemoryForPrompt(rows)
-      if (block) tenantMemoryContext = [{ role: 'system', content: block }]
+      const { rows: [tenantRow] } = await query(
+        `SELECT settings FROM tenants WHERE id = $1`, [agent.tenant_id]
+      )
+      const allowShared = tenantRow?.settings?.allow_shared_memory !== false
+      if (allowShared) {
+        const { searchTenantMemory, formatTenantMemoryForPrompt } = await import('./tenant-memory.service.js')
+        const rows = await searchTenantMemory(agent.tenant_id, task.goal, 10)
+        const block = formatTenantMemoryForPrompt(rows)
+        if (block) tenantMemoryContext = [{ role: 'system', content: block }]
+      }
     } catch { /* non-critical */ }
     agent._tenantMemoryContext = tenantMemoryContext
+
+    // ── Data strategy ── (default 'none' if not set — no DB context unless explicitly configured)
+    agent._dataStrategy = agent.data_strategy || 'none'
 
     // ── DB CONNECTION RESOLUTION (runs BEFORE buildSystemPrompt so
     // schema preload can set _schemaPreloaded before the prompt is built) ──
@@ -1167,7 +768,7 @@ export async function executeTask(task, agent) {
              FROM agent_tool_scopes ats
              JOIN tool_connections tc ON ats.connector_id = tc.id
              WHERE ats.agent_id = $1 AND ats.scope_type = 'connector'
-               AND tc.tool_id IN ('database', 'postgres')
+               AND tc.tool_id = ANY(ARRAY[${[...ALL_DB_TOOL_IDS].map(t => `'${t}'`).join(',')}])
                AND tc.status = 'ACTIVE'
              ORDER BY tc.created_at ASC LIMIT 1`,
             [agent.id]
@@ -1214,7 +815,7 @@ export async function executeTask(task, agent) {
              AND tc.status = 'ACTIVE'`,
           [agent.id]
         )
-        const hasDbScope = agentConns.some(r => r.tool_id === 'database' || r.tool_id === 'postgres')
+        const hasDbScope = agentConns.some(r => ALL_DB_TOOL_IDS.has(r.tool_id))
         const hasOtherScope = agentConns.some(r => r.tool_id !== 'database' && r.tool_id !== 'postgres')
         if (hasOtherScope && !hasDbScope) {
           console.log(`[DB Guard] Agent ${agent.id} has non-DB connectors (${agentConns.map(r => r.tool_id).join(', ')}) but no DB scope — clearing agentDbConnectionString to prevent tool confusion`)
@@ -1291,8 +892,16 @@ export async function executeTask(task, agent) {
       }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // Agent Tool Scoping — resolve which connectors / MCPs / built-ins this
+    // agent is allowed to use. Resolved EARLY (before system prompt build)
+    // so scopeBuiltinNames is available for buildSystemPrompt below.
+    // ══════════════════════════════════════════════════════════════════════════
+    const scopes = await resolveAgentScopes(agent.tenant_id, agent.id)
+
     // 4. Build system prompt — AFTER schema preload so dbRule uses "skip" variant
-    const systemPrompt = await buildSystemPrompt(agent, skills, task.goal)
+    const scopeBuiltinNames = [...scopes.allowedBuiltins]
+    const systemPrompt = await buildSystemPrompt(agent, skills, task.goal, scopeBuiltinNames)
 
     // 4a. Optional prompt compression
     //   - local_refine_prompt: rule-based trim, instant, no LLM call
@@ -1309,7 +918,7 @@ export async function executeTask(task, agent) {
             tenantId: agent.tenant_id,
             agentId: agent.id,
             messages: [
-              { role: 'system', content: 'You are a system prompt compressor. Rewrite the AI agent system prompt as a dense, compact version that is SHORTER than the original. CRITICAL: NEVER change or remove any number, quantity, count, or measurement ("25 villas", "50m", etc. must stay exactly). NEVER remove proper nouns or specific named values. Preserve ALL rules, constraints, and behavioral directives. Remove only verbose filler. Do NOT add any commentary, thinking, <think> tags, headings, or preamble — output ONLY the compressed prompt text itself, no markdown fences.' },
+              { role: 'system', content: 'You are a system prompt compressor. Rewrite the AI agent system prompt as a dense, compact version that is SHORTER than the original. CRITICAL: NEVER change or remove any number, quantity, count, or measurement — preserve all numeric values and units exactly as written. NEVER remove proper nouns or specific named values. Preserve ALL rules, constraints, and behavioral directives. Remove only verbose filler. Do NOT add any commentary, thinking, <think> tags, headings, or preamble — output ONLY the compressed prompt text itself, no markdown fences.' },
               { role: 'user', content: systemPrompt }
             ],
             llmConfig: agent.llm_config,
@@ -1421,14 +1030,6 @@ export async function executeTask(task, agent) {
     await query(`UPDATE agent_tasks SET plan = $1 WHERE id = $2 AND tenant_id = $3`, [{ steps: 'Execution plan combined with first action' }, task.id, tenantId])
 
     // toolDefinitions already declared above (after skills load) — do not re-declare here.
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // Agent Tool Scoping — resolve which connectors / MCPs / built-ins this
-    // agent is allowed to use. Without explicit scopes, ONLY custom skills
-    // and immutable built-ins (http_request, a2a_call, browser_use,
-    // publish_dashboard_report, delegate_task) are available.
-    // ══════════════════════════════════════════════════════════════════════════
-    const scopes = await resolveAgentScopes(agent.tenant_id, agent.id)
 
     // Load MCP server tools — filtered by agent scopes
     try {
@@ -1738,7 +1339,7 @@ export async function executeTask(task, agent) {
 
 1. CHART (tabular/SQL data): { title, output_format: "chart", summary, table_title? } (do NOT include df — your query results are automatically attached). Auto-builds KPI cards, Chart.js charts, and a sortable data table. Use y_keys (array) for multi-series charts.
 
-2. SVG (diagrams/schematics): { title, output_format: "svg", svg_content: "<svg>...</svg>" }. Renders vector graphics inline. Ideal for beam diagrams, ECG traces, floor plans, anatomical drawings, circuit diagrams, stress/strain plots, flowcharts. IMPORTANT: Use viewBox="0 0 800 600" (or larger) on the <svg> tag so the diagram scales properly. Generate a COMPLETE, detailed diagram — not a placeholder. Include all necessary elements: labels, dimensions, axes, legend, annotations, color coding. Do NOT output tiny or empty SVGs.
+2. SVG (diagrams/schematics): { title, output_format: "svg", svg_content: "<svg>...</svg>" }. Renders vector graphics inline. Use for diagrams, schematics, and visual representations relevant to your specific task domain. IMPORTANT: Use viewBox="0 0 800 600" (or larger) on the <svg> tag so the diagram scales properly. Generate a COMPLETE, detailed diagram — not a placeholder. Include all necessary elements: labels, dimensions, axes, legend, annotations, color coding. Do NOT output tiny or empty SVGs.
 
 3. HTML (full control): { title, output_format: "html", html_content: "..." }. Complete creative freedom with inline CSS. Use Chart.js CDN for charts, or any custom layout.
 
@@ -1814,13 +1415,19 @@ CHOOSE WISELY: Use "chart" when you ran SQL and have tabular rows. Use "svg" whe
         description: `Persist a file or folder of files and get a download URL. Essential for creating SVG diagrams, CSVs, JSON, PNG images, PDFs, or ZIP archives of multiple files. The returned download_url can be shared or referenced in reports.
 
 FORMATS & USE CASES:
-- "svg": Vector diagrams, engineering drawings, medical charts, floor plans, electrical schematics, beam deflection plots
+- "svg": Vector diagrams, schematics, flowcharts, data visualizations
 - "csv": Data exports, spreadsheets, tabular results
 - "png": Screenshots, rendered images (provide base64 content)
 - "pdf": Downloadable reports, documents
 - "json": Structured data exports
 - "html": Standalone interactive pages
-- "zip": Multi-file folder bundles — pass files: [{ path: "data.csv", content: "..." }, { path: "chart.svg", content: "..." }]`,
+- "zip": Multi-file folder bundles — pass files: [{ path: "data.csv", content: "..." }, { path: "chart.svg", content: "..." }]
+
+CRITICAL RULES:
+1. NEVER pass placeholders like %%SVG_CONTENT%%, [[PLACEHOLDER]], or [TODO]. Generate the ACTUAL complete content.
+2. SVG diagrams MUST include viewBox, at least 5 drawing elements (rect, line, path, circle, text), labels, and proper styling.
+3. Do NOT describe what you will do — output the FINAL file content directly.
+4. Content under 200 chars for SVG/HTML will be REJECTED. Be thorough and detailed.`,
         inputSchema: {
           type: 'object', required: ['format'],
           properties: {
@@ -1930,14 +1537,7 @@ SUPPORTED TYPES:
         name: 'create_agent',
         description: `Create a new agent under this tenant. Use this when you need a specialized agent for a sub-task (e.g., a data analyst, a notifier, a web scraper). The agent is immediately ready for delegation via delegate_task or can be used in workflows.
 
-ARCHEYPES (pick the best fit):
-- "analytics" — data analysis, SQL, reporting, dashboards
-- "coordinator" — orchestration, automation, scheduling
-- "communication" — notifications, messaging, email/Slack/Discord
-- "compliance" — audits, security scans, policy checks
-- "planner" — project management, task breakdown
-- "research" — investigation, web research, synthesis
-- "document" — writing, content generation, summarization
+ARCHEYPE GUIDANCE: Describe the agent's primary function — e.g. "data-analyst", "customer-support", "developer", "research", "compliance", "planner", "document", "engineering", "scientific", "medical", "news-media", "insurance", "banking", "iot", "browser-automation", "coordinator", "agent-generation", "generalist". You can also use a custom archetype name for domain-specific roles.
 
 AUTONOMY LEVELS: SUPERVISED (asks before each action), GUARDED (low-risk autonomous), AUTONOMOUS (full auto for cron/background).`,
         inputSchema: {
@@ -1945,7 +1545,7 @@ AUTONOMY LEVELS: SUPERVISED (asks before each action), GUARDED (low-risk autonom
           properties: {
             name: { type: 'string', description: 'Short memorable name, e.g. "Daily Sales Reporter"' },
             description: { type: 'string', description: 'One-line summary of what this agent does' },
-            archetype: { type: 'string', enum: ['planner', 'research', 'compliance', 'document', 'communication', 'analytics', 'coordinator'], description: 'Agent role archetype' },
+            archetype: { type: 'string', description: 'Agent role archetype describing the primary function (e.g. "data-analyst", "research", "customer-support", or any custom type)' },
             autonomyLevel: { type: 'string', enum: ['SUPERVISED', 'GUARDED', 'AUTONOMOUS'], description: 'How freely the agent can act', default: 'SUPERVISED' },
             systemPrompt: { type: 'string', description: 'Custom system prompt. If omitted, a sensible default is used.' },
             llmModel: { type: 'string', description: 'LLM model override. If omitted, uses tenant default.' }
@@ -2167,7 +1767,9 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
         // Ollama models struggle to embed large content in JSON tool call arguments —
         // the JSON encoding causes early truncation. Prefer fenced code blocks for
         // large generated files (HTML, SVG, CSV), fall back to tool call for small ones.
-        ? `\n\n⚠️ IMPORTANT: Output the generated file content in a fenced code block. For example:\n\`\`\`html\n<!DOCTYPE html>...</html>\n\`\`\`\nor for SVG:\n\`\`\`svg\n<svg ...>...</svg>\n\`\`\`\nDo NOT truncate the content. Generate the COMPLETE file. Do NOT describe what you "would" generate — actually generate it fully.`
+        // Note: do NOT show SVG as the default example — small models may copy the
+        // example and generate diagrams irrelevant to the actual task.
+        ? `\n\n⚠️ IMPORTANT: Output the generated file content in a fenced code block. Use the format that fits the task — for diagrams and reports use html:\n\`\`\`html\n<!DOCTYPE html>...</html>\n\`\`\`\nFor data exports use json or csv. Do NOT truncate the content. Generate the COMPLETE file. Do NOT describe what you "would" generate — actually generate it fully.`
         : `\n\n⚠️ IMPORTANT: To deliver a file (like an SVG, CSV, or PDF), you MUST call the \`write_artifact\` tool. Do NOT print the raw file content in your text response.`
       : ''
 
@@ -2224,6 +1826,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
     const hasHttp = toolDefinitions.some(t => t.name === 'http_request' || t.name === 'http_download')
     const hasBrowser = toolDefinitions.some(t => t.name === 'browser_use')
     const hasPublish = toolDefinitions.some(t => t.name === 'publish_dashboard_report')
+    const hasKnowledgeSearch = toolDefinitions.some(t => t.name === 'searchKnowledge')
+    const hasGraphSearch = toolDefinitions.some(t => t.name === 'searchGraph')
     const connectorToolNames = toolDefinitions
       .filter(t => CONNECTOR_TOOL_PREFIXES.some(p => t.name.startsWith(p)) &&
         !['db__', 'database__'].some(dp => t.name.startsWith(dp)))
@@ -2241,7 +1845,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
     // 3. Query ALL tool_connections scoped to this agent — database + non-database
     //    An agent can have MULTIPLE database connections. Collect them all.
     const allDbConnections = []   // { name, tool_id }
-    const connectorConnections = [] // non-DB connectors (Slack, Jira, etc.)
+    const connectorConnections = [] // { name, tool_id } — all non-DB connectors
+    const connectorToolIds = new Set() // deduplicated set of tool_id types
     try {
       const { rows: scopeRows } = await query(
         `SELECT tc.name, tc.tool_id
@@ -2253,10 +1858,11 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
         [agent.id]
       )
       for (const row of scopeRows) {
-        if (row.tool_id === 'database' || row.tool_id === 'postgres') {
+        if (ALL_DB_TOOL_IDS.has(row.tool_id)) {
           allDbConnections.push({ name: row.name, tool_id: row.tool_id })
         } else {
-          connectorConnections.push(`${row.name} (${row.tool_id})`)
+          connectorConnections.push({ name: row.name, tool_id: row.tool_id })
+          connectorToolIds.add(row.tool_id)
         }
       }
     } catch (e) {
@@ -2290,16 +1896,63 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
     // 6. Connector summary (from actual connections, not just tool defs)
     let connectorBlock = ''
     if (connectorConnections.length > 0) {
-      connectorBlock = `\nConnectors: ${connectorConnections.join(', ')}`
+      const connStr = connectorConnections.map(c => `${c.name} (${c.tool_id})`).join(', ')
+      connectorBlock = `\nConnectors: ${connStr}`
     } else if (connectorToolCount > 0) {
       // Fallback: connector tools exist but no scoped connections found
       connectorBlock = `\nConnectors: ${connectorToolNames.slice(0, 6).join(', ')}${connectorToolNames.length > 6 ? ` +${connectorToolNames.length - 6} more` : ''}`
     }
 
-    // 7. Knowledge base block
+    // ── Connector-Type Usage Guidance Map ──────────────────────────────────
+    // Each connector type gets a short instruction block LLM sees BEFORE
+    // starting work. Covers ALL connector types in the system.
+    const CONNECTOR_GUIDANCE = {
+      'database':         { emoji: '🗄', label: 'Database', guide: 'Run SQL queries against this database. Use describeTable to see columns FIRST, then runQuery. Check the database type and use compatible SQL syntax.' },
+      'postgres':         { emoji: '🗄', label: 'PostgreSQL', guide: 'Run SQL queries (PostgreSQL syntax). Use describeTable to see columns FIRST, then runQuery. PostgreSQL supports schemas, JSONB, window functions, and CTEs.' },
+      'mysql':            { emoji: '🗄', label: 'MySQL', guide: 'Run SQL queries (MySQL syntax). Use describeTable to see columns FIRST, then runQuery. MySQL uses backticks for identifiers and differs in JSON handling.' },
+      'snowflake':        { emoji: '🗄', label: 'Snowflake', guide: 'Run SQL queries (Snowflake syntax). Use describeTable FIRST, then runQuery. Snowflake uses fully-qualified names (DB.SCHEMA.TABLE) and supports semi-structured data.' },
+      'redshift':         { emoji: '🗄', label: 'Redshift', guide: 'Run SQL queries (Redshift/PostgreSQL-compatible). Use describeTable FIRST, then runQuery. Redshift is optimized for analytical queries with columnar storage.' },
+      'bigquery':         { emoji: '🗄', label: 'BigQuery', guide: 'Run SQL queries (GoogleSQL syntax). Use describeTable FIRST, then runQuery. BigQuery uses backticks and has different DDL/partitioning syntax.' },
+      'mssql':            { emoji: '🗄', label: 'SQL Server', guide: 'Run SQL queries (T-SQL syntax). Use describeTable FIRST, then runQuery. T-SQL uses square brackets for identifiers and TOP instead of LIMIT.' },
+      'sqlite':           { emoji: '🗄', label: 'SQLite', guide: 'Run SQL queries (SQLite syntax). Use describeTable FIRST, then runQuery. SQLite is file-based with limited ALTER TABLE support.' },
+      'mongodb':          { emoji: '🗄', label: 'MongoDB', guide: 'Query MongoDB collections. Uses document-based (NoSQL) queries, not SQL. Use find/aggregate operations instead of runQuery.' },
+      'knowledge-graph':  { emoji: '🔗', label: 'Knowledge Graph (Neo4j)', guide: 'Use searchGraph to discover entity relationships, foreign keys, and how tables/entities connect. Query AFTER searchKnowledge to map out dependencies.' },
+      'vector-db':        { emoji: '📊', label: 'Vector DB', guide: 'Use semantic search to find relevant documents by meaning, not keywords. Good for policy docs, manuals, and unstructured text.' },
+      'local-dir':        { emoji: '📁', label: 'Local Directory', guide: 'Read/write files on the server. Use for loading data files (CSV, Excel, JSON), reading configs, or saving output artifacts.' },
+      'rest':             { emoji: '🌐', label: 'REST API', guide: 'Call external REST APIs for real-time data. Use http_request with this connector base URL.' },
+      'slack':            { emoji: '💬', label: 'Slack', guide: 'Send messages/notifications to Slack channels. Use for status updates, alerts, or requesting human input.' },
+      'gmail':            { emoji: '📧', label: 'Gmail', guide: 'Send/receive emails. Use for email notifications, report distribution, or email-based workflows.' },
+      'jira':             { emoji: '🎫', label: 'Jira', guide: 'Create/update Jira issues, search tickets, manage workflows. Use for ticket-based task tracking.' },
+      'github':           { emoji: '🐙', label: 'GitHub', guide: 'Access repos, issues, PRs, and code. Use for code review workflows, issue tracking, or repo management.' },
+      'docker':           { emoji: '🐳', label: 'Docker', guide: 'Run containers and manage Docker resources. Use docker_run for isolated execution environments.' },
+      'notion':           { emoji: '📝', label: 'Notion', guide: 'Read/write Notion pages and databases. Use for documentation, wikis, and knowledge management.' },
+      'linear':           { emoji: '📋', label: 'Linear', guide: 'Manage Linear issues and projects. Use for software project tracking and sprint management.' },
+      'webhook':          { emoji: '🪝', label: 'Webhook', guide: 'Trigger external webhooks. Use for integrating with external automation platforms (Zapier, Make, etc.).' },
+      'whatsapp':         { emoji: '💬', label: 'WhatsApp', guide: 'Send WhatsApp messages. Use for mobile notifications and messaging workflows.' },
+      'telegram':         { emoji: '✈️', label: 'Telegram', guide: 'Send Telegram messages. Use for bot-based notifications and chat workflows.' },
+      'local-shell':      { emoji: '💻', label: 'Local Shell', guide: 'Execute shell commands on the server. Use for scripts, file operations, and system tasks.' },
+      'local-applescript':{ emoji: '🍎', label: 'AppleScript', guide: 'Run macOS automation scripts. Use for desktop automation on Mac.' },
+      'ssh':              { emoji: '🔐', label: 'SSH', guide: 'Execute commands on remote servers via SSH. Use for remote system administration.' },
+      'mcp':              { emoji: '🖥', label: 'MCP Server', guide: 'Call MCP tools for extended capabilities. Each MCP server has its own tool set.' },
+      'browser_use':      { emoji: '🌐', label: 'Browser', guide: 'Control a real web browser. Use for web scraping, form filling, and web-based workflows.' },
+      'a2a':              { emoji: '🤖', label: 'Agent-to-Agent', guide: 'Delegate sub-tasks to other agents. Use for complex multi-agent workflows.' },
+    }
+
+    // Build a dynamic connector guidance block based on what the agent has
+    const connectorGuidanceLines = []
+    for (const toolId of connectorToolIds) {
+      const g = CONNECTOR_GUIDANCE[toolId]
+      if (g) connectorGuidanceLines.push(`${g.emoji} ${g.label}: ${g.guide}`)
+    }
+    const connectorGuidanceBlock = connectorGuidanceLines.length > 0
+      ? `\n── CONNECTOR USAGE GUIDE ──\n${connectorGuidanceLines.join('\n')}\n── END CONNECTOR GUIDE ──`
+      : ''
     let knowledgeBlock = ''
     if (knowledgeBaseNames.length > 0) {
-      knowledgeBlock = `\nKnowledge: ${knowledgeBaseNames.join(', ')}`
+      knowledgeBlock = `\n📚 Knowledge Bases: ${knowledgeBaseNames.join(', ')}`
+      if (hasKnowledgeSearch) {
+        knowledgeBlock += `\n  ⚠️ USE searchKnowledge to query these documents — your schema specs, policies, and data dictionaries are HERE, NOT in the database. Query KB BEFORE calling database tools.`
+      }
     }
 
     // 8. Build the profile summary (for console logging)
@@ -2314,9 +1967,10 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
       `Connections:`,
       `  HTTP/web:  ${hasHttp ? '✅ http_request' : '❌ none'}`,
       `  Browser:   ${hasBrowser ? '✅ browser_use' : '❌ none'}`,
-      `  Connectors: ${connectorConnections.length > 0 ? `✅ ${connectorConnections.join(', ')}` : connectorToolCount > 0 ? `✅ ${connectorToolCount} tool(s)` : '❌ none'}`,
+      `  Connectors: ${connectorConnections.length > 0 ? `✅ ${connectorConnections.map(c => `${c.name} (${c.tool_id})`).join(', ')}` : connectorToolCount > 0 ? `✅ ${connectorToolCount} tool(s)` : '❌ none'}`,
       `  MCPs:      ${mcpToolCount > 0 ? `✅ ${mcpToolCount} tool(s)` : '❌ none'}`,
-      `  Knowledge: ${knowledgeBaseNames.length > 0 ? `✅ ${knowledgeBaseNames.join(', ')}` : '❌ none'}`,
+      `  Knowledge: ${knowledgeBaseNames.length > 0 ? `✅ ${knowledgeBaseNames.join(', ')}` : '❌ none'}${hasKnowledgeSearch ? ' (searchKnowledge available)' : ''}`,
+      `  Graph:     ${hasGraphSearch ? '✅ Neo4j knowledge graph (searchGraph available)' : '❌ none'}`,
       `  Publish:   ${hasPublish ? '✅ publish_dashboard_report' : '❌ none'}`,
       `  Custom:    ${customSkillCount > 0 ? `✅ ${customSkillCount} skill(s)` : '❌ none'}`,
       `Total tools: ${toolDefinitions.length}`,
@@ -2337,6 +1991,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
       hasHttp,
       hasBrowser,
       hasPublish,
+      hasKnowledgeSearch,
+      hasGraphSearch,
       connectorToolCount,
       mcpToolCount,
       customSkillCount,
@@ -2369,51 +2025,150 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
         !['db__','database__'].some(dp => t.name.startsWith(dp)))
       .map(t => t.name.replace(/__/g, ' → '))
 
+    // ── Categorize all tools into Knowledge vs Action ──────────────────────
+    // KNOWLEDGE: tools that READ/GATHER information
+    // ACTION: tools that TRANSFORM/PUBLISH/SEND/EXECUTE
+    const knowledgeToolNames = ['searchKnowledge','searchGraph','listTables','describeTable','listDatabases','useDatabase','runQuery']
+    const mlToolNames = ['ml_classify','ml_transcribe','ml_sentiment','ml_entities','ml_ocr','ml_translate','ml_summarize']
+    const hasMlTools = toolDefinitions.some(t => mlToolNames.includes(t.name))
+    const activeMlTools = toolDefinitions.filter(t => mlToolNames.includes(t.name)).map(t => t.name)
+    const hasActionConnectors = connectorToolIds.size > 0
+
     const toolsSection = [
       `── YOUR TOOLS (call these — do NOT hallucinate) ──`,
-      dataToolNames.length > 0 ? `📊 Data: ${dataToolNames.join(', ')}` : '',
+      dataToolNames.length > 0 ? `📖 Knowledge: ${dataToolNames.join(', ')}` : '',
       webToolNames.length > 0 ? `🌐 Web: ${webToolNames.join(', ')}` : '',
-      fileToolNames.length > 0 ? `📁 Files: ${fileToolNames.join(', ')}` : '',
+      fileToolNames.length > 0 ? `📁 Files: ${fileToolNames.join(', ')} — use write_artifact for ALL file outputs (SQL, SVG, MD, JSON, CSV, HTML)` : '',
+      activeMlTools.length > 0 ? `🧠 ML/AI: ${activeMlTools.join(', ')}` : '',
       shellToolNames.length > 0 ? `💻 Shell: ${shellToolNames.join(', ')}` : '',
-      publishToolNames.length > 0 ? `📄 Publish: ${publishToolNames.join(', ')}` : '',
+      publishToolNames.length > 0 ? `📄 publish_dashboard_report — ONLY for interactive dashboards, NOT for static files (use write_artifact instead)` : '',
       connectorToolShortNames.length > 0 ? `🔌 Connectors: ${connectorToolShortNames.join(', ')}` : '',
       mcpToolNames.length > 0 ? `🖥 MCP: ${mcpToolNames.slice(0,8).join(', ')}${mcpToolNames.length > 8 ? ` +${mcpToolNames.length - 8} more` : ''}` : '',
       delegateToolNames.length > 0 ? `⚙ Advanced (use ONLY after direct tools fail): ${delegateToolNames.join(', ')}` : '',
-      `── START WITH direct tools (Data/Web/Files). Delegate ONLY if the task is too large for one agent. ──`,
-    ].filter(Boolean).join('\n')
+    ].filter(Boolean)
 
-    // 9. Build the LLM-visible context block — what CONNECTIONS this agent has
-    //    The LLM sees this BEFORE it starts calling tools, so it knows ALL
-    //    databases, connectors, MCPs, and knowledge bases available to it.
+    // ── Build CRITICAL WORKFLOW section based on what tools exist ──
+    const gatherSources = []
+    if (dataToolNames.includes('searchKnowledge')) gatherSources.push('KB')
+    if (dataToolNames.includes('searchGraph')) gatherSources.push('Graph')
+    if (dataToolNames.some(n => ['runQuery','listTables','describeTable'].includes(n))) gatherSources.push('DB')
+    if (gatherSources.length > 0) {
+      toolsSection.push('', `⚠️ CRITICAL WORKFLOW:`)
+      toolsSection.push(`  1️⃣ KNOWLEDGE first → gather from ${gatherSources.join(', ')}`)
+    }
+    if (fileToolNames.includes('write_artifact')) {
+      if (!gatherSources.length) toolsSection.push('', `⚠️ CRITICAL WORKFLOW:`)
+      toolsSection.push(`  ${gatherSources.length > 0 ? '2' : '1'}️⃣ write_artifact for EVERY file-based output (SQL, SVG, MD, JSON, CSV)`)
+    }
+    if (publishToolNames.includes('publish_dashboard_report')) {
+      if (!gatherSources.length && !fileToolNames.includes('write_artifact')) toolsSection.push('', `⚠️ CRITICAL WORKFLOW:`)
+      const n = (gatherSources.length > 0 ? 1 : 0) + (fileToolNames.includes('write_artifact') ? 1 : 0) + 1
+      toolsSection.push(`  ${n}️⃣ publish_dashboard_report ONLY if the task asks for an interactive dashboard`)
+      toolsSection.push(`  ${n+1}️⃣ NEVER call publish_dashboard_report for DDL, ERD, or documentation files`)
+    }
+
+    // ── DB type label helper: maps tool_id + db_type to human-readable name
+    // Works for PostgreSQL, MySQL, Snowflake, Redshift, MSSQL, BigQuery, SQLite, etc.
+    const getDbTypeLabel = (toolId, dbType) => {
+      if (dbType) {
+        const t = dbType.toLowerCase()
+        if (t === 'postgresql' || t === 'postgres') return 'PostgreSQL'
+        if (t === 'mysql' || t === 'mariadb') return 'MySQL'
+        if (t === 'mssql' || t === 'sqlserver') return 'SQL Server'
+        return dbType.charAt(0).toUpperCase() + dbType.slice(1)
+      }
+      if (toolId === 'postgres') return 'PostgreSQL'
+      if (toolId === 'mysql') return 'MySQL'
+      if (toolId === 'snowflake') return 'Snowflake'
+      if (toolId === 'redshift') return 'Redshift'
+      if (toolId === 'bigquery') return 'BigQuery'
+      if (toolId === 'mssql') return 'SQL Server'
+      if (toolId === 'sqlite') return 'SQLite'
+      if (toolId === 'mongodb') return 'MongoDB'
+      return 'Database'
+    }
+
+    // ── DB-agnostic guide text: works for any SQL/NoSQL engine
+    const getDbGuide = (hasConns) => {
+      if (!hasConns) return `use listTables to discover what exists`
+      return `use describeTable to see columns BEFORE running queries; then runQuery for sample data`
+    }
+    const activeDbType = agent._dbType || (allDbConnections[0]?.tool_id) || 'postgresql'
+    const activeDbTypeLabel = getDbTypeLabel(allDbConnections[0]?.tool_id, activeDbType)
+
+    // 9. Build the LLM-visible context block — split into two clear sections
     let dbContextLine
     if (allDbConnections.length === 0) {
       dbContextLine = hasDbTools
-        ? `Databases: ✅ DB tools available — use listTables to discover schemas`
-        : `Databases: ❌ NONE — you CANNOT run SQL queries`
+        ? `Database: ✅ DB tools available — use listTables to discover schemas`
+        : `Database: ❌ NONE — you CANNOT run SQL queries`
     } else if (allDbConnections.length === 1) {
       const db = allDbConnections[0]
-      dbContextLine = `Databases: ✅ ${db.name} — ${activeDbStatus}`
+      const dbLabel = getDbTypeLabel(db.tool_id, null)
+      dbContextLine = `${dbLabel}: ✅ ${db.name} — ${activeDbStatus}`
     } else {
       const dbList = allDbConnections.map(d =>
-        d.name === activeDbName ? `${d.name} ⬅ active` : d.name
+        `${d.name}${d.name === activeDbName ? ' ⬅ active' : ''}`
       ).join(', ')
-      dbContextLine = `Databases: ✅ ${allDbConnections.length} databases — ${activeDbName} is active (${activeDbStatus})\n  All: ${dbList}`
+      dbContextLine = `${allDbConnections.length} databases — ${activeDbName} ⬅ active (${activeDbTypeLabel}, ${activeDbStatus})\n  All: ${dbList}`
     }
 
+    // ── Build KNOWLEDGE SOURCES block ──
+    const knowledgeLines = []
+    if (knowledgeBaseNames.length > 0 && hasKnowledgeSearch) {
+      knowledgeLines.push(`📚 Knowledge Base: ${knowledgeBaseNames.join(', ')} — use searchKnowledge (vector search on uploaded docs, Excel, PDFs, policies)`)
+    } else if (knowledgeBaseNames.length > 0) {
+      knowledgeLines.push(`📚 Knowledge Base: ${knowledgeBaseNames.join(', ')}`)
+    }
+    if (hasGraphSearch) {
+      knowledgeLines.push(`🔗 Knowledge Graph: Neo4j graph — use searchGraph to discover entity relationships, foreign keys, and how things connect`)
+    }
+    if (allDbConnections.length > 0 || hasDbTools) {
+      knowledgeLines.push(`🗄 ${dbContextLine} — ${getDbGuide(allDbConnections.length > 0)}`)
+      if (allDbConnections.length > 0) {
+        knowledgeLines.push(`   Note: This is a ${activeDbTypeLabel} database — use ${activeDbTypeLabel}-compatible SQL syntax.`)
+      }
+    }
+
+    // ── Build ACTION SYSTEMS block ──
+    const actionLines = []
+    if (hasMlTools) {
+      actionLines.push(`🧠 ML Service: ${activeMlTools.join(', ')} — classify text, extract entities, transcribe, translate. Send data HERE after gathering from knowledge sources.`)
+    }
+    if (connectorConnections.length > 0) {
+      const actionConns = connectorConnections.filter(c => c.tool_id !== 'knowledge-graph' && c.tool_id !== 'vector-db')
+      if (actionConns.length > 0) {
+        const connList = actionConns.map(c => `${c.name} (${c.tool_id})`).join(', ')
+        actionLines.push(`🔌 Target Systems: ${connList} — send results, trigger workflows, notify teams`)
+      }
+    }
+    if (hasHttp) {
+      actionLines.push(`🌐 HTTP: call external REST APIs for real-time data or triggering downstream systems`)
+    }
+    if (hasBrowser) {
+      actionLines.push(`🌐 Browser: control a real web browser for web scraping or web-based workflows`)
+    }
+    if (hasPublish) {
+      actionLines.push(`📄 publish_dashboard_report — ONLY for interactive dashboards. For ALL static files (SQL, SVG, MD, JSON, CSV), use write_artifact instead.`)
+    }
+
+    const knowledgeSection = knowledgeLines.length > 0
+      ? `📖 KNOWLEDGE SOURCES (gather information here first):\n${knowledgeLines.map(l => `  ${l}`).join('\n')}`
+      : ''
+    const actionSection = actionLines.length > 0
+      ? `⚡ ACTION & TARGET SYSTEMS (transform / publish / send results here):\n${actionLines.map(l => `  ${l}`).join('\n')}`
+      : ''
+
     const llmContextBlock = [
-      toolsSection,
+      toolsSection.filter(Boolean).join('\n'),
       ``,
-      `── YOUR CONNECTIONS ──`,
-      `Model: ${isTrainedModel ? 'TRAINED (fine-tuned for this database)' : 'STANDARD — be careful with SQL, always check schema first'}`,
-      dbContextLine,
-      hasDbTools ? `  → Use describeTable to see columns FIRST, then runQuery with correct SQL` : '',
-      hasHttp ? `HTTP: ✅ you can call external APIs` : '',
-      hasBrowser ? `Browser: ✅ you can control a real web browser` : '',
-      hasPublish ? `Publish: ✅ you can publish reports to the dashboard` : '',
-      connectorBlock,
+      `── CONNECTION DETAILS ──`,
+      `Model: ${isTrainedModel ? 'TRAINED (fine-tuned for this database)' : 'STANDARD — always verify schema before querying'}`,
+      knowledgeSection,
+      actionSection,
+      connectorGuidanceBlock,
       mcpBlock,
-      knowledgeBlock,
-      `── END CONNECTIONS ──`,
+      `── END CONNECTION DETAILS ──`,
     ].filter(Boolean).join('\n')
 
     // ── Inject as the FIRST user message so LLM knows its connections
@@ -2442,10 +2197,6 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
     let taskSatisfied = false
     let reflectionLoops = 0
     const MAX_REFLECTION_LOOPS = 3
-    // Set when the deterministic diagram fast-path generates a report directly
-    // (skips the LLM tool loop + LLM synthesis). The synthesis section and the
-    // auto-report section read this instead of calling the LLM.
-    let diagramFastPath = null
     // Track last tool+input fingerprint to detect infinite loops in small models
     const _executedToolPrints = new Set()  // fingerprint → true, blocks re-execution
     const _executedToolResults = new Map()  // fingerprint → stored result (for duplicate return)
@@ -2454,6 +2205,95 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
     // Track JSON tool-call retries for models without native function calling
     let toolRetryCount = 0
     const MAX_TOOL_RETRIES = 1
+
+    // ── Checkpoint helpers ─────────────────────────────────────────────────
+    const _buildLoopState = () => ({
+      actionCount,
+      taskSatisfied,
+      reflectionLoops,
+      _consecutiveDedupCount,
+      _consecutivePublishRejections,
+      toolRetryCount,
+      _hasRealData: agent._hasRealData,
+      _reportPublishedThisTask: agent._reportPublishedThisTask,
+      _describedTables: [...(agent._describedTables || [])],
+      _hasRunAnyTool: agent._hasRunAnyTool,
+      _hasTriedDirectWork: agent._hasTriedDirectWork,
+      _toolIncapable: agent._toolIncapable,
+      _toolIncapableModel: agent._toolIncapableModel,
+      _executedToolPrints: [..._executedToolPrints]
+    })
+    const saveCheckpoint = async () => {
+      try {
+        const checkpoint = {
+          version: 1,
+          type: 'execution',
+          savedAt: new Date().toISOString(),
+          messages: execMessages,
+          actions,
+          loopState: _buildLoopState()
+        }
+        await query(
+          `UPDATE agent_tasks SET execution_checkpoint = $1 WHERE id = $2 AND tenant_id = $3`,
+          [JSON.stringify(checkpoint), task.id, tenantId]
+        )
+      } catch (cpErr) {
+        console.warn(`[Task ${task.id}] saveCheckpoint failed (non-fatal):`, cpErr.message)
+      }
+    }
+    // Combined persist: actions + checkpoint in one round-trip
+    const persistActions = async () => {
+      try {
+        const checkpoint = {
+          version: 1,
+          type: 'execution',
+          savedAt: new Date().toISOString(),
+          messages: execMessages,
+          actions,
+          loopState: _buildLoopState()
+        }
+        await query(
+          `UPDATE agent_tasks SET actions = $1, execution_checkpoint = $2 WHERE id = $3 AND tenant_id = $4`,
+          [JSON.stringify(actions), JSON.stringify(checkpoint), task.id, tenantId]
+        )
+      } catch (pErr) {
+        // Fallback: at least persist actions even if checkpoint fails
+        console.warn(`[Task ${task.id}] persistActions with checkpoint failed, falling back:`, pErr.message)
+        await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+      }
+    }
+
+    // ── Restore from checkpoint if this is a retry ─────────────────────────
+    const _taskCtx = (typeof task.context === 'string' ? JSON.parse(task.context || '{}') : task.context) || {}
+    if (_taskCtx._resumeFromCheckpoint && task.execution_checkpoint) {
+      try {
+        const cp = typeof task.execution_checkpoint === 'string'
+          ? JSON.parse(task.execution_checkpoint)
+          : task.execution_checkpoint
+        if (cp?.version === 1 && cp.type === 'execution') {
+          console.log(`[Task ${task.id}] Restoring from checkpoint (savedAt=${cp.savedAt}, actions=${cp.actions?.length})`)
+          execMessages.length = 0
+          execMessages.push(...(cp.messages || []))
+          actions.push(...(cp.actions || []))
+          const ls = cp.loopState || {}
+          actionCount = ls.actionCount || 0
+          taskSatisfied = ls.taskSatisfied || false
+          reflectionLoops = ls.reflectionLoops || 0
+          _consecutiveDedupCount = ls._consecutiveDedupCount || 0
+          _consecutivePublishRejections = ls._consecutivePublishRejections || 0
+          toolRetryCount = ls.toolRetryCount || 0
+          agent._hasRealData = ls._hasRealData || false
+          agent._reportPublishedThisTask = ls._reportPublishedThisTask || false
+          agent._describedTables = new Set(ls._describedTables || [])
+          agent._hasRunAnyTool = ls._hasRunAnyTool || false
+          agent._hasTriedDirectWork = ls._hasTriedDirectWork || false
+          if (ls._executedToolPrints) ls._executedToolPrints.forEach(p => _executedToolPrints.add(p))
+          execMessages.push({ role: 'user', content: '⟳ Task resumed from checkpoint. Continue where you left off.' })
+        }
+      } catch (restoreErr) {
+        console.warn(`[Task ${task.id}] Checkpoint restore failed, starting fresh:`, restoreErr.message)
+      }
+    }
     // Maximum time to wait for a delegation (a2a_call / delegate_task) to complete.
     // Matches workflow.service.js's AGENT_TASK_TIMEOUT_MS so crew steps and inline
     // delegation share the same SLA. After this the caller sees a timeout error.
@@ -2628,17 +2468,19 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
       const FAST_MAX = 5
 
       for (let fi = 0; fi < FAST_MAX && !taskSatisfied; fi++) {
-        // tool_choice: 'required' until data exists, then 'required' for publish, then 'auto'
-        const tcMode = (!hasQueriedData) ? 'required'
-          : (hasQueriedData && !fastPublishDone && publishToolDef) ? 'required'
-          : 'auto'
+        // tool_choice: 'required' only until data is gathered, then 'auto'
+        // The LLM decides whether to publish a report or write artifacts.
+        const tcMode = (!hasQueriedData) ? 'required' : 'auto'
 
-        // Dynamic tool list: include publish only after data is available
-        const activeFastTools = (hasQueriedData && publishToolDef)
+        // Always include publish in the tool list — the LLM decides the output strategy
+        const activeFastTools = publishToolDef
           ? [...fastTools, publishToolDef]
           : fastTools
 
         if (taskTimedOut) throw new AppError('TASK_TIMEOUT', 'Task exceeded maximum execution time', 408)
+
+        // ── Context-window management: trim old turns before LLM call ──
+        manageContextWindow(execMessages, agent, task.id)
 
         const resp = await completeStream({
           tenantId: agent.tenant_id,
@@ -2694,7 +2536,7 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
                 taskId: task.id, actionIdx: actionCount,
                 tool: syntheticCall.function.name, success: toolResult.success, output: toolResult
               })
-              await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+              await persistActions()
               continue  // skip to next loop iteration
             }
             _executedToolPrints.add(fp)
@@ -2720,7 +2562,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
             if (syntheticCall.function.name === 'publish_dashboard_report' && toolResult.success) {
               fastPublishDone = true
               agent._reportPublishedThisTask = true
-              taskSatisfied = true
+              // Do NOT set taskSatisfied here — the agent may have more
+              // deliverables (ERD, DDL, diagrams). Let it decide when done.
             }
             // Inject newly created connector tools mid-task (create_connector)
             if (toolResult.newTools?.length) {
@@ -2741,17 +2584,6 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
               tool: syntheticCall.function.name, success: toolResult.success, output: toolResult
             })
 
-            // Inject publish prompt after successful runQuery
-            if (syntheticCall.function.name === 'runQuery' && toolResult.success && publishToolDef) {
-                const publishHint = /(svg|diagram|drawing)/i.test(task.goal) 
-                  ? `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", svg_content: "<your svg code>", output_format: "svg" }.`
-                  : `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", summary: "<one-sentence>", output_format: "chart" } (do NOT include df — data is automatically attached).`
-                execMessages.push({
-                  role: 'user',
-                  content: `${publishHint} Do NOT write any text first — output the tool call JSON IMMEDIATELY.`
-                })
-            }
-
             // ── Column-error retry: mirror chat.service.js ──
             if (syntheticCall.function.name === 'runQuery' && !toolResult.success && !hasQueriedData) {
               const errMsg = typeof toolResult.error === 'string' ? toolResult.error : JSON.stringify(toolResult.error || '')
@@ -2762,7 +2594,7 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
                 })
               }
             }
-            await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+            await persistActions()
             continue
           }
           // ── Can't parse → inject retry prompt ──────────────────────────
@@ -2833,7 +2665,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
           if (tc.function.name === 'publish_dashboard_report' && toolResult.success) {
             fastPublishDone = true
             agent._reportPublishedThisTask = true
-            taskSatisfied = true
+            // Do NOT set taskSatisfied here — the agent may have more
+            // deliverables (ERD, DDL, diagrams). Let it decide when done.
           }
           // Inject newly created connector tools mid-task (create_connector)
           if (toolResult.newTools?.length) {
@@ -2853,17 +2686,6 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
             taskId: task.id, actionIdx: actionCount,
             tool: tc.function.name, success: toolResult.success, output: toolResult
           })
-
-          // Inject publish prompt after successful runQuery
-          if (tc.function.name === 'runQuery' && toolResult.success && publishToolDef && !fastPublishDone) {
-              const publishHint2 = /(svg|diagram|drawing)/i.test(task.goal) 
-                ? `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", svg_content: "<your svg code>", output_format: "svg" }.`
-                : `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", summary: "<one-sentence>", output_format: "chart" } (do NOT include df — data is automatically attached).`
-              execMessages.push({
-                role: 'user',
-                content: `${publishHint2} Do NOT write any text first — output the tool call JSON IMMEDIATELY.`
-              })
-          }
 
           // ── Column-error retry: mirror chat.service.js ──
           if (tc.function.name === 'runQuery' && !toolResult.success && !hasQueriedData) {
@@ -2887,7 +2709,7 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
           }
         }
 
-        await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+        await persistActions()
       }
 
       // ── Fast path finished: skip reflection entirely ───────────────────
@@ -2907,128 +2729,6 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
       }
     }
 
-    // ── DIAGRAM FAST-PATH ────────────────────────────────────────────────
-    // Small local LLMs (qwen3) cannot emit structured tool calls, so pure
-    // visualization goals (beam/flow/erd/org diagrams) that need no external
-    // data stall in the LLM tool loop and then produce prose instead of a real
-    // diagram. For these, generate the diagram deterministically from the
-    // curated template — fast, and always a real SVG.
-    {
-      const diagramTpl = reportTemplateForGoal(task.goal)
-      const diagramNeedsData = /(?:from|using|based\s+on|of\s+the|from\s+the)\s+(?:the\s+)?(?:database|db|schema|table|data|dataset|csv|json|file|files|query|api|sql)\b/i.test(task.goal)
-      // Fast path is ONLY for local Ollama models that cannot emit tool calls.
-      // Cloud models (Groq, OpenAI, etc.) can tool-call natively — let the LLM loop handle it.
-      const isLocalOnlyModel = agent.llm_provider === 'ollama'
-      if (isLocalOnlyModel && diagramTpl?.template && !diagramNeedsData && !agentDbConnectionString) {
-        // Use the pre-rendered template directly (villa, beam, etc.)
-        // For beam diagrams the template was already rendered by reportTemplateForGoal();
-        // same for villa site plans — we never call the LLM here.
-        const svgContent = diagramTpl.template
-        const isVillaGoal = /\bvilla\b/i.test(task.goal)
-        const fname = isVillaGoal ? `villa-site-plan-${Date.now()}.svg` : `beam-diagram-${Date.now()}.svg`
-        const dateDir = new Date().toISOString().slice(0, 10)
-        const artifactsDir = join(__dirname, '..', '..', '..', '..', 'artifacts', agent.tenant_id, dateDir)
-        await mkdir(artifactsDir, { recursive: true })
-        await writeFile(join(artifactsDir, fname), svgContent, 'utf-8')
-        const downloadUrl = `/api/v1/artifacts/${agent.tenant_id}/${fname}`
-
-        const tcId = randomUUID()
-        const toolResult = {
-          success: true,
-          message: 'Artifact saved successfully',
-          download_url: downloadUrl,
-          format: 'svg',
-          hasStructuredData: true,
-          category: TOOL_CATEGORY.ARTIFACT,
-        }
-        actions.push({
-          id: tcId, skill: 'write_artifact',
-          input: { filename: fname, content: svgContent, format: 'svg' },
-          output: toolResult, timestamp: new Date().toISOString(),
-        })
-        await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
-
-        // Feed the synthetic tool call + result into execMessages so any
-        // downstream logic sees the artifact was created.
-        execMessages.push({
-          role: 'assistant',
-          content: '',
-          tool_calls: [{ id: tcId, type: 'function', function: { name: 'write_artifact', arguments: JSON.stringify({ filename: fname, content: svgContent, format: 'svg' }) } }],
-        })
-        execMessages.push({ role: 'tool', tool_call_id: tcId, content: JSON.stringify(toolResult) })
-
-        broadcastTelemetry(tenantId, 'agent.tool_result', {
-          taskId: task.id, actionIdx: 0, tool: 'write_artifact', success: true, output: toolResult,
-        })
-
-        diagramFastPath = {
-          synthesisText: isVillaGoal
-            ? `✅ Villa site plan SVG generated.\n\nDownload: ${downloadUrl}\n\nThe diagram shows 5 villas (V1–V5) arranged around a central garden with an access road.`
-            : `✅ Diagram generated and saved as an SVG artifact.\n\nDownload: ${downloadUrl}`,
-        }
-        taskSatisfied = true
-        console.log(`[DIAGRAM-FAST-PATH] ${isVillaGoal ? 'Villa site plan' : 'Beam diagram'} matched template — saved ${fname}, skipping LLM tool loop`)
-      }
-    }
-
-    // ── JIRA DASHBOARD FAST-PATH ─────────────────────────────────────────
-    // Same rationale as the diagram fast-path: qwen3 can't tool-call, so a
-    // "Jira sprint dashboard" goal would never call jira__search_issues. Fetch
-    // real Jira data via the connector and build an HTML Chart.js dashboard
-    // deterministically. Falls through to the normal LLM loop on any failure.
-    if (!taskSatisfied && detectJiraDashboardGoal(task.goal)) {
-      try {
-        const jiraData = await fetchJiraDashboardData(agent.tenant_id)
-        if (jiraData && jiraData.totalIssues > 0) {
-          const jiraMetrics = computeJiraMetrics(jiraData)
-          const dashboardHtml = jiraDashboardTemplate(jiraData, jiraMetrics)
-          const dateDir = new Date().toISOString().slice(0, 10)
-          const artifactsDir = join(__dirname, '..', '..', '..', '..', 'artifacts', agent.tenant_id, dateDir)
-          await mkdir(artifactsDir, { recursive: true })
-          const fname = `jira-dashboard-${Date.now()}.html`
-          await writeFile(join(artifactsDir, fname), dashboardHtml, 'utf-8')
-          const downloadUrl = `/api/v1/artifacts/${agent.tenant_id}/${fname}`
-
-          const tcId = randomUUID()
-          const toolResult = {
-            success: true,
-            message: 'Artifact saved successfully',
-            download_url: downloadUrl,
-            format: 'html',
-            hasStructuredData: true,
-            category: TOOL_CATEGORY.ARTIFACT,
-          }
-          actions.push({
-            id: tcId, skill: 'write_artifact',
-            input: { filename: fname, content: dashboardHtml, format: 'html' },
-            output: toolResult, timestamp: new Date().toISOString(),
-          })
-          await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
-
-          execMessages.push({
-            role: 'assistant',
-            content: '',
-            tool_calls: [{ id: tcId, type: 'function', function: { name: 'write_artifact', arguments: JSON.stringify({ filename: fname, content: dashboardHtml, format: 'html' }) } }],
-          })
-          execMessages.push({ role: 'tool', tool_call_id: tcId, content: stringifyToolResult(toolResult) })
-
-          broadcastTelemetry(tenantId, 'agent.tool_result', {
-            taskId: task.id, actionIdx: actions.length - 1, tool: 'write_artifact', success: true, output: toolResult,
-          })
-
-          diagramFastPath = {
-            synthesisText: buildJiraSynthesis(jiraData, jiraMetrics, downloadUrl),
-          }
-          taskSatisfied = true
-          console.log(`[JIRA-FAST-PATH] Built dashboard from ${jiraData.totalIssues} issues across ${jiraData.sprints.length} sprints — saved ${fname}, skipping LLM tool loop`)
-        } else {
-          console.log(`[JIRA-FAST-PATH] No Jira connector/data available for tenant ${agent.tenant_id} — falling through to LLM loop`)
-        }
-      } catch (err) {
-        console.log(`[JIRA-FAST-PATH] Data fetch failed (${err.message}) — falling through to LLM loop`)
-      }
-    }
-
     while (!taskSatisfied && reflectionLoops < MAX_REFLECTION_LOOPS && actionCount < maxActions) {
       reflectionLoops++
       let continueToolLoop = true
@@ -3036,11 +2736,17 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
 
       // Tool execution sub-loop
       while (continueToolLoop && actionCount < maxActions) {
-        // Check if task was cancelled by user
-        const { rows: [currStatus] } = await query('SELECT status FROM agent_tasks WHERE id = $1', [task.id])
+        // Check if task was cancelled (by user OR by supervisor)
+        const { rows: [currStatus] } = await query('SELECT status, error FROM agent_tasks WHERE id = $1', [task.id])
         if (currStatus?.status === 'CANCELLED') {
-          broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'cancelled', label: 'Execution stopped by user' })
-          return { success: false, status: 'CANCELLED', error: 'Task stopped by user' }
+          const supervisorReason = (currStatus?.error || '').includes('[Supervisor]')
+            ? currStatus.error.replace(/.*\[Supervisor\]\s*/s, '').trim()
+            : ''
+          const label = supervisorReason
+            ? `🛑 Task cancelled by supervisor: ${supervisorReason}`
+            : 'Execution stopped by user'
+          broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'cancelled', label })
+          return { success: false, status: 'CANCELLED', error: supervisorReason || 'Task stopped by user' }
         }
 
         if (taskTimedOut) throw new AppError('TASK_TIMEOUT', `Task exceeded maximum execution time`, 408)
@@ -3073,34 +2779,61 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
         //
         // Mirror chat's hasQueriedData pattern:
         // - keep 'required' until runQuery succeeds (has real data) — TRAINED ONLY
-        // - keep 'required' for the publish step (has data but no report yet) — TRAINED ONLY
-        // - switch to 'auto' only AFTER both data-gathering AND publish are done
-        // - STANDARD models: always 'auto' (they decide whether to query)
+        // - STANDARD models: always 'auto' (they decide whether to query AND what to output)
         const needsDataPhase = agent._isTrainedModel && agentDbConnectionString && !agent._hasRealData
-        const needsPublishPhase = agent._isTrainedModel && agent._hasRealData && !agent._reportPublishedThisTask
-        const thinkingTc = (needsDataPhase || needsPublishPhase)
+        const thinkingTc = needsDataPhase
           ? 'required'
           : (agent._isTrainedModel && actionCount === 0 ? 'required' : 'auto')
         if (!agent._isTrainedModel && agentDbConnectionString) {
           console.log(`[Task ${task.id}] Standard model with DB access — using tool_choice:auto (not forcing tool calls)`)
         }
 
-        // ── Dynamic tool list: only include publish_dashboard_report AFTER
-        // runQuery has succeeded, OR if the agent has NO data-gathering tools
-        // at all (pure visualization/computation agents that produce reports
-        // directly without a DB, HTTP, browser, or connector). Otherwise,
-        // small models will call publish with fabricated "no data" content
-        // instead of using their data-gathering tools (e.g. jira__search_issues).
-        const hasAnyDataGatheringTool = toolDefinitions.some(t =>
-          CONNECTOR_TOOL_PREFIXES.some(p => t.name.startsWith(p)) ||
-          ['http_request', 'http_download', 'browser_use', 'file_search'].includes(t.name) ||
-          t.name.startsWith('local_dir__') || t.name.startsWith('local_file__')
-        )
-        const publishAvailableNow = agent._hasRealData || (!agentDbConnectionString && !hasAnyDataGatheringTool)
-        const activeTools = publishAvailableNow && publishToolDef
+        // ── Dynamic tool list: always include publish_dashboard_report if not denied.
+        // The LLM decides whether to write_artifact (files → local-dir connector) or
+        // publish_dashboard_report (dashboard report) — the system never forces the choice.
+        const activeTools = publishToolDef
           ? [...toolDefinitions, publishToolDef]
-          : (publishToolDef ? toolDefinitions : toolDefinitions.filter(t => t.name !== 'publish_dashboard_report'))
+          : toolDefinitions
 
+        // ── Tool-capability probe (first iteration only, cached in-memory) ──
+        // One cheap API call per unknown model. Detects models that claim
+        // "tools" in metadata but can't actually return function calls (e.g.
+        // qwen3:4b on Ollama). Fails fast instead of burning a full task.
+        if (actionCount === 0 && activeTools.length > 0 && !agent._toolCapabilityProbed) {
+          agent._toolCapabilityProbed = true
+          const probe = await probeToolCapability(
+            agent.llm_model,
+            agent.llm_config,
+            agent.llm_provider
+          )
+          if (!probe.capable) {
+            // Transient probe errors (Ollama loading model, network hiccup) —
+            // don't fail the task. Let it proceed and rely on the real
+            // tool-call detection after the first LLM iteration.
+            if (probe.transient) {
+              console.warn(`[Task ${task.id}] Tool-capability probe transient error for ${agent.llm_model}: ${probe.reason}. Proceeding with task — will detect incapability from actual tool calls.`)
+            } else {
+              console.warn(`[Task ${task.id}] Tool-incapable model detected by probe: ${agent.llm_model} — failing fast`)
+              agent._toolIncapable = true
+              agent._toolIncapableModel = agent.llm_model || 'the configured model'
+              if (probe.reason) {
+                agent._toolIncapableReason = probe.reason
+              }
+              break // Exit the inner continueToolLoop immediately
+            }
+          }
+        }
+
+        // ── Context-window management: trim old tool turns before LLM call ──
+        manageContextWindow(execMessages, agent, task.id)
+
+        _lastLlmInput = {
+          messageCount: execMessages.length,
+          systemPrompt: effectiveSystemPrompt?.slice(0, 4000),
+          lastUserMessage: [...execMessages].reverse().find(m => m.role === 'user')?.content?.slice(0, 1500),
+          model: agent.llm_model,
+          toolCount: activeTools.length
+        }
         const response = await completeStream({
           tenantId: agent.tenant_id,
           agentId: agent.id,
@@ -3118,9 +2851,12 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
 
         // Save first thinking phase as the plan (so past executions show it)
         if (isFirstThinking && thinkingText.trim()) {
-          await query(`UPDATE agent_tasks SET plan = $1 WHERE id = $2 AND tenant_id = $3`, [{ content: thinkingText.trim() }, task.id, tenantId])
-          broadcastTelemetry(tenantId, 'agent.plan_ready', { taskId: task.id, phase: 'planning', plan: thinkingText.trim() })
-          console.log(`[Task ${task.id}] Plan saved (${thinkingText.length} chars)`)
+          // Strip <think>…</think> blocks from reasoning models (qwen3/Ollama)
+          // before saving or broadcasting the plan.
+          const cleanPlan = stripThinkBlocks(thinkingText.trim())
+          await query(`UPDATE agent_tasks SET plan = $1 WHERE id = $2 AND tenant_id = $3`, [{ content: cleanPlan }, task.id, tenantId])
+          broadcastTelemetry(tenantId, 'agent.plan_ready', { taskId: task.id, phase: 'planning', plan: cleanPlan })
+          console.log(`[Task ${task.id}] Plan saved (${cleanPlan.length} chars)`)
         }
 
         totalTokens.prompt += response.usage.prompt
@@ -3156,6 +2892,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
               await mkdir(artifactsDir, { recursive: true })
               await writeFile(join(artifactsDir, codeArtifact.filename), codeArtifact.content, 'utf-8')
               const downloadUrl = `/api/v1/artifacts/${agent.tenant_id}/${codeArtifact.filename}`
+              // Mirror to any local-dir connectors scoped to this agent
+              mirrorArtifactToLocalDirs(agent, codeArtifact.filename, codeArtifact.content, codeArtifact.format)
               // Synthesise a fake write_artifact tool call so the rest of the
               // pipeline (synthesis, reports, UI) treats this as a normal artifact.
               const tcId = randomUUID()
@@ -3169,7 +2907,7 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
                 input: { filename: codeArtifact.filename, content: codeArtifact.content, format: codeArtifact.format },
                 output: toolResult, timestamp: new Date().toISOString(),
               })
-              await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+              await persistActions()
               execMessages.push({
                 role: 'assistant', content: '',
                 tool_calls: [{ id: tcId, type: 'function', function: { name: 'write_artifact', arguments: JSON.stringify({ filename: codeArtifact.filename, content: codeArtifact.content, format: codeArtifact.format }) } }],
@@ -3178,8 +2916,25 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
               broadcastTelemetry(tenantId, 'agent.tool_result', { taskId: task.id, actionIdx: actions.length, tool: 'write_artifact', success: true, output: toolResult })
               actionCount++
               agent._hasRunAnyTool = true
-              taskSatisfied = true
-              continueToolLoop = false
+              // Track deliverable type for goal-coverage scoring
+              if (!agent._producedDeliverables) agent._producedDeliverables = []
+              agent._producedDeliverables.push(codeArtifact.format || 'artifact')
+              // ── Deliverable guard: don't end if goal requires multiple artifacts ──
+              const { count: rawExpCb } = extractGoalDeliverables(task.goal)
+              const expectedCb = Math.min(rawExpCb, 5)
+              const producedCb = (agent._producedDeliverables || []).length
+              if (expectedCb >= 2 && producedCb < expectedCb) {
+                console.log(`[Task ${task.id}] write_artifact guard: need ${expectedCb}, have ${producedCb}. Not ending.`)
+                execMessages.push({
+                  role: 'user',
+                  content: `✅ Artifact saved. The goal requires ${expectedCb} deliverable types — you have only produced ${producedCb}. Continue creating the remaining outputs. Do NOT stop yet.`
+                })
+                // Don't set taskSatisfied — let the outer loop reach reflection
+                continueToolLoop = false
+              } else {
+                taskSatisfied = true
+                continueToolLoop = false
+              }
             } else if (toolRetryCount < MAX_TOOL_RETRIES && activeTools.length > 0) {
               toolRetryCount++
               // Still no tool call or code block — inject a prompt guiding the model
@@ -3355,13 +3110,23 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
             _consecutiveDedupCount = 0  // non-dedup call resets the counter
           }
 
-          // ── publish_dashboard_report success: mark done and stop tool loop ──
+          // ── publish_dashboard_report success: track it but don't stop.
+          // The agent may have multiple deliverables (ERD, DDL, diagrams).
+          // Let it finish naturally when it stops calling tools.
           if (tc.function.name === 'publish_dashboard_report' && toolResult.success) {
-            console.log(`[Task ${task.id}] Report published — marking task satisfied`)
+            console.log(`[Task ${task.id}] Report published — agent may continue with more deliverables`)
             agent._reportPublishedThisTask = true
-            taskSatisfied = true
-            continueToolLoop = false
-            break
+            // Track produced deliverable for goal-coverage scoring
+            if (!agent._producedDeliverables) agent._producedDeliverables = []
+            agent._producedDeliverables.push('dashboard-report')
+            // Do NOT break — let the agent produce remaining artifacts
+          }
+
+          // ── Track write_artifact deliverables for goal-coverage scoring ──
+          if (tc.function.name === 'write_artifact' && toolResult.success) {
+            if (!agent._producedDeliverables) agent._producedDeliverables = []
+            const fmt = tc.input?.format || toolResult.format || ''
+            agent._producedDeliverables.push(fmt || 'artifact')
           }
 
           // ── create_agent success: when task goal is about agent creation,
@@ -3372,12 +3137,35 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
               console.log(`[Task ${task.id}] Agent created — goal was agent creation, marking satisfied`)
               taskSatisfied = true
               continueToolLoop = false
+              // Track as deliverable for goal-coverage
+              if (!agent._producedDeliverables) agent._producedDeliverables = []
+              agent._producedDeliverables.push('agent')
               break
             }
           }
 
-          // ── runQuery success: aggressively inject publish instruction ──
-          if (tc.function.name === 'runQuery' && toolResult.success && !agent._reportPublishedThisTask && publishToolDef) {
+          // ── Generic deliverable tracking (covers gmail, jira, slack, etc.) ──
+          // Any successful side-effect tool counts as a produced deliverable.
+          // Exclude read-only data gatherers, delegation tools, and internal plumbing.
+          if (toolResult.success) {
+            const NON_DELIVERABLE_TOOLS = new Set([
+              'runQuery', 'describeTable', 'listTables', 'listSchemas',
+              'readFile', 'listDirectory', 'searchKnowledgeBase', 'getAgentConfig',
+              'describeAllTables', 'getDbSchema', 'describeAllColumns',
+              'delegate_task', 'a2a_call', 'create_agent', 'create_workflow', 'create_trigger',
+            ])
+            if (!NON_DELIVERABLE_TOOLS.has(tc.function.name) && tc.function.name !== 'publish_dashboard_report' && tc.function.name !== 'write_artifact') {
+              if (!agent._producedDeliverables) agent._producedDeliverables = []
+              const dt = tc.function.name.replace(/_/g, '-')
+              if (!agent._producedDeliverables.includes(dt)) {
+                agent._producedDeliverables.push(dt)
+                console.log(`[Task ${task.id}] Generic deliverable tracked: ${dt}`)
+              }
+            }
+          }
+
+          // ── runQuery success: inject publish instruction ONLY when goal asks for it ──
+          if (tc.function.name === 'runQuery' && toolResult.success && !agent._reportPublishedThisTask && publishToolDef && /publish|dashboard/i.test(task.goal)) {
               const publishHint2 = /(svg|diagram|drawing)/i.test(task.goal) 
                 ? `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", svg_content: "<your svg code>", output_format: "svg" }.`
                 : `✅ Real data retrieved! NOW call publish_dashboard_report with { title: "${generateReportTitle(task.goal)}", summary: "<one-sentence>", output_format: "chart" } (do NOT include df — data is automatically attached).`
@@ -3410,8 +3198,8 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
           }
         }
 
-        // Batch DB update for all actions
-        await query(`UPDATE agent_tasks SET actions = $1 WHERE id = $2 AND tenant_id = $3`, [JSON.stringify(actions), task.id, tenantId])
+        // Batch DB update for all actions + checkpoint
+        await persistActions()
 
         if (haltLoop) break
       }
@@ -3421,17 +3209,27 @@ Reference previous step outputs with: {{stepId.fieldName}}`,
       if (actionCount >= maxActions) break
 
       // ── Smart skip: If report already published, done ───
-      // Works for both DB and non-DB agents (report itself is the output)
+      // But only if the goal doesn't require multiple distinct deliverables.
       if (agent._reportPublishedThisTask) {
-        taskSatisfied = true
-        break
+        const { count: rawExpRp } = extractGoalDeliverables(task.goal)
+        const expectedRp = Math.min(rawExpRp, 5)
+        const producedRp = (agent._producedDeliverables || []).length
+        if (expectedRp >= 2 && producedRp < expectedRp) {
+          console.log(`[Task ${task.id}] Report guard: need ${expectedRp}, have ${producedRp}. Falling through to reflection.`)
+          // Don't break — fall through to reflection phase (which has the YES_FINISHED guard)
+        } else {
+          taskSatisfied = true
+          break
+        }
       }
 
       // ── Fast-path: Agent has real data from a tool but hasn't published
-      // a report yet. Instead of a full reflection LLM call (±3s), inject a
-      // direct instruction to publish and loop back.
-      const isDataTask = /report|analytics|dashboard|top\s+\d+|ranking|list|show|find|query|search|lookup|get|fetch/i.test(task.goal)
-      if (!agent._reportPublishedThisTask && agent._hasRealData && isDataTask) {
+      // a report yet. Only fires when the goal EXPLICITLY asks for
+      // publish/dashboard AND the agent has publish_dashboard_report scoped.
+      // Generic data tasks (list, query, analyze, dimensional model) do NOT
+      // auto-publish — they go through the normal reflection loop.
+      const wantsPublish = /publish|dashboard/i.test(task.goal)
+      if (hasPublish && !agent._reportPublishedThisTask && agent._hasRealData && wantsPublish) {
         broadcastTelemetry(tenantId, 'agent.phase', { taskId: task.id, phase: 'thinking', label: 'Publishing results...' })
         const publishHint4 = /(svg|diagram|drawing)/i.test(task.goal) 
           ? `You have real data from your tools. IMMEDIATELY call publish_dashboard_report with { title, svg_content, output_format: "svg" } using your results. Do NOT output text — output the tool call JSON now.`
@@ -3473,9 +3271,23 @@ Do NOT fabricate data. Do NOT claim you retrieved data when all tools returned e
 
 Output only "YES_FINISHED" if you actually have verified results.
 Otherwise output "NO_INCOMPLETE" followed by what went wrong and how you will fix it.`
-        : `CRITICAL REFLECTION PHASE: Review your progress against the original goal: "${task.goal}". 
+        : (() => {
+            // ── Goal-aware reflection: extract expected deliverables from the goal ──
+            const { types: expectedDeliverables } = extractGoalDeliverables(task.goal)
+            const delivered = agent._producedDeliverables || []
+            // Store expected types for post-loop scoring if not already set
+            if (!agent._expectedDeliverableCount && expectedDeliverables.length > 0) {
+              agent._expectedDeliverableTypes = expectedDeliverables
+              agent._expectedDeliverableCount = expectedDeliverables.length
+            }
+            const deliverableCheck = expectedDeliverables.length > 1
+              ? `\n\n⚠️  DELIVERABLE CHECK: The goal explicitly requires ${expectedDeliverables.length} types of output:\n${expectedDeliverables.map((d, i) => `${i + 1}. ${d}`).join('\n')}\n\nYou have produced so far: ${delivered.length > 0 ? delivered.join(', ') : 'NOTHING'}.\nBefore saying YES_FINISHED, verify you have ACTUALLY produced each required output type. If ANY are missing, you MUST say NO_INCOMPLETE and specify what you still need to create.`
+              : ''
+
+            return `CRITICAL REFLECTION PHASE: Review your progress against the original goal: "${task.goal}". ${deliverableCheck}
 Are you completely finished? If yes, output only exactly "YES_FINISHED". 
 If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing and what you must do next.`
+          })()
 
       const reflectionResult = await complete({
         tenantId: agent.tenant_id,
@@ -3497,7 +3309,24 @@ If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing an
       totalTokens.total += reflectionResult.usage.total
 
       if (reflectionResult.content.trim().startsWith('YES_FINISHED')) {
-        taskSatisfied = true
+        // ── Deliverable guard: auto-reject premature YES_FINISHED ──────
+        // If the goal requires N deliverable types and the agent produced
+        // fewer, the YES_FINISHED was wrong — force another loop.
+        // Cap at 5 to avoid over-enforcing on verbose goals with many keywords.
+        const rawExpected = agent._expectedDeliverableCount || 0
+        const expectedCount = Math.min(rawExpected, 5)
+        const producedCount = (agent._producedDeliverables || []).length
+        if (expectedCount >= 2 && producedCount < expectedCount) {
+          const missing = (agent._expectedDeliverableTypes || []).filter(t => !(agent._producedDeliverables || []).some(p => p.includes(t)))
+          console.log(`[Task ${task.id}] Deliverable guard: expected ${expectedCount} types, produced ${producedCount}. Missing: ${missing.join(', ')}. Overriding YES_FINISHED.`)
+          taskSatisfied = false
+          execMessages.push({
+            role: 'user',
+            content: `⛔ OVERRIDE: Your YES_FINISHED was rejected. The goal requires ${expectedCount} types of output:\n${(agent._expectedDeliverableTypes || []).slice(0, expectedCount).map((t, i) => `${i + 1}. ${t}`).join('\n')}\n\nYou have only produced: ${(agent._producedDeliverables || []).join(', ') || 'NOTHING'}.\n\nMissing deliverables: ${missing.join(', ')}\n\nYou MUST continue the tool loop and create the missing outputs. Do NOT say YES_FINISHED until ALL are done.`
+          })
+        } else {
+          taskSatisfied = true
+        }
       } else {
         // Feed the critique back into the context so the agent tries again
         execMessages.push({ 
@@ -3533,7 +3362,13 @@ If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing an
     const artifactActions = actions.filter(a => a.skill === 'write_artifact' && a.output?.success)
     const allDataToolsFailed = dataTools.length > 0 && dataTools.every(a => a.output?.success === false)
     // ── Vacuous success detection: tools returned success:true but no structured data ──
-    const anyToolReturnedRows = dataTools.some(a => a.output?.hasStructuredData === true)
+    // Primary check: hasStructuredData flag (set by tool implementations).
+    // Fallback: rows or row_count > 0 (handles tools that forget to set the flag).
+    const anyToolReturnedRows = dataTools.some(a =>
+      a.output?.hasStructuredData === true ||
+      (Array.isArray(a.output?.rows) && a.output.rows.length > 0) ||
+      (a.output?.row_count > 0)
+    )
     // ── Goal-level intent detection (post-hoc — used for reporting/artifacts, not prompt injection)
     //     Defined at OUTER scope so reportIsWorthSaving() and data-model artifact code can both access it.
     const isDataModelGoal = /data\s*model|er\s*diagram|entity\s*relationship|schema\s*doc|database\s*design|db\s*design|table\s*relationship|data\s*modeling|data\s*modelling|relational\s*model|db\s*doc|database\s*doc|ddl|data\s*dictionary|schema\s*report/i.test(task.goal)
@@ -3556,14 +3391,17 @@ If no, output "NO_INCOMPLETE" followed by a brief critique of what is missing an
     let synthesisContent
     if (agent._toolIncapable) {
       // ════════════════════════════════════════════════════════════════════
-      // Tool-incapable model: it produced zero tool calls despite having tools
-      // available and a corrective retry. Do NOT call the LLM for synthesis —
-      // be honest and actionable. No model name is hardcoded; we surface the
-      // agent's own configured model and point the user at agent settings.
+      // Tool-incapable model: detected either by pre-flight capability probe
+      // (fast, one cheap call) or by the model failing to return any tool
+      // call during execution. Do NOT call the LLM for synthesis — be honest
+      // and actionable.
       // ════════════════════════════════════════════════════════════════════
-      synthesisContent = `⚠️  **This task could not run — the configured model did not call any tools.**
+      const detectedBy = agent._toolIncapableReason
+        ? `\n\n**Why this failed:** ${agent._toolIncapableReason}`
+        : `\n\nThe agent's model (\`${agent._toolIncapableModel}\`) was probed and confirmed to not support function/tool calling.`
+      synthesisContent = `⚠️  **This task could not run — the configured model does not support tool calling.**
 
-The agent's model (\`${agent._toolIncapableModel}\`) returned prose instead of a tool call on every attempt, so no data was retrieved and nothing was executed.
+${detectedBy}
 
 **How to fix:**
 - Open this agent's **Settings** and choose a tool-capable model. The list is populated from your configured providers (e.g. the Ollama models installed on this system, shown under Settings → LLM).
@@ -3571,11 +3409,6 @@ The agent's model (\`${agent._toolIncapableModel}\`) returned prose instead of a
 
 No fabricated results were produced.`
       console.warn(`[Task ${task.id}] Tool-incapable model '${agent._toolIncapableModel}' — failing fast without LLM synthesis`)
-    } else if (diagramFastPath) {
-      // Deterministic diagram fast-path — the SVG was generated from the
-      // curated template; skip the LLM synthesis call entirely.
-      synthesisContent = diagramFastPath.synthesisText
-      console.log('[DIAGRAM-FAST-PATH] Using pre-built synthesis (LLM skipped)')
     } else if (agent._reportPublishedThisTask) {
       synthesisContent = 'Report published to dashboard. See the dashboard report for full results.'
     } else if (agent._ranQuerySuccessfully && agent._lastQueryRows?.length > 0) {
@@ -3598,6 +3431,39 @@ No fabricated results were produced.`
       }).join('\n')
       synthesisContent = `✅ **${artifactActions.length} artifact(s) created:**\n\n${artifactList}`
       console.log(`[Task ${task.id}] Artifact-only task — skipping LLM synthesis (${artifactActions.length} artifacts)`)
+
+      // ── Still score quality even on artifact-only outputs ───────────
+      // We skip LLM synthesis but still need to evaluate whether the
+      // artifacts match the goal and detect hallucinations in names/content.
+      if (synthesisContent && typeof synthesisContent === 'string') {
+        const txt = synthesisContent
+        let hallucinationScore = 60  // neutral baseline — earns upward with evidence
+
+        const fabricationHits = HALLUCINATION_FABRICATION_PATTERNS.filter(p => txt.includes(p)).length
+        const futureTenseHits = HALLUCINATION_FUTURE_TENSE_PATTERNS.filter(p => txt.includes(p)).length
+        const deflectionHits = HALLUCINATION_DEFLECTION_PATTERNS.filter(p => txt.includes(p)).length
+        const totalRedFlags = fabricationHits + futureTenseHits + deflectionHits
+        if (totalRedFlags >= 4) hallucinationScore -= 35
+        else if (totalRedFlags >= 2) hallucinationScore -= 15
+        else if (totalRedFlags >= 1) hallucinationScore -= 8
+
+        // ── Goal-coverage penalty: check expected vs produced deliverables ──
+        const { count: rawExpected } = extractGoalDeliverables(task.goal)
+        const expectedCount = Math.min(rawExpected, 5)
+        const producedCount = (agent._producedDeliverables || []).length || artifactActions.length
+        if (expectedCount >= 3 && producedCount < expectedCount) {
+          hallucinationScore -= 25  // goal asked for multiple things, got few
+        } else if (expectedCount >= 2 && producedCount < expectedCount) {
+          hallucinationScore -= 15
+        }
+
+        // Evidence boost (modest — artifact count proves delivery)
+        if (artifactActions.length > 0) hallucinationScore += 5
+        hallucinationScore = Math.max(0, Math.min(100, hallucinationScore))
+        agent._hallucinationScore = hallucinationScore
+      } else {
+        agent._hallucinationScore = 60
+      }
     } else if (reallyFailed && noReportPublished) {
       // ════════════════════════════════════════════════════════════════════
       // ALL tools genuinely failed OR returned vacuous success (succeeded
@@ -3673,18 +3539,20 @@ No fabricated results were produced.`
       let dataExcerpt = ''
       if (hasRealResults) {
         const lastDataAction = successfulDataActions[successfulDataActions.length - 1]
-        const rows = lastDataAction.output?.rows
-        const columns = lastDataAction.output?.columns || lastDataAction.output?.fields
-        const rowCount = lastDataAction.output?.row_count || (rows?.length || 0)
-        if (rows && Array.isArray(rows) && rows.length > 0) {
-          // Show first 5 rows as concrete examples, then summarise
-          const sample = rows.slice(0, 5)
-          const total = rows.length
-          dataExcerpt = `\n\n📊 REAL DATA (from ${lastDataAction.skill}): ${total} rows, columns: [${(columns || Object.keys(rows[0])).join(', ')}]\nFirst ${sample.length} rows:\n${JSON.stringify(sample, null, 2)}\n${total > 5 ? `... and ${total - 5} more rows.` : ''}`
-        } else if (typeof lastDataAction.output === 'object') {
-          const { rows: _, columns: __, row_count: ___, success: ____, elapsed_ms: _____, _fromSchemaCache: ______, _fromCache: _______, ...rest } = lastDataAction.output
-          const summary = JSON.stringify(rest).slice(0, 500)
-          if (summary.length > 10) dataExcerpt = `\n\n📊 REAL DATA (from ${lastDataAction.skill}): ${summary}`
+        if (lastDataAction) {
+          const rows = lastDataAction.output?.rows
+          const columns = lastDataAction.output?.columns || lastDataAction.output?.fields
+          const rowCount = lastDataAction.output?.row_count || (rows?.length || 0)
+          if (rows && Array.isArray(rows) && rows.length > 0) {
+            // Show first 5 rows as concrete examples, then summarise
+            const sample = rows.slice(0, 5)
+            const total = rows.length
+            dataExcerpt = `\n\n📊 REAL DATA (from ${lastDataAction.skill}): ${total} rows, columns: [${(columns || Object.keys(rows[0])).join(', ')}]\nFirst ${sample.length} rows:\n${JSON.stringify(sample, null, 2)}\n${total > 5 ? `... and ${total - 5} more rows.` : ''}`
+          } else if (typeof lastDataAction.output === 'object') {
+            const { rows: _, columns: __, row_count: ___, success: ____, elapsed_ms: _____, _fromSchemaCache: ______, _fromCache: _______, ...rest } = lastDataAction.output
+            const summary = JSON.stringify(rest).slice(0, 500)
+            if (summary.length > 10) dataExcerpt = `\n\n📊 REAL DATA (from ${lastDataAction.skill}): ${summary}`
+          }
         }
       }
 
@@ -3730,63 +3598,25 @@ Provide a concise summary of what was accomplished and the key findings from the
       // Hallucination filter with scoring — detects fabricated synthesis
       // across ALL agent types (trained, standard, DB, non-DB).
       //
-      // Score: 100 = clean, 0 = definitely hallucinated. Score represents
-      // our confidence that the synthesis is based on real data/tools.
+      // Score: evidence-based starting at 60 (neutral — needs proof to climb).
+      // 100 = fully grounded, 0 = certain hallucination.
       // ════════════════════════════════════════════════════════════════════
       if (synthesisContent && typeof synthesisContent === 'string') {
         const txt = synthesisContent
-        let hallucinationScore = 100  // start clean, deduct for each red flag
+        let hallucinationScore = 60  // neutral — must earn points upward
 
-        // ── Pattern libraries ──────────────────────────────────────────
-        const actionPhrases = [
-          'I implemented', 'I created', 'I developed', 'I built',
-          'I tested', 'I refined', 'I finalized', 'I deployed',
-          'I generated', 'I designed', 'after testing', 'after implementing',
-          'has significantly improved', 'ultimately enhancing',
-          'enabling healthcare', 'the resulting', 'was functioning as expected',
-          'the dashboard report provided', 'visualizations that facilitated',
-        ]
-        const dataModelHallucinationPatterns = [
-          'Data Model Summary', 'Database Schema', 'Table Structures',
-          'Entity-Relationship', 'ER Diagram', 'Foreign Key Relationships',
-          'Primary Keys:', 'column_name', 'data_type',
-          'Based on my understanding of the project',
-          'Based on the database schema',
-        ]
-        const futureDescriptionPatterns = [
-          'I will provide', 'I will focus on', 'I will implement',
-          'I will create', 'I will develop', 'I will add',
-          'I will continue', 'I will need to',
-          'is not yet complete', 'is not yet implemented',
-          'lacks the following', 'are missing',
-          'not yet been implemented', 'not yet complete',
-          'does not allow for', 'do not have any associated',
-          'the current implementation', 'currently lacks',
-          'To complete the', 'To finish the',
-          'features are missing', 'functionality is missing',
-          'has not been implemented', 'have not been added',
-          'would need to', 'should be implemented',
-          'a revised response', 'in the correct format',
-        ]
-        // ── NEW: Generic hallucination markers for standard models ──────
-        const genericHallucinationPatterns = [
-          'the analysis reveals', 'the data shows that', 'our findings indicate',
-          'according to the data', 'the results demonstrate', 'the query returned',
-          'I queried the', 'I retrieved the data', 'the database contains',
-          'after analyzing', 'the report includes', 'key insights include',
-          'the dashboard displays', 'the chart illustrates',
-          'I successfully', 'I have successfully',
-        ]
-
-        const dataModelHallucinationCount = dataModelHallucinationPatterns.filter(p => txt.includes(p)).length
-        const futureDescriptionCount = futureDescriptionPatterns.filter(p => txt.includes(p)).length
-        const fabricationCount = actionPhrases.filter(p => txt.includes(p)).length + dataModelHallucinationCount + futureDescriptionCount
-
-        // ── Generic hallucination: claiming data analysis when no tools ran ──
-        const genericHallucinationHits = genericHallucinationPatterns.filter(p => txt.includes(p)).length
+        // ── Pattern libraries (generic — no archetype-specific markers) ──
+        // Imported from shared constants so all scoring paths stay in sync.
+        const fabricationHits = HALLUCINATION_FABRICATION_PATTERNS.filter(p => txt.includes(p)).length
+        const futureTenseHits = HALLUCINATION_FUTURE_TENSE_PATTERNS.filter(p => txt.includes(p)).length
+        const deflectionHits = HALLUCINATION_DEFLECTION_PATTERNS.filter(p => txt.includes(p)).length
 
         // ── Fabricated publish detection ─────────────────────────────────
-        const fabricatedPublish = /published\s+a\s+(chart|report|dashboard|visualiz)/i.test(txt) && !agent._reportPublishedThisTask
+        const fabricatedPublish = /published\s+a\s+(chart|report|dashboard|visualiz|document|article|page|post)/i.test(txt) && !agent._reportPublishedThisTask
+
+        // ── Vague / hand-wavy language (no concrete evidence) ──────────
+        const hasVagueClaims = /\b(would have|should have|could have|most likely|probably|typically|generally|in most cases|it is (?:likely|possible|probable))\b/i.test(txt)
+        const hasClaimWithoutEvidence = /\b(?:the (?:data|result|analysis|report|chart) (?:shows?|indicates?|reveals?|demonstrates?|confirms?|suggests?))\b/i.test(txt) && !hasRealResults
 
         // Count real data points in the synthesis
         const hasRealNumbers = (txt.match(/\b\d{2,}\b/g) || []).length >= 2
@@ -3796,33 +3626,43 @@ Provide a concise summary of what was accomplished and the key findings from the
         const hasDataRows = /\|.+\|.+\|/.test(txt)
         const hasActualContent = hasRealNumbers || hasFilePath || hasUrl || hasCodeBlock || hasDataRows
 
-        // Also flag fake dollar amounts or IDs not in real data
+        // Also flag fake numeric values (dollar, euro, pound, plain counts) not in real data
         let hasFakeNumbers = false
-        if (hasRealResults && txt.match(/\$\d{1,3}(,\d{3})*(\.\d+)?/)) {
-          const lastDataRows = successfulDataActions[successfulDataActions.length - 1]?.output?.rows
-          if (lastDataRows && Array.isArray(lastDataRows) && lastDataRows.length > 0) {
-            const dataStr = JSON.stringify(lastDataRows.slice(0, 20))
-            const dollarMatches = txt.match(/\$\d{1,3}(,\d{3})*(\.\d+)?/g) || []
-            const fakeDollars = dollarMatches.filter(d => !dataStr.includes(d.replace(/[$,]/g, '')))
-            if (fakeDollars.length >= 2) hasFakeNumbers = true
+        if (hasRealResults) {
+          const synthNumberMatches = txt.match(/[\$€£]\s*\d{1,3}(,\d{3})*(\.\d+)?|\b\d{2,}\b/g) || []
+          if (synthNumberMatches.length >= 2) {
+            const lastDataRows = successfulDataActions[successfulDataActions.length - 1]?.output?.rows
+            if (lastDataRows && Array.isArray(lastDataRows) && lastDataRows.length > 0) {
+              const dataStr = JSON.stringify(lastDataRows.slice(0, 20))
+              const fakeHits = synthNumberMatches.filter(n => {
+                const cleaned = n.replace(/[\$€£,\s]/g, '')
+                // Numbers < 100 could be row counts, percentages, etc. — too noisy to flag
+                if (parseInt(cleaned) < 100) return false
+                return !dataStr.includes(cleaned)
+              })
+              if (fakeHits.length >= 2) hasFakeNumbers = true
+            }
           }
         }
 
         // ── Hallucination Score Calculation ────────────────────────────
         // Deduct points for each red flag; add points for real data signals
-        if (fabricationCount >= 3) hallucinationScore -= 40
-        else if (fabricationCount >= 1) hallucinationScore -= 15
+        const totalRedFlags = fabricationHits + futureTenseHits + deflectionHits
+        if (totalRedFlags >= 4) hallucinationScore -= 35
+        else if (totalRedFlags >= 2) hallucinationScore -= 15
+        else if (totalRedFlags >= 1) hallucinationScore -= 8
         if (fabricatedPublish) hallucinationScore -= 35
         if (hasFakeNumbers) hallucinationScore -= 30
         if (!hasActualContent) hallucinationScore -= 20
-        if (genericHallucinationHits >= 2 && !hasRealResults) hallucinationScore -= 25
+        if (hasVagueClaims) hallucinationScore -= 10
+        if (hasClaimWithoutEvidence) hallucinationScore -= 25
         // ── Contradiction: synthesis says "no data" but tools returned real results ──
         const synthesisClaimsNoData = /no (?:data|tables?|results?|records?|information) (?:available|found|returned|to |for )|nothing (?:was )?(?:found|returned|available)|no matching (?:data|records|results)|empty (?:result|dataset|response)|couldn't find any (?:data|results|tables)/i.test(txt)
         if (synthesisClaimsNoData && hasRealResults) hallucinationScore -= 40
-        // Boost: real data signals
-        if (hasActualContent) hallucinationScore = Math.min(100, hallucinationScore + 10)
-        if (hasRealResults) hallucinationScore = Math.min(100, hallucinationScore + 15)
-        if (agent._reportPublishedThisTask) hallucinationScore = Math.min(100, hallucinationScore + 20)
+        // ── Evidence boosts (modest — evidence raises ceiling, doesn't reset deductions) ──
+        if (hasActualContent) hallucinationScore += 8
+        if (hasRealResults) hallucinationScore += 10
+        if (agent._reportPublishedThisTask) hallucinationScore += 5
 
         // Clamp
         hallucinationScore = Math.max(0, Math.min(100, hallucinationScore))
@@ -3838,16 +3678,18 @@ Provide a concise summary of what was accomplished and the key findings from the
           }).join('\n')
           const reason = fabricatedPublish ? 'synthesis claimed a chart/report was published but publish_dashboard_report was never called'
             : hasFakeNumbers ? 'synthesis contained dollar amounts/IDs not found in the actual data'
-            : `${fabricationCount} hallucination markers and no real data points`
+            : `${totalRedFlags} hallucination markers — fabrication/future-tense/deflection and insufficient real data`
 
           // Build an honest summary from the actual data if available
           let honestSummary = ''
           if (hasRealResults) {
             const lastAction = successfulDataActions[successfulDataActions.length - 1]
-            const rowCount = lastAction.output?.row_count || lastAction.output?.rows?.length || 0
-            const cols = lastAction.output?.columns || Object.keys(lastAction.output?.rows?.[0] || {})
-            const firstFew = lastAction.output?.rows?.slice(0, 5)
-            honestSummary = `\n\n✅ Real data was retrieved: ${rowCount} rows with columns [${cols.join(', ')}].\nSample rows:\n${JSON.stringify(firstFew, null, 2)}`
+            const rowCount = lastAction?.output?.row_count || lastAction?.output?.rows?.length || 0
+            const cols = lastAction?.output?.columns || Object.keys(lastAction?.output?.rows?.[0] || {})
+            const firstFew = lastAction?.output?.rows?.slice(0, 5)
+            if (lastAction) {
+              honestSummary = `\n\n✅ Real data was retrieved: ${rowCount} rows with columns [${cols.join(', ')}].\nSample rows:\n${JSON.stringify(firstFew, null, 2)}`
+            }
           }
 
           synthesisContent = `⚠️  **HALLUCINATION DETECTED** (score: ${hallucinationScore}/100) — ${reason}.${honestSummary}\n\nThe original fabricated synthesis has been suppressed.\n\nAttempted actions:\n${toolSummary || '(no tools were successfully called)'}\n\nTo fix this:\n- Check that the required connectors (database, local directory, API) are configured and accessible\n- Ensure the agent has the correct tool scopes enabled\n- Verify the task goal is achievable with the available tools`
@@ -3858,15 +3700,312 @@ Provide a concise summary of what was accomplished and the key findings from the
         // Store score on agent for result metadata
         agent._hallucinationScore = hallucinationScore
       } else {
-        agent._hallucinationScore = 100  // no synthesis content = clean
+        agent._hallucinationScore = 60  // no synthesis content = neutral
       }
+    }
+
+    // ── Quality Metrics ──────────────────────────────────────────────────
+    // Compute tool accuracy weighted by category.
+    // Data-retrieval tools (DATA, SCHEMA, ARTIFACT) are weighted 3× because
+    // their failures are far more meaningful than infrastructure calls.
+    // Returns null (not 100) when zero tools were called — a model that
+    // never invokes tools hasn't demonstrated any accuracy.
+    const DATA_TOOL_WEIGHT = 3
+    const weightedSuccesses = actions.reduce((sum, a) => {
+      const isDataTool = DATA_CATEGORIES.has(a.output?.category)
+      const weight = isDataTool ? DATA_TOOL_WEIGHT : 1
+      const ok = a.output?.success !== false && a.output?.error == null
+      return sum + (ok ? weight : 0)
+    }, 0)
+    const weightedTotal = actions.reduce((sum, a) => {
+      const isDataTool = DATA_CATEGORIES.has(a.output?.category)
+      return sum + (isDataTool ? DATA_TOOL_WEIGHT : 1)
+    }, 0)
+    const toolAccuracy = weightedTotal > 0
+      ? Math.round((weightedSuccesses / weightedTotal) * 100)
+      : null
+
+    // Output quality: blend of confidence, hallucination resistance, tool success, and content substance.
+    // Weighted to reward concrete, verifiable output over verbose-but-vacuous prose.
+    const confidenceScore = extractConfidence(synthesisContent)
+    const confidencePct = Math.round(confidenceScore * 100)
+    const hasSubstantialOutput = synthesisContent && synthesisContent.length > 200
+    const hasRealData = actions.some(a =>
+      a.output?.rows?.length > 0 || a.output?.row_count > 0
+    )
+    // ── Tool success rate: what fraction of tool calls actually worked? ──
+    const toolSuccessCount = actions.filter(a => a.output?.success === true).length
+    const toolTotalCount = actions.length || 1
+    const toolSuccessRate = Math.round((toolSuccessCount / toolTotalCount) * 100)
+    const outputQuality = Math.round(
+      Math.min(100,
+        (confidencePct * 0.20) +
+        ((agent._hallucinationScore ?? 60) * 0.20) +
+        (toolSuccessRate * 0.25) +
+        (hasSubstantialOutput ? 15 : 0) +
+        (hasRealData ? 20 : 0)
+      )
+    )
+
+    // Scope adherence — two-dimensional: penalizes drift, rewards keyword focus.
+    // Starts at 70 (neutral), not 100 (perfect) — so focused/laser outputs
+    // can be distinguished from "didn't trigger any drift detection".
+    let scopeAdherence = 70
+    if (synthesisContent && task.goal) {
+      const driftMarkers = [
+        'I will focus on', 'I will need to', 'I would need to',
+        'should be implemented', 'not yet been implemented',
+        'To complete the', 'To finish the', 'future work',
+        'would require additional', 'out of scope', 'beyond the scope',
+      ]
+      const driftHits = driftMarkers.filter(m => synthesisContent.includes(m)).length
+      if (driftHits >= 3) scopeAdherence -= 30
+      else if (driftHits >= 2) scopeAdherence -= 20
+      else if (driftHits >= 1) scopeAdherence -= 10
+
+      // Positive dimension: keyword density from the goal appearing in output
+      const goalWords = task.goal.toLowerCase().split(/\s+/).filter(w => w.length > 3)
+      if (goalWords.length > 0) {
+        const synthLower = synthesisContent.toLowerCase()
+        const goalMatchCount = goalWords.filter(w => synthLower.includes(w)).length
+        const matchRatio = goalMatchCount / goalWords.length
+        if (matchRatio >= 0.7) scopeAdherence += 30
+        else if (matchRatio >= 0.5) scopeAdherence += 20
+        else if (matchRatio >= 0.3) scopeAdherence += 10
+        else scopeAdherence -= 5  // very low keyword match = likely off-topic
+      }
+
+      // ── Goal-coverage penalty: use shared deliverable extraction ─────
+      // Penalize shortfall when the goal explicitly asks for multiple
+      // deliverable types (diagrams, DDL, lineage, etc.) and few were produced.
+      const { count: rawScopeCount } = extractGoalDeliverables(task.goal)
+      const expectedScopeCount = Math.min(rawScopeCount, 5)
+      const producedDeliverableCount = (agent._producedDeliverables || []).length || artifactActions.length
+      if (expectedScopeCount >= 3 && producedDeliverableCount < expectedScopeCount) {
+        const shortfall = expectedScopeCount - producedDeliverableCount
+        scopeAdherence -= Math.min(30, shortfall * 10)
+      } else if (expectedScopeCount >= 2 && producedDeliverableCount < expectedScopeCount) {
+        scopeAdherence -= 10
+      }
+      scopeAdherence = Math.max(0, Math.min(100, scopeAdherence))
+    }
+
+    // ── Context Usage: did the agent actually USE the context it was given? ──
+    // Measures whether preloaded schema, injected knowledge, DB connections,
+    // and file contexts were referenced in tool calls and synthesis output.
+    // Returns null when no context was provided (nothing to measure).
+    let contextUsage = null
+    const contextSources = []
+    if (agent._schemaPreloaded) contextSources.push('schema')
+    if (agent._hasKnowledgeContext) contextSources.push('knowledge')
+    if (agent._dbConnectionString) contextSources.push('database')
+    if ((agent._files || []).length > 0) contextSources.push('files')
+    if (agent._schemaText && !agent._schemaPreloaded) contextSources.push('schema')
+
+    if (contextSources.length > 0) {
+      contextUsage = 50  // neutral — context was provided
+
+      // ── Schema usage: did the agent call schema-discovery tools? ──
+      const usedSchemaTools = actions.some(a =>
+        ['listTables', 'describeTable', 'listSchemas', 'describeAllTables', 'describeAllColumns', 'getDbSchema'].includes(a.skill) && a.output?.success
+      )
+      if (agent._schemaPreloaded || agent._schemaText) {
+        if (usedSchemaTools) contextUsage += 15
+        // Did the synthesis reference actual column/table names from schema?
+        if (agent._schemaText && synthesisContent) {
+          const schemaLines = agent._schemaText.split('\n').filter(l => l.trim())
+          const colRefs = schemaLines.filter(l => {
+            const col = l.trim().split(/\s+/)[0]  // first token is often column name
+            return col.length > 3 && synthesisContent.toLowerCase().includes(col.toLowerCase())
+          }).length
+          if (colRefs >= 3) contextUsage += 10
+          else if (colRefs >= 1) contextUsage += 5
+        }
+      }
+
+      // ── Knowledge usage: did synthesis reference KB concepts? ──
+      let kbUsed = false
+      if (agent._hasKnowledgeContext) {
+        // If we injected knowledge context, check for thematic overlap
+        kbUsed = actions.some(a =>
+          ['searchKnowledgeBase', 'queryKnowledgeBase'].includes(a.skill) && a.output?.success
+        )
+        if (kbUsed) contextUsage += 10
+      }
+
+      // ── Database usage: did the agent run queries that returned real rows? ──
+      let ranQuery = false
+      if (agent._dbConnectionString) {
+        ranQuery = actions.some(a =>
+          a.skill === 'runQuery' && a.output?.success && (a.output?.rows?.length > 0 || a.output?.row_count > 0)
+        )
+        if (ranQuery) contextUsage += 15
+        else {
+          const attemptedQuery = actions.some(a => a.skill === 'runQuery')
+          if (!attemptedQuery) contextUsage -= 15  // had DB but never queried it
+        }
+      }
+
+      // ── Files usage: did agent read any of the provided files? ──
+      let readFiles = 0
+      if ((agent._files || []).length > 0) {
+        readFiles = actions.filter(a =>
+          ['readFile', 'local_dir__read'].includes(a.skill) && a.output?.success
+        ).length
+        if (readFiles > 0) contextUsage += 10
+        else contextUsage -= 5
+      }
+
+      // ── Penalty: context was provided but completely ignored ──
+      const anyContextToolUsed = usedSchemaTools || ranQuery || kbUsed || readFiles > 0
+      if (!anyContextToolUsed && contextSources.length >= 2) {
+        contextUsage -= 20  // multiple context sources available, none used
+      }
+
+      contextUsage = Math.max(0, Math.min(100, contextUsage))
+    }
+
+    // ── Tool Relevance: did the agent pick the RIGHT tools for its job? ──
+    // Measures the ratio of "productive" tool calls (those that produced
+    // real data, artifacts, or schema insight) vs wasted calls (failed,
+    // vacuous, or delegation when the archetype should self-execute).
+    // Returns null when no tools were called.
+    let toolRelevance = null
+    if (actions.length > 0) {
+      const productiveTools = new Set([
+        'runQuery', 'listTables', 'describeTable', 'listSchemas',
+        'describeAllTables', 'getDbSchema', 'describeAllColumns',
+        'write_artifact', 'publish_dashboard_report',
+        'http_request', 'http_download', 'browser_use',
+        'file_search', 'readFile', 'listDirectory',
+        'local_dir__list', 'local_dir__read', 'docker_run', 'ssh_exec',
+      ])
+      const delegationTools = new Set(['delegate_task', 'a2a_call'])
+      const provisioningTools = new Set(['create_agent', 'create_workflow', 'create_trigger', 'create_connector'])
+
+      let productiveCount = 0
+      let wastedCount = 0
+
+      for (const a of actions) {
+        if (a.output?.success === false || a.output?.error) {
+          wastedCount++  // failed calls are always wasted
+          continue
+        }
+        if (a.skill === 'write_artifact') {
+          productiveCount++  // artifact creation always counts
+          continue
+        }
+        if (a.skill === 'publish_dashboard_report') {
+          productiveCount++
+          continue
+        }
+        // Schema tools that returned actual metadata
+        if (['listTables', 'describeTable', 'listSchemas', 'describeAllTables', 'getDbSchema', 'describeAllColumns'].includes(a.skill)) {
+          if (a.output?.columns || a.output?.tables || a.output?.schemas || a.output?.fields) {
+            productiveCount++
+          } else {
+            wastedCount++
+          }
+          continue
+        }
+        // Data tools that returned actual rows
+        if (a.output?.rows?.length > 0 || a.output?.row_count > 0 || a.output?.hasStructuredData) {
+          productiveCount++
+          continue
+        }
+        // Delegation — productive for coordinators, wasted for self-executing archetypes
+        if (delegationTools.has(a.skill)) {
+          if (agent.archetype === 'coordinator' || agent.archetype === 'agent-generation' || agent.archetype === 'planner') {
+            productiveCount++
+          } else {
+            wastedCount++
+          }
+          continue
+        }
+        // Provisioning — productive for orchestrators
+        if (provisioningTools.has(a.skill)) {
+          if (agent.archetype === 'coordinator' || agent.archetype === 'agent-generation') {
+            productiveCount++
+          } else {
+            wastedCount++
+          }
+          continue
+        }
+        // Everything else — if it succeeded but no structured data, it's vacuous
+        wastedCount++
+      }
+
+      const totalClassified = productiveCount + wastedCount
+      if (totalClassified > 0) {
+        toolRelevance = Math.round((productiveCount / totalClassified) * 100)
+      } else {
+        toolRelevance = 50  // all unclassified, neutral
+      }
+    }
+
+    // ── Human-likeness: does the output read like a competent human wrote it? ──
+    // Evaluates structure, readability, conciseness, and formatting quality.
+    let humanLikeness = 50  // neutral baseline
+    if (synthesisContent && synthesisContent.length > 50) {
+      const txt = synthesisContent
+
+      // ── Structure quality: headings, lists, paragraphs ──
+      const hasHeadings = /^#{1,4}\s/m.test(txt)
+      const hasBulletList = /^[\s]*[-*+]\s/m.test(txt)
+      const hasNumberedList = /^[\s]*\d+[.)]\s/m.test(txt)
+      const hasTable = /\|.+\|.+\|/.test(txt)
+      const hasCodeBlock = /```[\s\S]*```/.test(txt)
+      const hasBoldText = /\*\*[^*]+\*\*/.test(txt)
+
+      const structureScore = (hasHeadings ? 10 : 0) + (hasBulletList ? 8 : 0) +
+        (hasNumberedList ? 7 : 0) + (hasTable ? 8 : 0) +
+        (hasCodeBlock ? 5 : 0) + (hasBoldText ? 5 : 0)
+      humanLikeness += Math.min(25, structureScore)
+
+      // ── Readability: paragraph length, sentence variety ──
+      const paragraphs = txt.split(/\n\n+/).filter(p => p.trim().length > 20)
+      if (paragraphs.length >= 2) humanLikeness += 8  // has meaningful paragraphs
+      const avgParaLen = paragraphs.length > 0
+        ? paragraphs.reduce((s, p) => s + p.length, 0) / paragraphs.length
+        : 0
+      if (avgParaLen >= 100 && avgParaLen <= 800) humanLikeness += 5  // well-sized paragraphs
+      else if (avgParaLen > 1200) humanLikeness -= 3  // wall of text
+
+      // ── Actionability: concrete conclusions, not vague hand-waving ──
+      const hasConclusion = /\b(conclusion|summary|in summary|to conclude|key takeaway|recommendation|next step|action item)\b/i.test(txt)
+      if (hasConclusion) humanLikeness += 8
+      const hasSpecificNumbers = (txt.match(/\b\d{2,}\b/g) || []).length >= 3
+      if (hasSpecificNumbers) humanLikeness += 5  // concrete, not abstract
+
+      // ── Penalties: robotic or AI-typical patterns ──
+      const roboticPatterns = [
+        'as an AI', 'as a language model', 'I am an AI',
+        'based on the provided', 'according to the data provided',
+        'it is important to note', 'I hope this message finds you well',
+      ]
+      const roboticHits = roboticPatterns.filter(p => txt.toLowerCase().includes(p.toLowerCase())).length
+      if (roboticHits >= 2) humanLikeness -= 15
+      else if (roboticHits >= 1) humanLikeness -= 8
+
+      // ── Over-verbosity: excessive length without proportional substance ──
+      if (txt.length > 3000 && !hasTable && !hasCodeBlock && paragraphs.length < 4) {
+        humanLikeness -= 10  // very long but poorly structured
+      }
+
+      humanLikeness = Math.max(0, Math.min(100, humanLikeness))
     }
 
     const result = {
       output: synthesisContent,
-      confidence: extractConfidence(synthesisContent),
+      confidence: confidenceScore,
       summary: synthesisContent,
-      hallucinationScore: agent._hallucinationScore ?? 100,
+      hallucinationScore: agent._hallucinationScore ?? 60,
+      outputQuality,
+      scopeAdherence,
+      toolAccuracy,
+      contextUsage,
+      toolRelevance,
+      humanLikeness,
     }
 
     // Automatically publish to dashboard reports if the goal or output implies a report/analytics summary
@@ -3889,7 +4028,10 @@ Provide a concise summary of what was accomplished and the key findings from the
         } catch { /* non-critical lookup */ }
       }
 
-      const isReportGoal = /report|analytics|dashboard|breakdown|summary|chart|metrics|kpi|insight|visual|trend|analyze|analysis/i.test(task.goal)
+      // Auto-report for goals that clearly want a data product.
+      // Broad regex covers "analyze Q3 earnings", "top 10 customers report",
+      // "sales breakdown", "KPI summary" — not just explicit "publish"/"dashboard".
+      const wantsPublishReport = /publish|dashboard|analytics|analy(?:s[ei]s|ze)|report|summary|insight|chart|KPI|metrics|breakdown|ranking|top\s+\d+|trend/i.test(task.goal)
 
       // ══════════════════════════════════════════════════════════════════
       // Universal Report Quality Scorer — works for SVG, HTML, D3, Chart
@@ -4060,9 +4202,11 @@ Provide a concise summary of what was accomplished and the key findings from the
         } catch { /* file may not exist */ }
       }
 
-      if (!dbAlreadyHasReport && (synthesisContent || artifactContent)) {
+      // Only auto-report when the goal EXPLICITLY asks for publishing.
+      // Generic data tasks (DDL, ERD, dimensional models, query analysis)
+      // save their outputs via write_artifact — not via dashboard reports.
+      if (!dbAlreadyHasReport && (synthesisContent || artifactContent) && wantsPublishReport) {
         const reportTitle = generateReportTitle(task.goal)
-        const template = reportTemplateForGoal(task.goal)
 
         let reportBody
         let reportType = 'html'
@@ -4107,8 +4251,6 @@ Provide a concise summary of what was accomplished and the key findings from the
           let formatGuide = ''
           if (hasRows && isDataTask) {
             formatGuide = `You have tabular data (${agent._lastQueryRows?.length || 0} rows). Generate an HTML report with:\n- KPI cards at the top (key metrics)\n- A Chart.js chart (<canvas> + new Chart(...)) for the main trend\n- A sortable HTML data table below\n- Use https://cdn.jsdelivr.net/npm/chart.js for Chart.js`
-          } else if (isVisTask && template) {
-            formatGuide = `This is a VISUAL/DRAWING task. Generate a proper ${template.format.toUpperCase()} diagram. ${template.hint}`
           } else if (isVisTask) {
             formatGuide = `This is a VISUAL/DRAWING task. Generate a proper SVG diagram with:\n- viewBox="0 0 800 600"\n- At least 10 drawing elements (rect, line, path, circle, text)\n- Proper styling (fill, stroke colors)\n- Labels and annotations\n- Do NOT describe the diagram — output the raw <svg>...</svg> XML.`
           } else if (hasDbData) {
@@ -4120,7 +4262,7 @@ Provide a concise summary of what was accomplished and the key findings from the
           // Previous attempt feedback
           let retryFeedback = ''
           if (regenerationAttempts > 1 && reportBody) {
-            retryFeedback = `\n\n⚠️  YOUR PREVIOUS ATTEMPT WAS REJECTED (quality score: ${initialQuality}/100). The issue was: ${initialQuality < 20 ? 'too short or empty content' : 'lacks visual elements, real data, or proper structure'}. Do NOT repeat the same mistake. ${template ? template.hint : 'Generate a COMPLETE, detailed report — not a placeholder or description.'}`
+            retryFeedback = `\n\n⚠️  YOUR PREVIOUS ATTEMPT WAS REJECTED (quality score: ${initialQuality}/100). The issue was: ${initialQuality < 20 ? 'too short or empty content' : 'lacks visual elements, real data, or proper structure'}. Do NOT repeat the same mistake. Generate a COMPLETE, detailed report — not a placeholder or description.`
           }
 
           const genPrompt = `Generate a COMPLETE, high-quality dashboard report. Original goal: "${task.goal}"
@@ -4395,6 +4537,8 @@ ${mermaid}
               const fname = sanitise(`data-model-${Date.now()}.html`)
               const filePath = join(artifactsDir, fname)
               await writeFile(filePath, mermaidHtml, 'utf-8')
+              // Mirror to any local-dir connectors scoped to this agent
+              mirrorArtifactToLocalDirs(agent, fname, mermaidHtml, 'html')
               return { success: true, downloadUrl: `/api/v1/artifacts/${agent.tenant_id}/${fname}` }
             } catch (e) { return { success: false, error: e.message } }
           })()
@@ -4423,15 +4567,17 @@ ${mermaid}
     // A tool-incapable model means the task never actually ran — record it as
     // FAILED (not COMPLETED) so it's visible and not mistaken for a real result.
     if (agent._toolIncapable) {
+      const failReason = agent._toolIncapableReason
+        || `Configured model did not call any tools (${agent._toolIncapableModel}). Choose a tool-capable model in agent settings.`
       await query(
         `UPDATE agent_tasks SET status = 'FAILED', result = $1, error = $2, actions = $3, token_usage = $4, completed_at = NOW() WHERE id = $5 AND tenant_id = $6`,
-        [result, `Configured model did not call any tools (${agent._toolIncapableModel}). Choose a tool-capable model in agent settings.`, JSON.stringify(actions), JSON.stringify(totalTokens), task.id, tenantId]
+        [result, failReason, JSON.stringify(actions), JSON.stringify(totalTokens), task.id, tenantId]
       )
       clearTimeout(timeoutId)
       return { success: false, status: 'FAILED', error: 'Configured model is not tool-capable', result }
     }
     await query(
-      `UPDATE agent_tasks SET status = 'COMPLETED', result = $1, actions = $2, token_usage = $3, completed_at = NOW() WHERE id = $4 AND tenant_id = $5`,
+      `UPDATE agent_tasks SET status = 'COMPLETED', result = $1, actions = $2, token_usage = $3, completed_at = NOW(), execution_checkpoint = NULL WHERE id = $4 AND tenant_id = $5`,
       [result, JSON.stringify(actions), JSON.stringify(totalTokens), task.id, tenantId]
     )
 
@@ -4439,11 +4585,17 @@ ${mermaid}
     try { await saveEpisodicMemory(agent, task, result, actions) } catch (e) { console.warn(`[Task ${task.id}] Episodic memory save failed:`, e.message) }
     try { await extractAndStoreMemory(agent.id, tenantId, task.id, synthesisContent, agent.llm_config, agent.llm_provider) } catch (e) { console.warn(`[Task ${task.id}] Entity memory extract failed:`, e.message) }
     // 9a. Mirror this agent's fresh entity memory into tenant-shared memory
-    // (G3), but only if the agent has the 'write_tenant_memory' built-in scope.
+    // (G3), but only if the agent has the 'write_tenant_memory' built-in scope
+    // AND the tenant has not disabled shared memory via settings.
     // Best-effort; failure is silent.
     try {
-      const scopes = await import('./agent-scope.service.js').then(m => m.resolveAgentScopes(tenantId, agent.id))
-      if (scopes?.allowedBuiltins?.has('write_tenant_memory')) {
+      const { rows: [tenantRow] } = await query(
+        `SELECT settings FROM tenants WHERE id = $1`, [tenantId]
+      )
+      const allowShared = tenantRow?.settings?.allow_shared_memory !== false
+      if (allowShared) {
+        const scopes = await import('./agent-scope.service.js').then(m => m.resolveAgentScopes(tenantId, agent.id))
+        if (scopes?.allowedBuiltins?.has('write_tenant_memory')) {
         const { rows: recent } = await query(
           `SELECT entity_type, entity_name, detail FROM agent_memory
            WHERE agent_id = $1 AND task_id = $2 AND last_seen_at > NOW() - INTERVAL '5 minutes'
@@ -4460,12 +4612,23 @@ ${mermaid}
           }
         }
       }
+      }
     } catch (e) { console.warn(`[Task ${task.id}] Tenant memory mirror failed:`, e.message) }
     try {
       broadcastTelemetry(tenantId, 'agent.task_completed', { taskId: task.id, agentId: agent.id, confidence: result.confidence, tokensUsed: totalTokens.total, durationMs: Date.now() - startTime })
     } catch { /* non-critical */ }
     try {
-      await auditLog({ eventType: 'agent.task_completed', tenantId, actorId: agent.id, actorType: 'AGENT', resourceType: 'AgentTask', resourceId: task.id, action: 'COMPLETE_TASK', afterState: { status: 'COMPLETED', tokensUsed: totalTokens.total, actionsCount: actions.length, durationMs: Date.now() - startTime } })
+      await auditLog({
+        eventType: 'agent.task_completed', tenantId, actorId: agent.id, actorType: 'AGENT',
+        resourceType: 'AgentTask', resourceId: task.id, action: 'COMPLETE_TASK',
+        afterState: { status: 'COMPLETED', tokensUsed: totalTokens.total, actionsCount: actions.length, durationMs: Date.now() - startTime },
+        metadata: {
+          agentName: agent.name, archetype: agent.archetype,
+          goal: (task.goal || '').slice(0, 300),
+          toolsUsed: [...new Set(actions.map(a => a.skill))].slice(0, 20),
+          model: agent.llm_model,
+        }
+      })
     } catch { /* non-critical */ }
 
     clearTimeout(timeoutId)
@@ -4479,9 +4642,40 @@ ${mermaid}
     )
     try { broadcastTelemetry(tenantId, 'agent.task_failed', { taskId: task.id, agentId: agent.id, error: err.message }) } catch {}
     try {
-      await auditLog({ eventType: 'agent.task_failed', tenantId, actorId: agent.id, actorType: 'AGENT', resourceType: 'AgentTask', resourceId: task.id, action: 'FAIL_TASK', afterState: { status: 'FAILED', error: err.message.slice(0, 500), actionsCount: actions.length, tokensUsed: totalTokens.total, durationMs: Date.now() - startTime } })
+      await auditLog({ eventType: 'agent.task_failed', tenantId, actorId: agent.id, actorType: 'AGENT', resourceType: 'AgentTask', resourceId: task.id, action: 'FAIL_TASK', afterState: { status: 'FAILED', error: err.message.slice(0, 500), actionsCount: actions.length, tokensUsed: totalTokens.total, durationMs: Date.now() - startTime }, metadata: _lastLlmInput ? { systemPrompt: _lastLlmInput.systemPrompt, lastUserMessage: _lastLlmInput.lastUserMessage, messageCount: _lastLlmInput.messageCount, model: _lastLlmInput.model, toolCount: _lastLlmInput.toolCount } : {} })
     } catch { /* non-critical */ }
     throw err
+  }
+}
+
+// ── Helper: mirror artifact to local-dir connectors configured for this agent ──
+async function mirrorArtifactToLocalDirs(agt, filename, content, fmt) {
+  try {
+    const { rows: localDirConns } = await query(
+      `SELECT tc.config
+       FROM agent_tool_scopes ats
+       JOIN tool_connections tc ON ats.connector_id = tc.id
+       WHERE ats.agent_id = $1 AND ats.scope_type = 'connector'
+         AND tc.tool_id = 'local-dir' AND tc.status = 'ACTIVE'`,
+      [agt.id]
+    )
+    const paths = []
+    for (const conn of localDirConns) {
+      const localRoot = conn.config?.path
+      if (!localRoot) continue
+      await mkdir(localRoot, { recursive: true })
+      const extMap = { svg: '.svg', csv: '.csv', json: '.json', png: '.png', pdf: '.pdf', html: '.html', py: '.py', md: '.md', txt: '.txt' }
+      const ext = extMap[fmt] || `.${fmt}`
+      const safeName = (filename || `output-${Date.now()}`).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64)
+      const dest = join(localRoot, safeName.endsWith(ext) ? safeName : safeName + ext)
+      await writeFile(dest, content, Buffer.isBuffer(content) ? undefined : 'utf-8')
+      paths.push(dest)
+    }
+    if (paths.length > 0) console.log(`[mirror] Artifact mirrored to: ${paths.join(', ')}`)
+    return paths
+  } catch (err) {
+    console.warn(`[mirror] Local-dir mirror failed: ${err.message}`)
+    return []
   }
 }
 
@@ -5142,10 +5336,35 @@ async function executeTool(toolName, input, agent, skills) {
         // Single file
         const extMap = { svg: '.svg', csv: '.csv', json: '.json', png: '.png', pdf: '.pdf', html: '.html' }
         const ext = extMap[format] || `.${format}`
-        const fname = sanitise(input.filename || `output-${Date.now()}`.replace(new RegExp(`\\${ext}$`, 'i'), '')) + ext
+        // Generic guard: if every significant word in the provided filename is absent
+        // from the task goal, the LLM hallucinated a filename unrelated to the task.
+        // Auto-name from the goal slug instead.
+        let effectiveFilename = input.filename
+        if (effectiveFilename && task?.goal) {
+          const goalTokens = new Set((task.goal).toLowerCase().match(/[a-z]{4,}/g) || [])
+          const fileTokens = (effectiveFilename.toLowerCase().match(/[a-z]{4,}/g) || [])
+          const ignoreWords = new Set(['html', 'json', 'data', 'file', 'output', 'report', 'result', 'artifact', 'diagram', 'chart', 'index', 'main'])
+          const significant = fileTokens.filter(t => !ignoreWords.has(t))
+          if (significant.length > 0 && significant.every(t => !goalTokens.has(t))) {
+            console.warn(`[write_artifact] Filename "${effectiveFilename}" tokens [${significant.join(',')}] all absent from goal — using goal-based name`)
+            effectiveFilename = null
+          }
+        }
+        // Strip any existing extension before appending to prevent double-extension (foo.svg → foo.svg.svg)
+        const fname = sanitise((effectiveFilename || `output-${Date.now()}`).replace(new RegExp(`\\${ext}$`, 'i'), '')) + ext
         const filePath = join(artifactsDir, fname)
 
         let content = input.content || ''
+
+        // ── QUALITY GATE: Reject placeholder/poor content before saving to disk ──
+        const qualityCheck = validateContentQuality(content, format, { goal: task?.goal })
+        if (!qualityCheck.valid) {
+          return {
+            success: false,
+            error: `❌ Artifact REJECTED — ${qualityCheck.reason}\n\nGenerate the COMPLETE actual content and call write_artifact again. Do NOT use placeholders, plan language, or descriptions of what you intend to do. Output the FINAL result directly.`
+          }
+        }
+
         if (format === 'png') {
           content = Buffer.from(content.replace(/^data:image\/png;base64,/, ''), 'base64')
         }
@@ -5153,10 +5372,46 @@ async function executeTool(toolName, input, agent, skills) {
         downloadUrl = `/api/v1/artifacts/${agent.tenant_id}/${fname}`
       }
 
+      // ── Mirror artifact to local-dir connectors configured for this agent ──
+      let localDirPaths = []
+      try {
+        const { rows: localDirConns } = await query(
+          `SELECT tc.config
+           FROM agent_tool_scopes ats
+           JOIN tool_connections tc ON ats.connector_id = tc.id
+           WHERE ats.agent_id = $1 AND ats.scope_type = 'connector'
+             AND tc.tool_id = 'local-dir' AND tc.status = 'ACTIVE'`,
+          [agent.id]
+        )
+        for (const conn of localDirConns) {
+          const localRoot = conn.config?.path
+          if (!localRoot) continue
+          await mkdir(localRoot, { recursive: true })
+          if (format === 'zip' && input.files) {
+            for (const f of input.files) {
+              const safeRel = f.path.replace(/\.\.\//g, '')
+              const dest = join(localRoot, safeRel)
+              await mkdir(dirname(dest), { recursive: true })
+              await writeFile(dest, f.content || '', 'utf-8')
+            }
+            localDirPaths.push(localRoot)
+          } else {
+            // Use shared helper for single-file mirroring
+            const mirrored = await mirrorArtifactToLocalDirs(agent, input.filename || fname, content, format)
+            localDirPaths.push(...mirrored)
+          }
+        }
+      } catch (mirrorErr) {
+        console.warn(`[write_artifact] Local-dir mirror failed: ${mirrorErr.message}`)
+      }
+
       return {
         success: true,
-        message: 'Artifact saved successfully',
+        message: localDirPaths.length > 0
+          ? `Artifact saved and mirrored to local connector path(s): ${localDirPaths.join(', ')}`
+          : 'Artifact saved successfully',
         download_url: downloadUrl,
+        local_paths: localDirPaths.length > 0 ? localDirPaths : undefined,
         format,
       }
     } catch (err) {
@@ -5509,7 +5764,7 @@ async function executeTool(toolName, input, agent, skills) {
              FROM agent_tool_scopes ats
              JOIN tool_connections tc ON ats.connector_id = tc.id
              WHERE ats.agent_id = $1 AND ats.scope_type = 'connector'
-               AND tc.tool_id IN ('database', 'postgres')
+               AND tc.tool_id = ANY(ARRAY[${[...ALL_DB_TOOL_IDS].map(t => `'${t}'`).join(',')}])
                AND tc.status = 'ACTIVE'`,
             [agent.id]
           )
@@ -6264,6 +6519,50 @@ async function executeTool(toolName, input, agent, skills) {
   return { success: false, error: 'Skill not yet implemented' }
 }
 
+export async function retryTask(tenantId, agentId, taskId, userId, { mode = 'checkpoint' } = {}) {
+  const { rows: [task] } = await query(
+    `SELECT id, status, context, execution_checkpoint FROM agent_tasks WHERE id = $1 AND agent_id = $2 AND tenant_id = $3`,
+    [taskId, agentId, tenantId]
+  )
+  if (!task) throw new AppError('NOT_FOUND', 'Task not found', 404)
+  if (task.status !== 'FAILED' && task.status !== 'CANCELLED') {
+    throw new AppError('INVALID_STATE', `Task cannot be retried in status '${task.status}'`, 400)
+  }
+
+  const existingContext = (typeof task.context === 'string' ? JSON.parse(task.context || '{}') : task.context) || {}
+  const hasCheckpoint = !!task.execution_checkpoint
+  // 'checkpoint': restore from last saved state (if one exists); 'fresh': ignore checkpoint, re-run from scratch
+  const useCheckpoint = mode !== 'fresh' && hasCheckpoint
+  const newContext = { ...existingContext, _resumeFromCheckpoint: useCheckpoint, _retryUserId: userId, _retryAt: new Date().toISOString(), _retryMode: mode }
+
+  await query(
+    `UPDATE agent_tasks SET status = 'QUEUED', error = NULL, completed_at = NULL, context = $1 WHERE id = $2 AND tenant_id = $3`,
+    [JSON.stringify(newContext), taskId, tenantId]
+  )
+
+  // Load agent and re-enqueue — include tenant llm_config so the
+  // retried task has proper LLM provider credentials.
+  const { rows: [agent] } = await query(
+    `SELECT a.*, t.llm_config FROM agents a
+     JOIN tenants t ON t.id = a.tenant_id
+     WHERE a.id = $1 AND a.tenant_id = $2`,
+    [agentId, tenantId]
+  )
+  if (!agent) throw new AppError('NOT_FOUND', 'Agent not found', 404)
+
+  const { rows: [updatedTask] } = await query(
+    `SELECT * FROM agent_tasks WHERE id = $1 AND tenant_id = $2`,
+    [taskId, tenantId]
+  )
+
+  const { enqueueTask } = await import('./queue.service.js')
+  await enqueueTask(updatedTask, agent, executeTask, { jobId: `${taskId}-retry-${Date.now()}` })
+
+  await auditLog({ eventType: 'agent.task_retried', tenantId, actorId: userId, actorType: 'USER', resourceType: 'AgentTask', resourceId: taskId, action: 'RETRY_TASK', afterState: { status: 'QUEUED', hasCheckpoint, mode, useCheckpoint } }).catch(() => {})
+
+  return { ...updatedTask, hasCheckpoint, mode, useCheckpoint }
+}
+
 export async function cancelTask(tenantId, agentId, taskId, userId) {
   const { rowCount } = await query(
     `UPDATE agent_tasks 
@@ -6279,9 +6578,3 @@ export async function cancelTask(tenantId, agentId, taskId, userId) {
   })
   return { success: true }
 }
-
-// ─── Pure helpers exported for unit testing (no behaviour change) ────────────
-// These detection/parsing functions are deterministic and DB-free; exporting
-// them lets the test suite guard the fast-paths against regex/logic regressions
-// without standing up a database.
-export { parseBeamSpec, detectJiraDashboardGoal, computeJiraMetrics }

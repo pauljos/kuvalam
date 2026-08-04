@@ -69,6 +69,7 @@ export default function AgentDetailPage() {
   const [pastTasks, setPastTasks] = useState<any[]>([])
   const [showAllTasks, setShowAllTasks] = useState(false)
   const [deleteState, setDeleteState] = useState(0)
+  const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null)
 
   // Skill Modal State
   const [showSkillModal, setShowSkillModal] = useState(false)
@@ -162,7 +163,7 @@ export default function AgentDetailPage() {
       ]).then(([a, k, g, s, c]) => {
         setAgent(a)
         setKbs(k.knowledgeBases || [])
-        setSelectedKBs(a.knowledge_bases || [])
+        setSelectedKBs(a.knowledge_base_ids || [])
         setGraphs(g.knowledgeGraphs || [])
         setSelectedGraphs(a.knowledge_graph_ids || [])
         setLlmProviders(s?.llm_config?.providers || {})
@@ -172,6 +173,19 @@ export default function AgentDetailPage() {
       api.listTasks(tenantId, agentId).then((res: any) => {
         const tasks = res?.tasks || res || []
         setPastTasks(tasks)
+        // Check for pre-selected task from dashboard execution log
+        let preselectedId: string | null = null
+        try { preselectedId = sessionStorage.getItem(`task-select-${agentId}`) } catch {}
+        if (preselectedId) {
+          try { sessionStorage.removeItem(`task-select-${agentId}`) } catch {}
+          const preselected = tasks.find((t: any) => t.id === preselectedId)
+          if (preselected) {
+            setTask(preselected)
+            setGoal(preselected.goal || '')
+            setAutoLoadedGoal(true)
+            return
+          }
+        }
         // Auto-load the last SUCCESSFUL/COMPLETED/STOPPED task's prompt
         // so users can quickly re-run with the same prompt (one click).
         const lastSuccessful = tasks.find((t: any) =>
@@ -261,14 +275,17 @@ export default function AgentDetailPage() {
     // Reset retry count on successful connection
     wsRetryCount.current = 0
     
-    // Build WebSocket URL safely
-    const url = new URL(API_BASE)
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    url.pathname = `/ws/tenants/${tid}/telemetry`
-    const wsUrl = url.toString()
-
-    const ws = new WebSocket(wsUrl) // httpOnly cookie is sent automatically
-    wsRef.current = ws
+    // Build WebSocket URL safely.  Fetch a short-lived token because
+    // the httpOnly cookie is not sent cross-origin by WebSocket constructors.
+    // useCallback cannot be async, so we chain .then() instead of await.
+    api.fetchWSToken().then(token => {
+      const url = new URL(API_BASE)
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      url.pathname = `/ws/tenants/${tid}/telemetry`
+      url.searchParams.set('token', token)
+      const wsUrl = url.toString()
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
 
     ws.onmessage = (event) => {
       let msg: any
@@ -389,6 +406,7 @@ export default function AgentDetailPage() {
         connectWS(tid, taskId)
       }, retryDelay)
     }
+    }).catch(err => { console.warn('[WS] Failed to fetch WS token:', err) })
   }, [agentId, running])
 
   function startPolling(tid: string, taskId: string) {
@@ -418,23 +436,55 @@ export default function AgentDetailPage() {
   useEffect(() => {
     if (task && traceEvents.length === 0) {
       const reconstructed: TraceEvent[] = []
+      let hasPlan = false
       if (task.plan) {
         // Plan can be stored as { content: '...' } (new format) or { steps: '...' } (old placeholder)
         const planText = typeof task.plan === 'object'
           ? (task.plan.content || task.plan.steps || JSON.stringify(task.plan))
           : task.plan
+        reconstructed.push({ type: 'phase', phase: 'planning', label: '🧠 Formulating plan' } as any)
         reconstructed.push({ type: 'plan_ready', plan: planText } as any)
+        hasPlan = true
       }
-      if (task.actions && Array.isArray(task.actions)) {
+      if (task.actions && Array.isArray(task.actions) && task.actions.length > 0) {
+        // Phase transition: thinking/executing
+        reconstructed.push({ type: 'phase', phase: 'thinking', label: '⚡ Reasoning & executing tools' } as any)
         task.actions.forEach((act: any) => {
+          // Show LLM reasoning if stored in the action (thought/content field)
+          if (act.thought || act.content || act.reasoning) {
+            const reasoningText = act.thought || act.content || act.reasoning
+            reconstructed.push({ type: 'phase', phase: 'thinking', label: `💭 ${String(reasoningText).slice(0, 300)}` } as any)
+          }
           reconstructed.push({ type: 'tool_call', phase: 'executing', tool: act.skill, input: act.input } as any)
           // Actions store { output: { success, ... } } — read output directly
-          reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: act.output?.success, output: act.output } as any)
+          // For runQuery, summarize instead of dumping full rows
+          const output = act.output || {}
+          const displayOutput = act.skill === 'runQuery' && output.success
+            ? { ...output, rows: `[${(output.rows || []).length} rows — ${(output.columns || []).join(', ')}]` }
+            : output
+          reconstructed.push({ type: 'tool_result', phase: 'executing', tool: act.skill, success: output.success, output: displayOutput } as any)
         })
       }
-      // Show the error for FAILED tasks loaded from history
-      if (task.error || task.status === 'FAILED') {
+      // Show the error for FAILED tasks (but NOT cancelled ones — supervisor errors go there)
+      if ((task.error || task.status === 'FAILED') && task.status !== 'CANCELLED') {
+        reconstructed.push({ type: 'phase', phase: 'failed', label: '✕ Execution failed' } as any)
         reconstructed.push({ type: 'failed', error: task.error || 'Task failed with no error details' } as any)
+      }
+      // CANCELLED tasks — distinguish supervisor kill from user stop
+      if (task.status === 'CANCELLED') {
+        const supervisorReason = (task.error || '').includes('[Supervisor]')
+          ? (task.error || '').replace(/.*\[Supervisor\]\s*/s, '').trim()
+          : ''
+        reconstructed.push({
+          type: 'phase', phase: 'cancelled',
+          label: supervisorReason
+            ? `🛑 Task cancelled by supervisor: ${supervisorReason}`
+            : '✕ Execution stopped by user'
+        } as any)
+      }
+      // Completed tasks get a synthesising phase
+      if (task.status === 'COMPLETED' && !(task.error || task.status === 'FAILED')) {
+        reconstructed.push({ type: 'phase', phase: 'synthesising', label: '✨ Synthesising results' } as any)
       }
       if (reconstructed.length > 0) {
         setTraceEvents(reconstructed)
@@ -446,7 +496,7 @@ export default function AgentDetailPage() {
     e.preventDefault()
     try {
       // Sync Knowledge Bases
-      const existingKBs = agent.knowledge_bases?.map((kb: any) => kb.id) || []
+      const existingKBs = agent.knowledge_base_ids || []
       const kbsToAdd = selectedKBs.filter(id => !existingKBs.includes(id))
       const kbsToRemove = existingKBs.filter((id: string) => !selectedKBs.includes(id))
 
@@ -466,7 +516,8 @@ export default function AgentDetailPage() {
         name: agent.name, description: agent.description, systemPrompt: agent.system_prompt,
         autonomyLevel: agent.autonomy_level, llmProvider: agent.llm_provider,
         llmModel: agent.llm_model, confidenceThreshold: agent.confidence_threshold,
-        archetype: agent.archetype
+        archetype: agent.archetype, dataStrategy: agent.data_strategy,
+        useMemory: agent.use_memory
       })
       // Fetch the full agent again to get the updated KB list
       const freshAgent = await api.getAgent(tenantId, agentId)
@@ -630,6 +681,30 @@ export default function AgentDetailPage() {
       setPastTasks(prev => prev.filter(t => t.id !== taskId))
       toast('success', 'Execution history deleted')
     } catch (err: any) { toast('error', 'Failed to delete execution', err.message) }
+  }
+
+  async function handleRetryTask(e: any, taskId: string, mode: 'checkpoint' | 'fresh') {
+    e.stopPropagation()
+    setRetryingTaskId(taskId)
+    try {
+      const res = await api.retryTask(tenantId, agentId, taskId, mode)
+      const retried = res?.task || res
+      setPastTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'QUEUED' } : t))
+      const tid = retried?.id || taskId
+      currentTaskId.current = tid
+      setTask(retried)
+      setGoal(retried?.goal || '')
+      setTraceEvents([])
+      setStreamBuffers({})
+      setRunning(true)
+      setCurrentPhase('')
+      connectWS(tenantId, tid)
+      toast('info', mode === 'checkpoint' ? 'Resuming from checkpoint' : 'Restarting from scratch', '')
+    } catch (err: any) {
+      toast('error', 'Retry failed', err.message)
+    } finally {
+      setRetryingTaskId(null)
+    }
   }
 
   async function handleCancelTask(e: any, taskId: string) {
@@ -843,7 +918,11 @@ export default function AgentDetailPage() {
       setTask(t)
       connectWS(tenantId, taskId)
     } catch (err: any) {
-      toast('error', 'Task failed to start', err.message)
+      if (err?.code === 'CIRCUIT_OPEN') {
+        toast('error', 'Agent is paused (circuit open)', 'This agent failed too many recent tasks and was automatically blocked. Reset the circuit breaker in the Supervisor page to allow new tasks.')
+      } else {
+        toast('error', 'Task failed to start', err.message)
+      }
       setRunning(false)
     }
   }
@@ -954,9 +1033,9 @@ export default function AgentDetailPage() {
               </div>
 
               {/* ── Intelligence ────────────────────────────────────────── */}
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(139,92,246,0.12)', color: '#6d28d9', border: '1px solid rgba(139,92,246,0.25)' }}>🧠 Intelligence</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(16,185,129,0.12)', color: '#065f46', border: '1px solid rgba(16,185,129,0.3)' }}>🧠 Intelligence</div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                <button type="button" onClick={() => setShowSystemPrompt(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(139,92,246,0.06)', border: 'none', cursor: 'pointer', color: '#5b21b6', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #8b5cf6' }}>
+                <button type="button" onClick={() => setShowSystemPrompt(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(16,185,129,0.07)', border: 'none', cursor: 'pointer', color: '#065f46', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #10b981' }}>
                   <span>📜 System instructions (Guardrails & Constraints)</span>
                   <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{showSystemPrompt ? '▾ Hide' : `▸ Show (${agent.system_prompt?.length || 0} chars)`}</span>
                 </button>
@@ -1057,10 +1136,43 @@ export default function AgentDetailPage() {
                   )}
                 </p>
               </div>
+              {/* ── Database Strategy ──────────────────────────────────── */}
+              <div className="form-group">
+                <label className="form-label">Database Strategy</label>
+                <select
+                  className="input"
+                  value={agent.data_strategy || 'source'}
+                  onChange={e => setAgent({ ...agent, data_strategy: e.target.value })}
+                >
+                  <option value="source">📥 Database as Source (Read-only: SELECT, explore, profile)</option>
+                  <option value="target">📤 Database as Target (Write-only: CREATE/INSERT, build schemas)</option>
+                  <option value="both">🔄 Both Source &amp; Target (Read + Write)</option>
+                  <option value="none">🚫 No Database (KB, files, APIs only)</option>
+                </select>
+                <p className="form-hint" style={{ marginTop: 6 }}>
+                  Tells the agent how to treat the database. <strong>Source</strong> = read-only exploration. <strong>Target</strong> = build/write tables. <strong>Both</strong> = profile and transform. <strong>None</strong> = no DB access.
+                </p>
+              </div>
+              {/* ── Memory toggle ────────────────────────────────────── */}
+              <div className="form-group">
+                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!agent.use_memory}
+                    onChange={e => setAgent({ ...agent, use_memory: e.target.checked })}
+                    style={{ accentColor: '#10b981', width: 18, height: 18 }}
+                  />
+                  🧠 Use Agent Memory (cross-task context)
+                </label>
+                <p className="form-hint" style={{ marginTop: 6, marginLeft: 26 }}>
+                  When <strong>enabled</strong>, facts and past task summaries from the 🧠 Agent Memory card below are injected into the system prompt as context.
+                  When <strong>off</strong> (default), every task starts fresh — the agent won't remember anything from previous executions.
+                </p>
+              </div>
               {/* ── Knowledge ───────────────────────────────────────────── */}
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(245,158,11,0.14)', color: '#b45309', border: '1px solid rgba(245,158,11,0.3)' }}>📚 Knowledge</div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', marginTop: 4, padding: '4px 10px', borderRadius: 999, background: 'rgba(16,185,129,0.12)', color: '#065f46', border: '1px solid rgba(16,185,129,0.3)' }}>📚 Knowledge</div>
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
-                <button type="button" onClick={() => setShowKnowledge(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(245,158,11,0.07)', border: 'none', cursor: 'pointer', color: '#92400e', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #f59e0b' }}>
+                <button type="button" onClick={() => setShowKnowledge(v => !v)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', background: 'rgba(16,185,129,0.07)', border: 'none', cursor: 'pointer', color: '#065f46', fontWeight: 700, fontSize: 13, borderLeft: '3px solid #10b981' }}>
                   <span>📎 Attached knowledge</span>
                   <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{showKnowledge ? '▾ Hide' : `▸ Show (${selectedKBs.length} KBs, ${selectedGraphs.length} graphs)`}</span>
                 </button>
@@ -1078,7 +1190,7 @@ export default function AgentDetailPage() {
                               <label key={kb.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
                                 <input type="checkbox" checked={isSelected} onChange={() => {
                                   setSelectedKBs(prev => isSelected ? prev.filter(i => i !== kb.id) : [...prev, kb.id])
-                                }} style={{ accentColor: 'var(--green)' }} />
+                                }} style={{ accentColor: '#10b981' }} />
                                 <strong>{kb.name}</strong> ({kb.document_count || 0} docs)
                               </label>
                             )
@@ -1089,7 +1201,7 @@ export default function AgentDetailPage() {
                     <div className="form-group">
                       <label className="form-label">Attached Knowledge Graphs</label>
                       {graphs.length === 0 ? (
-                        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge graphs found. <Link href="/dashboard/knowledge?tab=graphs" style={{ color: 'var(--purple, #8b5cf6)' }}>Create one</Link></div>
+                        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No knowledge graphs found. <Link href="/dashboard/knowledge?tab=graphs" style={{ color: '#10b981' }}>Create one</Link></div>
                       ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
                           {graphs.map(g => {
@@ -1098,7 +1210,7 @@ export default function AgentDetailPage() {
                               <label key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
                                 <input type="checkbox" checked={isSelected} onChange={() => {
                                   setSelectedGraphs(prev => isSelected ? prev.filter(i => i !== g.id) : [...prev, g.id])
-                                }} style={{ accentColor: 'var(--purple, #8b5cf6)' }} />
+                                }} style={{ accentColor: '#10b981' }} />
                                 <strong>{g.name}</strong> ({g.entity_count || 0} entities, {g.graph_kind})
                               </label>
                             )
@@ -1409,9 +1521,9 @@ export default function AgentDetailPage() {
         {/* Right Column: Teach Agent + Live Execution */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24, minHeight: 0, overflowY: 'auto' }}>
 
-          {/* ─── Autonomous Execution card ─────────────────────────────── */}
+          {/* ─── Execution Goal card ─────────────────────────────── */}
           <div className="card" style={{ padding: 24 }}>
-            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #f59e0b, #fbbf24)', display: 'inline-block' }} />Autonomous Execution</h2>
+            <h2 style={{ fontSize: 16, fontWeight: 800, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #f59e0b, #fbbf24)', display: 'inline-block' }} />Execution Goal</h2>
             <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 20 }}>
               Provide a high-level goal. The agent will plan, retrieve knowledge, call tools, and stream results live.
             </p>
@@ -1516,7 +1628,11 @@ export default function AgentDetailPage() {
                     if (ev.type === 'tool_call') return (
                       <div key={i} style={{ borderLeft: '3px solid #f59e0b', paddingLeft: 10 }}>
                         <span style={{ color: '#f59e0b', fontWeight: 700 }}>⚙ {ev.tool}</span>
-                        <pre style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 11 }}>{JSON.stringify(ev.input, null, 2)}</pre>
+                        <pre style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 11, maxHeight: 200, overflowY: 'auto', background: '#0a0d14', borderRadius: 4, padding: '6px 8px' }}>
+                          {ev.tool === 'runQuery' && typeof ev.input?.query === 'string'
+                            ? ev.input.query
+                            : JSON.stringify(ev.input, null, 2)}
+                        </pre>
                       </div>
                     )
                     if (ev.type === 'tool_result') return (
@@ -1524,7 +1640,7 @@ export default function AgentDetailPage() {
                         <span style={{ color: ev.success ? '#22c55e' : '#ef4444', fontWeight: 700 }}>
                           {ev.success ? '✓' : '✗'} {ev.tool}
                         </span>
-                        <pre style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 11, maxHeight: 80, overflowY: 'auto' }}>
+                        <pre style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 11, maxHeight: 400, overflowY: 'auto', background: '#0a0d14', borderRadius: 4, padding: '6px 8px' }}>
                           {JSON.stringify(ev.output, null, 2)}
                         </pre>
                       </div>
@@ -1616,6 +1732,24 @@ export default function AgentDetailPage() {
                         title="Stop execution"
                       >⏹ STOP</button>
                     )}
+                    {(t.status === 'FAILED' || t.status === 'CANCELLED') && (
+                      <div style={{ position: 'absolute', top: 10, right: 36, display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+                        {t.execution_checkpoint && (
+                          <button
+                            disabled={retryingTaskId === t.id}
+                            onClick={(e) => handleRetryTask(e, t.id, 'checkpoint')}
+                            style={{ background: '#0d9488', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', padding: '3px 10px', fontSize: 11, fontWeight: 700, opacity: retryingTaskId === t.id ? 0.6 : 1 }}
+                            title="Resume from last checkpoint"
+                          >⟳ Resume</button>
+                        )}
+                        <button
+                          disabled={retryingTaskId === t.id}
+                          onClick={(e) => handleRetryTask(e, t.id, 'fresh')}
+                          style={{ background: '#6366f1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', padding: '3px 10px', fontSize: 11, fontWeight: 700, opacity: retryingTaskId === t.id ? 0.6 : 1 }}
+                          title="Re-run from scratch"
+                        >↺ Restart</button>
+                      </div>
+                    )}
                      <div style={{ fontWeight: 400, fontSize: 13, marginBottom: 6, lineHeight: 1.5 }}>{t.goal}</div>
                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                        <span className={`badge badge-${t.status.toLowerCase()}`}>{t.status}</span>
@@ -1654,13 +1788,27 @@ export default function AgentDetailPage() {
                       🧩 Chunked delivery
                     </span>
                   )}
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {promptMode === 'local' && localPreview
-                      ? `~${localPreview.compressedTokens} tokens • saved ${localPreview.savedPct}%`
-                      : promptMode === 'summarised' && compressedPreview
-                      ? `~${compressedPreview.compressedTokens} tokens • saved ${compressedPreview.savedPct}%`
-                      : promptPreview ? `~${promptPreview.estimatedTokens} tokens` : ''}
-                  </span>
+                  {(() => {
+                    let label = ''
+                    if (promptMode === 'local' && localPreview)
+                      label = `~${localPreview.compressedTokens} tokens • saved ${localPreview.savedPct}%`
+                    else if (promptMode === 'summarised' && compressedPreview)
+                      label = `~${compressedPreview.compressedTokens} tokens • saved ${compressedPreview.savedPct}%`
+                    else if (promptPreview)
+                      label = agent?.chunked_prompt && promptPreview.chunkStats
+                        ? `~${promptPreview.estimatedTokens} tokens • ${promptPreview.chunkStats.sectionCount} sections (~${promptPreview.chunkStats.tokensPerChunk}/chunk)`
+                        : `~${promptPreview.estimatedTokens} tokens`
+                    if (!label) return null
+                    return (
+                      <span style={{
+                        padding: '4px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700,
+                        background: 'rgba(59,130,246,0.12)', color: '#3b82f6',
+                        border: '1px solid rgba(59,130,246,0.3)',
+                      }}>
+                        🔢 {label}
+                      </span>
+                    )
+                  })()}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>

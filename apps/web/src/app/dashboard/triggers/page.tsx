@@ -255,7 +255,7 @@ export default function TriggersPage() {
         {/* Trigger type info */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginBottom: 24 }}>
           {TRIGGER_TYPES.map(tt => (
-            <div key={tt.id} className="card" style={{ padding: '16px 18px' }}>
+            <div key={tt.id} className="card card-hover" style={{ padding: '16px 18px' }}>
               <div style={{ fontSize: 22, marginBottom: 8 }}>{tt.icon}</div>
               <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>{tt.label}</div>
               <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, margin: 0 }}>{tt.description}</p>
@@ -292,65 +292,132 @@ export default function TriggersPage() {
               <div style={{ fontSize: 13 }}>Try a different search term.</div>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
               {filteredTriggers.map(t => {
                 const tt = TRIGGER_TYPES.find(x => x.id === t.trigger_type)
                 return (
-                  <div key={t.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 16, padding: '16px 20px',
-                    borderRadius: 10,
-                    border: `1px solid ${t.is_active ? 'var(--green-border)' : 'var(--border)'}`,
-                    background: t.is_active ? 'var(--green-bg)' : 'var(--bg)',
+                  <div key={t.id} className="card card-hover" style={{
+                    padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+                    border: t.is_active ? '1px solid var(--green-border)' : '1px solid var(--border)',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.04)',
                   }}>
-                    <div style={{ fontSize: 26 }}>{tt?.icon || '⚡'}</div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                        <span style={{ fontWeight: 700, fontSize: 14 }}>{t.name}</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3' }}>{tt?.label}</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 2 }}>
-                        {t.target_type === 'AGENT' ? (
-                          <>Agent: <strong>{t.agent_name || t.agent_id?.substring(0, 8)}</strong></>
-                        ) : (
-                          <>Workflow: <strong>{t.workflow_name}</strong></>
-                        )}
-                        {t.trigger_type === 'SCHEDULE' && t.config?.cron && ` · ${describeCron(t.config.cron)}`}
-                        {t.trigger_type === 'WEBHOOK' && ' · HMAC-signed POST'}
-                        {t.trigger_type === 'EVENT' && t.config?.eventType && ` · on ${t.config.eventType}`}
-                      </div>
-                      {t.last_fired_at && (
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          Last fired: {new Date(t.last_fired_at).toLocaleString()} · {t.fire_count || 0} total fires
+                    {/* Top accent gradient bar */}
+                    <div style={{
+                      height: 4, flexShrink: 0,
+                      background: t.is_active
+                        ? 'linear-gradient(90deg, #10b981, #34d399)'
+                        : 'linear-gradient(90deg, #9ca3af, #d1d5db)',
+                    }} />
+
+                    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                      {/* Top row: icon tile + name + status */}
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                        <div style={{
+                          width: 46, height: 46, borderRadius: 14, flexShrink: 0,
+                          background: t.is_active
+                            ? 'linear-gradient(135deg, #d1fae5, #a7f3d0)'
+                            : 'linear-gradient(135deg, #f3f4f6, #e5e7eb)',
+                          border: `1.5px solid ${t.is_active ? 'var(--green-border)' : 'var(--border)'}`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 23,
+                          boxShadow: 'inset 0 1px 2px rgba(255,255,255,0.6)',
+                        }}>{tt?.icon || '⚡'}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3, flexWrap: 'wrap' }}>
+                            <h3 style={{ fontWeight: 800, fontSize: 15, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</h3>
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3' }}>{tt?.label}</span>
+                          </div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {t.target_type === 'AGENT' ? (
+                              <>🤖 Agent: <strong>{t.agent_name || t.agent_id?.substring(0, 8)}</strong></>
+                            ) : (
+                              <>⟳ Workflow: <strong>{t.workflow_name}</strong></>
+                            )}
+                          </div>
                         </div>
-                      )}
+                        <span style={{
+                          fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+                          background: t.is_active ? '#d1fae5' : '#f3f4f6',
+                          color: t.is_active ? '#065f46' : '#6b7280',
+                          border: `1px solid ${t.is_active ? '#a7f3d0' : '#e5e7eb'}`,
+                          whiteSpace: 'nowrap', flexShrink: 0,
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
+                        }}>
+                          <span style={{
+                            width: 6, height: 6, borderRadius: '50%',
+                            background: t.is_active ? '#10b981' : '#9ca3af', flexShrink: 0,
+                            animation: t.is_active ? 'blink 1.8s ease-in-out infinite' : undefined,
+                          }} />
+                          {t.is_active ? 'Active' : 'Paused'}
+                        </span>
+                      </div>
+
+                      {/* Detail chips */}
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {t.trigger_type === 'SCHEDULE' && t.config?.cron && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#fffbeb', color: '#854d0e', border: '1px solid #fde68a' }}>
+                            🕐 {describeCron(t.config.cron)}
+                          </span>
+                        )}
+                        {t.trigger_type === 'WEBHOOK' && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>
+                            🔗 HMAC-signed POST
+                          </span>
+                        )}
+                        {t.trigger_type === 'EVENT' && t.config?.eventType && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe' }}>
+                            ⚡ on {t.config.eventType}
+                          </span>
+                        )}
+                        {t.trigger_type === 'CONDITION' && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' }}>
+                            🎯 Condition
+                          </span>
+                        )}
+                        {t.fire_count > 0 && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#f3f4f6', color: '#4b5563', border: '1px solid #e5e7eb' }}>
+                            🔥 {t.fire_count} fires
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Last fired */}
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1 }}>
+                        {t.last_fired_at
+                          ? <>Last fired: {new Date(t.last_fired_at).toLocaleString()}</>
+                          : t.is_active
+                          ? 'Never fired yet'
+                          : 'Not scheduled'}
+                      </div>
+
+                      {/* Action buttons */}
+                      <div style={{ display: 'flex', gap: 8, marginTop: 'auto', paddingTop: 4 }}>
+                        <button className="btn btn-secondary btn-sm" style={{ flex: 1 }} onClick={() => testFireTrigger(t)} title="Test trigger by firing workflow" disabled={testingTrigger === t.id}>
+                          {testingTrigger === t.id ? '⏳' : '🔥'} Test
+                        </button>
+                        <button className="btn btn-secondary btn-sm" style={{ flex: 1 }} onClick={() => toggleTrigger(t.id, t.is_active)}>
+                          {t.is_active ? '⏸ Pause' : '▶ Enable'}
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => {
+                          setEditingTrigger(t)
+                          setForm({
+                            name: t.name,
+                            workflowId: t.workflow_id || '',
+                            triggerType: t.trigger_type,
+                            targetType: t.target_type || 'WORKFLOW',
+                            agentId: t.agent_id || '',
+                            agentPrompt: t.agent_prompt || '',
+                            cron: t.config?.cron || '0 9 * * *',
+                            cronCustom: false,
+                            eventType: t.config?.eventType || 'agent.completed',
+                            condition: t.config?.condition || '',
+                          })
+                          setShowCreate(true)
+                        }} title="Edit" style={{ padding: '0 10px' }}>✏️</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => duplicateTrigger(t.id)} title="Duplicate" style={{ padding: '0 10px' }}>⧉</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => deleteTrigger(t.id, t.name)} title="Delete trigger" style={{ padding: '0 10px', color: '#ef4444' }}>🗑</button>
+                      </div>
                     </div>
-                    <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 20, background: t.is_active ? '#d1fae5' : '#f3f4f6', color: t.is_active ? '#065f46' : '#9ca3af' }}>
-                      {t.is_active ? 'Active' : 'Paused'}
-                    </span>
-                    <button className="btn btn-secondary btn-sm" onClick={() => testFireTrigger(t)} title="Test trigger by firing workflow" disabled={testingTrigger === t.id}>
-                      {testingTrigger === t.id ? '⏳' : '🔥'} Test
-                    </button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => toggleTrigger(t.id, t.is_active)}>
-                      {t.is_active ? 'Pause' : 'Enable'}
-                    </button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => {
-                      setEditingTrigger(t)
-                      setForm({
-                        name: t.name,
-                        workflowId: t.workflow_id || '',
-                        triggerType: t.trigger_type,
-                        targetType: t.target_type || 'WORKFLOW',
-                        agentId: t.agent_id || '',
-                        agentPrompt: t.agent_prompt || '',
-                        cron: t.config?.cron || '0 9 * * *',
-                        cronCustom: false,
-                        eventType: t.config?.eventType || 'agent.completed',
-                        condition: t.config?.condition || '',
-                      })
-                      setShowCreate(true)
-                    }} title="Edit">✏️</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => duplicateTrigger(t.id)} title="Duplicate">⧉</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => deleteTrigger(t.id, t.name)} style={{ color: '#ef4444' }}>Delete</button>
                   </div>
                 )
               })}

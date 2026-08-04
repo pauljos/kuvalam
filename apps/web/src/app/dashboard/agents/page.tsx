@@ -66,7 +66,8 @@ export default function AgentsPage() {
   const [form, setForm] = useState({
     name: '', description: '', archetype: '', autonomyLevel: 'SUPERVISED',
     llmProvider: 'openai', llmModel: 'gpt-4o',
-    systemPrompt: '', confidenceThreshold: 0.75
+    systemPrompt: '', confidenceThreshold: 0.75,
+    dataStrategy: 'source'
   })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
@@ -109,7 +110,7 @@ export default function AgentsPage() {
       const agent = await api.createAgent(tenantId, form)
       setAgents(a => [agent, ...a])
       setShowCreate(false)
-      setForm({ name: '', description: '', archetype: '', autonomyLevel: 'SUPERVISED', llmProvider: 'openai', llmModel: 'gpt-4o', systemPrompt: '', confidenceThreshold: 0.75 })
+      setForm({ name: '', description: '', archetype: '', autonomyLevel: 'SUPERVISED', llmProvider: 'openai', llmModel: 'gpt-4o', systemPrompt: '', confidenceThreshold: 0.75, dataStrategy: 'source' })
       toast('success', 'Agent created', `"${agent.name}" is ready to configure.`)
     } catch (err: any) { setError(err.message) } finally { setCreating(false) }
   }
@@ -270,106 +271,128 @@ export default function AgentsPage() {
                     const statusBg = agent.status === 'ACTIVE' ? '#d1fae5' : agent.status === 'DRAFT' ? '#fef3c7' : '#fecaca'
                     const statusText = agent.status === 'ACTIVE' ? '#065f46' : agent.status === 'DRAFT' ? '#92400e' : '#991b1b'
                     const hasSkills = (agent.skills?.length || 0) > 0 || (agent.system_prompt?.length || 0) > 50
+                    const lastTask = (agent as any).last_task_status as string | undefined
+                    const isTaskRunning = lastTask === 'RUNNING' || lastTask === 'QUEUED'
+                    const isTaskFailed = lastTask === 'FAILED'
+                    const topBarBg = isTaskRunning
+                      ? 'linear-gradient(90deg, #3b82f6, #818cf8)'
+                      : isTaskFailed
+                      ? 'linear-gradient(90deg, #ef4444, #f87171)'
+                      : agent.status === 'ACTIVE'
+                      ? 'linear-gradient(90deg, #10b981, #34d399)'
+                      : agent.status === 'DRAFT'
+                      ? 'linear-gradient(90deg, #f59e0b, #fbbf24)'
+                      : 'linear-gradient(90deg, #ef4444, #f87171)'
+                    const cardBorder = isTaskRunning
+                      ? '1px solid #93c5fd'
+                      : isTaskFailed
+                      ? '1px solid #fca5a5'
+                      : agent.status === 'ACTIVE'
+                      ? '1px solid var(--green-border)'
+                      : '1px solid var(--border)'
                     return (
               <div key={agent.id} className="card card-hover" style={{
-                padding: 22, display: 'flex', flexDirection: 'column', gap: 14,
-                border: agent.status === 'ACTIVE' ? '1px solid var(--green-border)' : '1px solid var(--border)',
+                padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+                border: cardBorder,
+                boxShadow: '0 1px 2px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.04)',
               }}>
-                {/* Top row: icon + name + status */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-                  <div style={{
-                    width: 44, height: 44, borderRadius: 12, flexShrink: 0,
-                    background: agent.status === 'ACTIVE' ? '#d1fae5' : '#f3f4f6',
-                    border: `2px solid ${agent.status === 'ACTIVE' ? 'var(--green-border)' : 'var(--border)'}`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22,
-                  }}>
-                    {archetypeIcon}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                      <h3 style={{ fontWeight: 700, fontSize: 15, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{agent.name}</h3>
-                    </div>
-                    <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, margin: 0, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                      {agent.description || 'No description'}
-                    </p>
-                  </div>
-                  <span style={{
-                    fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
-                    background: statusBg, color: statusText, whiteSpace: 'nowrap', flexShrink: 0,
-                    border: `1px solid ${statusColor}33`,
-                  }}>
-                    {agent.status === 'ACTIVE' ? '● Live' : agent.status === 'DRAFT' ? '○ Draft' : agent.status}
-                  </span>
-                </div>
+                {/* Top accent gradient bar */}
+                <div className={isTaskRunning ? 'bar-running' : undefined} style={{
+                  height: 4, flexShrink: 0,
+                  background: topBarBg,
+                }} />
 
-                {/* Info chips */}
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{
-                    fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                    background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0',
-                    display: 'flex', alignItems: 'center', gap: 4,
-                  }}>
-                    {agent.llm_model === 'auto' || !agent.llm_model
-                      ? '⚙️ System default'
-                      : `🧠 ${PROVIDER_LABELS[agent.llm_provider]?.replace(/ \(.*\)$/, '') || agent.llm_provider}`}
-                  </span>
-                  <span style={{
-                    fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                    background: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe',
-                  }}>
-                    {agent.llm_model === 'auto' || !agent.llm_model ? 'auto (from Settings)' : agent.llm_model}
-                  </span>
-                  <span style={{
-                    fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                    background: agent.autonomy_level === 'AUTONOMOUS' ? '#fef2f2' : agent.autonomy_level === 'GUARDED' ? '#fffbeb' : '#f0fdf4',
-                    color: agent.autonomy_level === 'AUTONOMOUS' ? '#991b1b' : agent.autonomy_level === 'GUARDED' ? '#92400e' : '#166534',
-                    border: `1px solid ${agent.autonomy_level === 'AUTONOMOUS' ? '#fecaca' : agent.autonomy_level === 'GUARDED' ? '#fde68a' : '#bbf7d0'}`,
-                    textTransform: 'capitalize',
-                  }}>
-                    {agent.autonomy_level === 'AUTONOMOUS' ? '🚀' : agent.autonomy_level === 'GUARDED' ? '🛡️' : '🔒'} {agent.autonomy_level?.toLowerCase()}
-                  </span>
-                  {archetype && (
+                <div style={{ padding: '16px 10px 20px 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {/* Top row: icon + name + model */}
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                      background: agent.status === 'ACTIVE'
+                        ? 'linear-gradient(135deg, #d1fae5, #a7f3d0)'
+                        : agent.status === 'DRAFT'
+                        ? 'linear-gradient(135deg, #fef3c7, #fde68a)'
+                        : 'linear-gradient(135deg, #fee2e2, #fecaca)',
+                      border: `1.5px solid ${agent.status === 'ACTIVE' ? 'var(--green-border)' : 'var(--border)'}`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+                      boxShadow: 'inset 0 1px 2px rgba(255,255,255,0.6)',
+                    }}>
+                      {archetypeIcon}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 2 }}>
+                        <h3 title={agent.name} style={{ fontWeight: 800, fontSize: 14, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{agent.name}</h3>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => deleteAgent(agent.id)}
+                          title="Delete agent"
+                          style={{ padding: '2px 6px', color: 'var(--red)', fontSize: 11, lineHeight: '18px', background: 'transparent', border: 'none', borderRadius: 4, flexShrink: 0, cursor: 'pointer' }}
+                        >🗑</button>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
+                          background: statusBg, color: statusText, whiteSpace: 'nowrap',
+                          border: `1px solid ${statusColor}33`,
+                        }}>
+                          {agent.status === 'ACTIVE' ? '● Live' : agent.status === 'DRAFT' ? 'Draft' : agent.status}
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 500 }}>
+                          {agent.llm_model === 'auto' || !agent.llm_model
+                            ? `${PROVIDER_LABELS[agent.llm_provider]?.replace(/ \(.*\)$/, '') || agent.llm_provider} (auto)`
+                            : `${PROVIDER_LABELS[agent.llm_provider]?.replace(/ \(.*\)$/, '') || agent.llm_provider} · ${agent.llm_model}`}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Description */}
+                  {agent.description && (
+                    <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, margin: 0, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                      {agent.description}
+                    </p>
+                  )}
+
+                  {/* Info chips */}
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{
                       fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                      background: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe',
+                      background: agent.autonomy_level === 'AUTONOMOUS' ? '#fef2f2' : agent.autonomy_level === 'GUARDED' ? '#fffbeb' : '#f0fdf4',
+                      color: agent.autonomy_level === 'AUTONOMOUS' ? '#991b1b' : agent.autonomy_level === 'GUARDED' ? '#92400e' : '#166534',
+                      border: `1px solid ${agent.autonomy_level === 'AUTONOMOUS' ? '#fecaca' : agent.autonomy_level === 'GUARDED' ? '#fde68a' : '#bbf7d0'}`,
                       textTransform: 'capitalize',
                     }}>
-                      {archetypeIcon} {archetype}
+                      {agent.autonomy_level === 'AUTONOMOUS' ? '🚀' : agent.autonomy_level === 'GUARDED' ? '🛡️' : '🔒'} {agent.autonomy_level?.toLowerCase()}
                     </span>
-                  )}
-                  {hasSkills && (
-                    <span style={{
-                      fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
-                      background: '#fefce8', color: '#854d0e', border: '1px solid #fef08a',
-                    }}>
-                      ✨ Custom skills
-                    </span>
-                  )}
-                </div>
-
-                {/* System prompt preview (if any) */}
-                {agent.system_prompt && (
-                  <div style={{
-                    fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4,
-                    padding: '8px 10px', background: '#f9fafb', borderRadius: 6,
-                    border: '1px dashed var(--border)', fontFamily: 'monospace',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                  }}>
-                    {agent.system_prompt.slice(0, 100)}{agent.system_prompt.length > 100 ? '…' : ''}
+                    {archetype && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+                        background: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe',
+                        textTransform: 'capitalize',
+                      }}>
+                        {archetypeIcon} {archetype}
+                      </span>
+                    )}
+                    {hasSkills && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+                        background: '#fefce8', color: '#854d0e', border: '1px solid #fef08a',
+                      }}>
+                        ✨ Custom skills
+                      </span>
+                    )}
                   </div>
-                )}
 
-                {/* Action buttons */}
-                <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
-                  <Link href={`/dashboard/agents/${agent.id}`} className="btn btn-secondary btn-sm" style={{ flex: 1, textDecoration: 'none', textAlign: 'center' }}>Configure</Link>
-                  {agent.status === 'DRAFT' && (
-                    <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => activate(agent.id)}>Activate</button>
-                  )}
-                  {agent.status === 'ACTIVE' && (
-                    <Link href={`/dashboard/agents/${agent.id}`} className="btn btn-primary btn-sm" style={{ flex: 1, textDecoration: 'none', textAlign: 'center' }}>Run Task</Link>
-                  )}
-                  <button className="btn btn-secondary btn-sm" onClick={() => duplicate(agent.id)} title="Duplicate agent" style={{ padding: '0 10px' }}>📋</button>
-                  <button className="btn btn-secondary btn-sm" onClick={() => deleteAgent(agent.id)} title="Delete agent" style={{ padding: '0 10px', color: 'var(--red)' }}>🗑</button>
+                  {/* Action buttons */}
+                  <div style={{ display: 'flex', gap: 8, paddingTop: 4 }}>
+                    <Link href={`/dashboard/agents/${agent.id}`} className="btn btn-secondary btn-sm" style={{ flex: 1, textDecoration: 'none', textAlign: 'center' }}>Configure</Link>
+                    {agent.status === 'DRAFT' && (
+                      <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => activate(agent.id)}>Activate</button>
+                    )}
+                    {agent.status === 'ACTIVE' && (
+                      <Link href={`/dashboard/agents/${agent.id}`} className="btn btn-primary btn-sm" style={{ flex: 1, textDecoration: 'none', textAlign: 'center' }}>Run Task</Link>
+                    )}
+                    <button className="btn btn-secondary btn-sm" onClick={() => duplicate(agent.id)} title="Duplicate agent" style={{ padding: '6px 12px' }}>📋</button>
+                  </div>
                 </div>
               </div>
             )})}
@@ -522,6 +545,18 @@ export default function AgentsPage() {
                 <div className="form-group">
                   <label className="form-label">System Instructions / Prompt</label>
                   <textarea className="input" rows={6} placeholder="Describe rules, behaviors, and standard operating procedures for the agent..." value={form.systemPrompt} onChange={set('systemPrompt')} style={{ resize: 'vertical' }} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Database Strategy</label>
+                  <select className="select" value={form.dataStrategy || 'source'} onChange={set('dataStrategy')}>
+                    <option value="source">📥 Database as Source (Read-only: SELECT, explore, profile)</option>
+                    <option value="target">📤 Database as Target (Write-only: CREATE/INSERT, build schemas)</option>
+                    <option value="both">🔄 Both Source &amp; Target (Read + Write)</option>
+                    <option value="none">🚫 No Database (KB, files, APIs only)</option>
+                  </select>
+                  <p className="form-hint" style={{ marginTop: 6 }}>
+                    Tells the agent how to treat the database. <strong>Source</strong> = read-only exploration. <strong>Target</strong> = build/write tables. <strong>Both</strong> = profile and transform. <strong>None</strong> = no DB access.
+                  </p>
                 </div>
                 {error && <div className="alert alert-error">{error}</div>}
               </div>

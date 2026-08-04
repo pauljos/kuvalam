@@ -219,7 +219,11 @@ export async function createWorkflow(tenantId, { name, description, trigger = { 
 
 export async function listWorkflows(tenantId) {
   const { rows } = await query(
-    'SELECT * FROM workflows WHERE tenant_id = $1 AND status != \'ARCHIVED\' ORDER BY created_at DESC',
+    `SELECT w.*,
+       (SELECT status FROM workflow_executions WHERE workflow_id = w.id ORDER BY started_at DESC LIMIT 1) AS last_execution_status
+     FROM workflows w
+     WHERE w.tenant_id = $1 AND w.status != 'ARCHIVED'
+     ORDER BY w.created_at DESC`,
     [tenantId]
   )
   return rows

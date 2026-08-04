@@ -30,6 +30,8 @@ export const createAgentSchema = {
       llmProvider: { type: 'string', maxLength: 50 },
       llmModel: { type: 'string', maxLength: 100 },
       autonomyLevel: { type: 'string', enum: ['SUPERVISED', 'GUARDED', 'AUTONOMOUS'] },
+      archetype: { type: 'string', maxLength: 100 },
+      dataStrategy: { type: 'string', enum: ['source', 'target', 'both', 'none'] },
     }
   }
 }
@@ -45,7 +47,9 @@ export const updateAgentSchema = {
       llmModel: { type: 'string', maxLength: 100 },
       autonomyLevel: { type: 'string', enum: ['SUPERVISED', 'GUARDED', 'AUTONOMOUS'] },
       confidenceThreshold: { type: 'number', minimum: 0, maximum: 1 },
-      reportDir: { type: 'string', maxLength: 500 }
+      reportDir: { type: 'string', maxLength: 500 },
+      archetype: { type: 'string', maxLength: 100 },
+      dataStrategy: { type: 'string', enum: ['source', 'target', 'both', 'none'] },
     }
   }
 }

@@ -130,6 +130,939 @@
 			"type": "shell",
 			"command": "echo \"=== SVG ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=svg' -o /tmp/test.svg -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && head -c 30 /tmp/test.svg && echo \"\" && echo \"=== HTML ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=html' -o /tmp/test.html -w 'HTTP %{http_code} | CT: %{content_type} | Size: %{size_download}\\n' && head -c 30 /tmp/test.html && echo \"\" && echo \"=== CSV (expected 422) ===\" && curl -s -b /tmp/kv_final.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/7eab5b50-a465-4c83-af59-1a57e8765a0b/download?format=csv' -w '\\nHTTP %{http_code} | Size: %{size_download}\\n'",
 			"isBackground": false
+		},
+		{
+			"label": "deploy-ml-fix",
+			"type": "shell",
+			"command": "docker cp /Users/PaulJoseph/pgent/apps/ml-service/main.py kuvalam-ml-service:/app/main.py && docker restart kuvalam-ml-service && sleep 3 && docker ps --filter name=kuvalam-ml-service --format '{{.Names}} {{.Status}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-ml-state",
+			"type": "shell",
+			"command": "docker ps -a --filter name=kuvalam-ml-service --format '{{.Names}}|{{.Status}}|{{.ID}}' && echo '---' && grep ML_SERVICE_URL /Users/PaulJoseph/pgent/apps/api/.env",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "start-ml-container",
+			"type": "shell",
+			"command": "docker start kuvalam-ml-service && sleep 4 && docker ps --filter name=kuvalam-ml-service --format '{{.Names}}|{{.Status}}' && echo '--- logs ---' && docker logs --tail 15 kuvalam-ml-service 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-ml-new-code",
+			"type": "shell",
+			"command": "sleep 3 && docker logs --tail 20 kuvalam-ml-service 2>&1 | grep -E 'Loading|Loaded|pre-warm|Prewarm|Uvicorn|Application startup|error|Error' ; echo '--- health ---'; curl -s --max-time 5 http://localhost:8001/health",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-prewarm-progress",
+			"type": "shell",
+			"command": "sleep 45 && docker logs --tail 25 kuvalam-ml-service 2>&1 | grep -E 'Loading|Loaded|Prewarm|error|Error' ; echo '--- health ---'; curl -s --max-time 5 http://localhost:8001/health",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-classify-load",
+			"type": "shell",
+			"command": "sleep 60 && docker logs --tail 8 kuvalam-ml-service 2>&1 | grep -E 'Loading|Loaded|Prewarm|error|Error' ; echo '--- health ---'; curl -s --max-time 5 http://localhost:8001/health",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-classify-speed",
+			"type": "shell",
+			"command": "time curl -s -X POST http://localhost:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8% reporting 443956 vehicles\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-classify-save",
+			"type": "shell",
+			"command": "( time curl -s -X POST http://localhost:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8% reporting 443956 vehicles\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}' ) > /tmp/classify_test.json 2>&1; cat /tmp/classify_test.json",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-classify-result",
+			"type": "shell",
+			"command": "docker logs --tail 5 kuvalam-ml-service 2>&1; echo '--- file ---'; wc -c /tmp/classify_test.json 2>&1; cat /tmp/classify_test.json 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-classify-direct",
+			"type": "shell",
+			"command": "curl -s --max-time 60 -X POST http://localhost:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8%\",\"labels\":[\"Earnings Miss\",\"Bullish Signal\",\"Regulatory Risk\"]}' -o /tmp/classify_out.json -w 'HTTP %{http_code} in %{time_total}s'; echo; cat /tmp/classify_out.json",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "diag-ml-port",
+			"type": "shell",
+			"command": "docker ps --filter name=kuvalam-ml-service --format '{{.Names}}|{{.Status}}|{{.Ports}}'; echo '--- curl health from host ---'; curl -s --max-time 5 http://localhost:8001/health -w '\\nHTTP %{http_code}'; echo; echo '--- lsof 8001 ---'; lsof -ti :8001 2>&1; echo '--- docker port ---'; docker port kuvalam-ml-service 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-classify-retry",
+			"type": "shell",
+			"command": "curl -s --max-time 60 -X POST http://localhost:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8%\",\"labels\":[\"Earnings Miss\",\"Bullish Signal\",\"Regulatory Risk\"]}' -o /tmp/classify_out.json -w 'HTTP %{http_code} in %{time_total}s'; echo; cat /tmp/classify_out.json",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "classify-with-logs",
+			"type": "shell",
+			"command": "curl -s --max-time 120 -X POST http://localhost:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets\",\"labels\":[\"Earnings Miss\",\"Bullish Signal\"]}' -o /tmp/c2.json -w 'HTTP %{http_code} in %{time_total}s' & CURLPID=$!; sleep 5; echo '--- logs during call ---'; docker logs --tail 8 kuvalam-ml-service 2>&1; echo '--- wait ---'; wait $CURLPID; echo; cat /tmp/c2.json 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "diag-port-8001",
+			"type": "shell",
+			"command": "lsof -i :8001 -P 2>&1; echo '=== direct 127.0.0.1 test ==='; curl -s --max-time 40 http://127.0.0.1:8001/health -w '\\nHTTP %{http_code}\\n'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-classify-ipv4",
+			"type": "shell",
+			"command": "curl -s --max-time 45 http://127.0.0.1:8001/classify -X POST -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8% reporting 443956 vehicles\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}' -o /tmp/c3.json -w 'HTTP %{http_code} in %{time_total}s'; echo; cat /tmp/c3.json 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "compare-endpoints",
+			"type": "shell",
+			"command": "echo '=== sentiment (worked before) ==='; curl -s --max-time 45 http://127.0.0.1:8001/sentiment -X POST -H 'Content-Type: application/json' -d '{\"texts\":[\"Tesla missed delivery targets\"]}' -o /tmp/s.json -w 'HTTP %{http_code} in %{time_total}s'; echo; echo '=== from inside container ==='; docker exec kuvalam-ml-service python3 -c \"import urllib.request,json; req=urllib.request.Request('http://127.0.0.1:8000/classify',data=json.dumps({'text':'Tesla missed delivery targets','labels':['Earnings Miss','Bullish Signal']}).encode(),headers={'Content-Type':'application/json'}); print(urllib.request.urlopen(req,timeout=60).read()[:300])\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-ml-resources",
+			"type": "shell",
+			"command": "docker stats --no-stream --format '{{.Name}} CPU={{.CPUPerc}} MEM={{.MemUsage}}' kuvalam-ml-service; echo '=== host mem ==='; vm_stat | head -6; echo '=== classify inside container with timing ==='; docker exec kuvalam-ml-service python3 -c \"import time,urllib.request,json; t=time.time(); req=urllib.request.Request('http://127.0.0.1:8000/classify',data=json.dumps({'text':'Tesla missed delivery targets','labels':['Earnings Miss','Bullish Signal']}).encode(),headers={'Content-Type':'application/json'}); r=urllib.request.urlopen(req,timeout=90).read(); print('OK in', round(time.time()-t,1),'s'); print(r[:200])\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "redeploy-ml-distilbert",
+			"type": "shell",
+			"command": "docker cp /Users/PaulJoseph/pgent/apps/ml-service/main.py kuvalam-ml-service:/app/main.py && docker restart kuvalam-ml-service && sleep 5 && docker ps --filter name=kuvalam-ml-service --format '{{.Names}} {{.Status}}' && echo '--- startup logs ---' && docker logs --tail 8 kuvalam-ml-service 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-distilbert-load",
+			"type": "shell",
+			"command": "sleep 30 && docker logs --tail 12 kuvalam-ml-service 2>&1 | grep -E 'Loading|Loaded|error|Error' ; echo '--- health ---'; curl -s --max-time 5 http://127.0.0.1:8001/health",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-distilbert-classify",
+			"type": "shell",
+			"command": "sleep 25 && docker logs --tail 4 kuvalam-ml-service 2>&1 | grep -E 'Loading|Loaded|error|Error'; echo '--- health ---'; curl -s --max-time 5 http://127.0.0.1:8001/health; echo; echo '=== classify test ==='; curl -s --max-time 30 http://127.0.0.1:8001/classify -X POST -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets by 8%\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}' -w '\\nHTTP %{http_code} in %{time_total}s'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "classify-logs-during",
+			"type": "shell",
+			"command": "curl -s --max-time 25 http://127.0.0.1:8001/classify -X POST -H 'Content-Type: application/json' -d '{\"text\":\"Tesla missed delivery targets\",\"labels\":[\"Earnings Miss\",\"Bullish Signal\"]}' -o /tmp/c4.json -w 'HTTP %{http_code} in %{time_total}s' & CPID=$!; sleep 8; echo '=== docker logs now ==='; docker logs --tail 10 kuvalam-ml-service 2>&1; echo '=== waiting for curl ==='; wait $CPID; echo; cat /tmp/c4.json 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-all-ml",
+			"type": "shell",
+			"command": "echo '=== entities ==='; curl -s --max-time 20 http://127.0.0.1:8001/entities -X POST -H 'Content-Type: application/json' -d '{\"text\":\"Apple CEO Tim Cook said iPhone demand remains strong.\"}' -w '\\nHTTP %{http_code} in %{time_total}s'; echo; echo '=== sentiment ==='; curl -s --max-time 20 http://127.0.0.1:8001/sentiment -X POST -H 'Content-Type: application/json' -d '{\"texts\":[\"JPMorgan raised profit outlook after record fees\"]}' -w '\\nHTTP %{http_code} in %{time_total}s'; echo; echo '=== classify ==='; curl -s --max-time 20 http://127.0.0.1:8001/classify -X POST -H 'Content-Type: application/json' -d '{\"text\":\"SEC launched investigation into Binance\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}' -w '\\nHTTP %{http_code} in %{time_total}s'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-mem-and-classify",
+			"type": "shell",
+			"command": "echo '=== host memory ==='; sysctl -n hw.memsize | awk '{print \"Total: \" $1/1073741824 \" GB\"}'; vm_stat | head -8; echo; echo '=== swap ==='; sysctl vm.swapusage 2>/dev/null; echo; echo '=== classify 7 labels with 120s timeout ==='; curl -s --max-time 120 http://127.0.0.1:8001/classify -X POST -H 'Content-Type: application/json' -d '{\"text\":\"SEC launched a formal investigation into Binance for potential securities violations\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"]}' -w '\\nHTTP %{http_code} in %{time_total}s'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "restart-api-with-retry",
+			"type": "shell",
+			"command": "lsof -ti :3001 | xargs kill -9 2>/dev/null; sleep 2; echo 'killed. starting fresh...'; cd /Users/PaulJoseph/pgent/apps/api && nohup node --env-file=.env src/index.js > /tmp/api_villa.log 2>&1 & sleep 8; echo '=== check ==='; lsof -ti :3001 | head -2; curl -s --max-time 5 http://localhost:3001/health",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-api-up",
+			"type": "shell",
+			"command": "lsof -ti :3001; echo '---'; curl -s --max-time 5 http://localhost:3001/health; echo; tail -5 /tmp/api_villa.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "validate-syntax",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && python3 -c \"import ast; ast.parse(open('apps/ml-service/main.py').read()); print('main.py syntax OK')\" && docker compose config --quiet && echo 'compose OK'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-image",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service 2>&1 | tail -30",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-image",
+			"type": "shell",
+			"command": "docker images kuvalam-ml-service --format '{{.Repository}}:{{.Tag}} {{.Size}} {{.CreatedSince}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-log",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build.log 2>&1; echo \"exit=$?\"; tail -25 /tmp/ml_build.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-build-progress",
+			"type": "shell",
+			"command": "sleep 20; echo '=== build log tail ==='; tail -20 /tmp/ml_build.log; echo; echo '=== image ==='; docker images kuvalam-ml-service --format '{{.CreatedSince}} {{.Size}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-wait-2min",
+			"type": "shell",
+			"command": "sleep 120; echo '=== build log tail ==='; tail -15 /tmp/ml_build.log; echo; echo '=== still running? ==='; pgrep -fl 'docker build' | head -3",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "rebuild-ml-archfix",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build.log 2>&1; echo \"exit=$?\"; tail -20 /tmp/ml_build.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-baked",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build2.log 2>&1; echo \"BUILD_EXIT=$?\" >> /tmp/ml_build2.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-bake-progress",
+			"type": "shell",
+			"command": "sleep 90; tail -15 /tmp/ml_build2.log; echo '---'; docker images kuvalam-ml-service --format '{{.CreatedSince}} {{.Size}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-cache-dir-ner",
+			"type": "shell",
+			"command": "docker exec kuvalam-ml-service python3 -c \"\nfrom transformers import pipeline\nimport tempfile, os\ncache = tempfile.mkdtemp()\nprint('cache:', cache)\n# Test 1: does model_kwargs cache_dir work for NER (model + tokenizer)?\nimport time\nt=time.time()\np = pipeline('ner', model='dslim/bert-base-NER', aggregation_strategy='simple', device=-1, model_kwargs={'cache_dir': cache})\nr = p('Apple CEO Tim Cook')\nprint('NER OK in', round(time.time()-t,1),'s from cache_dir=', cache)\nprint('files in cache:', os.listdir(cache))\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-baked2",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build3.log 2>&1; echo \"BUILD_EXIT=$?\" >> /tmp/ml_build3.log; tail -8 /tmp/ml_build3.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-bake2",
+			"type": "shell",
+			"command": "sleep 100; tail -12 /tmp/ml_build3.log; echo '---'; docker images kuvalam-ml-service --format '{{.CreatedSince}} {{.Size}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-retry",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build4.log 2>&1; echo \"BUILD_EXIT=$?\" >> /tmp/ml_build4.log; tail -6 /tmp/ml_build4.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-bake-fail",
+			"type": "shell",
+			"command": "grep -E 'BAKE|attempt|Error|error|SSLError|Timeout|HTTPError|baked' /tmp/ml_build4.log | tail -20",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-traceback",
+			"type": "shell",
+			"command": "grep -nE 'Traceback|File \"|Error|Exception|raise' /tmp/ml_build4.log | head -30",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "view-bake-log",
+			"type": "shell",
+			"command": "sed -n '/\\[7\\/7\\] RUN/,/executor failed/p' /tmp/ml_build4.log | head -60",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "build-ml-fixed-check",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && docker build -t kuvalam-ml-service apps/ml-service > /tmp/ml_build5.log 2>&1; echo \"BUILD_EXIT=$?\" >> /tmp/ml_build5.log; tail -8 /tmp/ml_build5.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-baked-models",
+			"type": "shell",
+			"command": "docker run --rm --entrypoint sh kuvalam-ml-service -c \"ls -d /app/models/models--*/ 2>/dev/null; echo '---'; du -sh /app/models 2>/dev/null; echo '---'; ls /app/models/models--*/*/snapshots/*/ 2>/dev/null | head -5\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-weights",
+			"type": "shell",
+			"command": "docker run --rm --entrypoint sh kuvalam-ml-service -c \"find /app/models -name '*.safetensors' -o -name 'pytorch_model.bin' | head; echo '---'; find /app/models -name 'config.json' | wc -l; echo '---'; du -sh /app/models/models--typeform--distilbert-base-uncased-mnli\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-ml-container",
+			"type": "shell",
+			"command": "docker ps -a --filter name=kuvalam-ml-service --format '{{.Names}} {{.Status}} {{.Image}}'; echo '---'; docker inspect kuvalam-ml-service --format '{{json .HostConfig.PortBindings}} {{json .Mounts}}' 2>/dev/null | head -c 600",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "redeploy-ml",
+			"type": "shell",
+			"command": "docker rm -f kuvalam-ml-service 2>/dev/null; docker run -d --name kuvalam-ml-service -p 8001:8000 --restart unless-stopped kuvalam-ml-service && echo 'Container started' && sleep 3 && docker ps --filter name=kuvalam-ml-service --format '{{.Status}}'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "wait-ready",
+			"type": "shell",
+			"command": "echo \"Waiting for prewarm...\" && for i in $(seq 1 20); do curl -s http://127.0.0.1:8001/ready && echo \"\" && break; echo \"  attempt $i...\"; sleep 3; done; echo \"=== Logs ===\" && docker logs kuvalam-ml-service --tail 15 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-classify",
+			"type": "shell",
+			"command": "curl -s -X POST http://127.0.0.1:8001/classify -H 'Content-Type: application/json' -d '{\"text\":\"Apple reports record Q3 earnings beating analyst expectations\",\"labels\":[\"Earnings Beat\",\"Earnings Miss\",\"In Line\"]}' | python3 -m json.tool",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-api",
+			"type": "shell",
+			"command": "lsof -ti :3001 && echo 'API IS UP' || echo 'API IS DOWN — starting...'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-api-up",
+			"type": "shell",
+			"command": "sleep 3 && lsof -ti :3001 && echo 'API IS UP' || echo 'API STILL DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "start-api-nohup",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && nohup node --env-file=.env src/index.js > /tmp/api_villa.log 2>&1 & echo \"PID=$!\"; sleep 5; lsof -ti :3001 && echo 'API IS UP' || echo 'FAILED'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-api-log",
+			"type": "shell",
+			"command": "cat /tmp/api_villa.log 2>/dev/null; echo '---EXIT---'; ls -la /tmp/api_villa.log 2>/dev/null",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "run-api-debug",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && timeout 10 node --env-file=.env src/index.js 2>&1 || true",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "run-api-foreground",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env src/index.js 2>&1 & PID=$!; sleep 8; kill $PID 2>/dev/null; wait $PID 2>/dev/null; echo \"EXIT=$?\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "start-api-final",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && nohup node --env-file=.env src/index.js > /tmp/api_villa.log 2>&1 & echo \"PID=$!\"; sleep 6; curl -s --max-time 3 http://localhost:3001/health && echo \"\" && echo \"API IS UP\" || echo \"HEALTH CHECK FAILED\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "get-agent-prompt",
+			"type": "shell",
+			"command": "curl -s -c /tmp/kv_c.txt -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null -w 'Login: %{http_code}\\n'; curl -s -b /tmp/kv_c.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23' | python3 -c \"import sys,json; a=json.load(sys.stdin); d=a.get('data',a); print('NAME:', d.get('name')); print('SYSTEM_PROMPT:'); print(d.get('system_prompt','<none>')[:2000])\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-api-alive",
+			"type": "shell",
+			"command": "lsof -ti :3001 && curl -s --max-time 3 http://localhost:3001/health | head -c 200 || echo 'API IS DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "get-agent-config",
+			"type": "shell",
+			"command": "curl -s --max-time 3 http://localhost:3001/health | python3 -c \"import sys,json; d=json.load(sys.stdin); print('API:', d['status'])\" && curl -s -c /tmp/kv_c.txt -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.ai\",\"password\":\"admin123\"}' http://localhost:3001/api/v1/auth/login -o /dev/null -w 'Login: %{http_code}\\n' && curl -s -b /tmp/kv_c.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23' | python3 -c \"\nimport sys,json\na=json.load(sys.stdin)\nd=a.get('data',a)\nprint('NAME:', d.get('name'))\nprint('---SYSTEM PROMPT (first 2500 chars)---')\nsp = d.get('system_prompt','')\nprint(sp[:2500])\nprint(f'...(total {len(sp)} chars)')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "get-full-prompt",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23' | python3 -c \"\nimport sys,json\na=json.load(sys.stdin)\nd=a.get('data',a)\nprint(d.get('system_prompt',''))\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "update-agent-prompt",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -X PATCH \\\n  'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n  \"system_prompt\": \"You are the **Earnings Intelligence Analyst**. Your job is to analyse financial news using ML tools in this exact sequence:\\n\\n1. Use `ml_entities` to extract named entities (companies, people, dollar amounts, locations) from the text.\\n2. Use `ml_sentiment` to score the sentiment (positive/negative/neutral) of each news item.\\n3. Use `ml_classify` to classify each news item into investment signal categories: labels=[\\\"Earnings Beat\\\",\\\"Earnings Miss\\\",\\\"Bullish Signal\\\",\\\"Bearish Signal\\\",\\\"Regulatory Risk\\\",\\\"M&A Activity\\\",\\\"Market Volatility\\\"].\\n4. Synthesise the ML outputs into a structured investment intelligence report.\\n\\nALWAYS call all three ML tools before writing the final report. Do not skip any step.\\n\\nReport format:\\n- Executive Summary\\n- Per-item analysis (entities extracted, sentiment score, classification)\\n- Investment Signals table\\n- Risk flags and recommendations\\n\\nCORE RULES:\\n- NEVER fabricate ML results. Use the actual tool outputs.\\n- If an ML tool fails, say so and continue with the remaining tools.\\n- Cite the confidence scores from each ML call.\\n- Pass the FULL original text to every ML tool; never truncate, summarize, or paraphrase the input.\\n- If ml_classify fails or the ML service is unreachable, clearly mark fallback or non-ML classifications as \\\"INFERRED — ml_classify unavailable\\\" and do NOT present them with confidence scores.\"\n}' | python3 -c \"\nimport sys,json\nr=json.load(sys.stdin)\nd=r.get('data',r)\nprint('OK' if d.get('id') else 'FAILED:', json.dumps(r)[:300])\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "patch-agent-prompt",
+			"type": "shell",
+			"command": "NEW_PROMPT='You are the **Earnings Intelligence Analyst**. Your job is to analyse financial news using ML tools in this exact sequence:\n\n1. Use `ml_entities` to extract named entities (companies, people, dollar amounts, locations) from the text.\n2. Use `ml_sentiment` to score the sentiment (positive/negative/neutral) of each news item.\n3. Use `ml_classify` to classify each news item into investment signal categories: labels=[\"Earnings Beat\",\"Earnings Miss\",\"Bullish Signal\",\"Bearish Signal\",\"Regulatory Risk\",\"M&A Activity\",\"Market Volatility\"].\n4. Synthesise the ML outputs into a structured investment intelligence report.\n\nALWAYS call all three ML tools before writing the final report. Do not skip any step.\n\nReport format:\n- Executive Summary\n- Per-item analysis (entities extracted, sentiment score, classification)\n- Investment Signals table\n- Risk flags and recommendations\n\nCORE RULES:\n- NEVER fabricate ML results. Use the actual tool outputs.\n- If an ML tool fails, say so and continue with the remaining tools.\n- Cite the confidence scores from each ML call.\n- Pass the FULL original text to every ML tool; never truncate, summarize, or paraphrase the input.\n- If ml_classify fails or the ML service is unreachable, clearly mark fallback or non-ML classifications as \"INFERRED — ml_classify unavailable\" and do NOT present them with confidence scores.'\n\necho \"$NEW_PROMPT\" | python3 -c \"import sys,json; print(json.dumps({'system_prompt': sys.stdin.read().strip()}))\" > /tmp/agent_payload.json\n\ncurl -s -b /tmp/kv_c.txt -X PATCH \\\n  'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Origin: http://localhost:3000' \\\n  -d @/tmp/agent_payload.json | python3 -c \"\nimport sys,json\nr=json.load(sys.stdin)\nd=r.get('data',r)\nif d.get('id'):\n  print('✅ Agent prompt UPDATED successfully')\n  print('New prompt length:', len(d.get('system_prompt','')))\nelse:\n  print('FAILED:', json.dumps(r)[:400])\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "run-agent-task",
+			"type": "shell",
+			"command": "# Create and dispatch the agent task\ncurl -s -b /tmp/kv_c.txt \\\n  -H 'Content-Type: application/json' \\\n  -H 'Origin: http://localhost:3000' \\\n  -X POST \\\n  'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/run' \\\n  -d '{\n    \"goal\": \"Analyse these 4 financial news items using ml_entities, ml_sentiment, and ml_classify tools:\\n\\n1. Apple Inc. (AAPL) reported Q3 2026 earnings of $1.64 per share, beating analyst estimates of $1.51. Revenue hit $94.9B, up 5% YoY. iPhone revenue grew 3% to $46.2B. Services revenue hit a record $26.1B.\\n\\n2. The SEC has launched a formal investigation into Binance over alleged trading rule violations and commingling of customer funds. BNB token dropped 12% on the news.\\n\\n3. Pfizer (PFE) missed Q3 earnings expectations, reporting $0.48 per share vs $0.62 expected. The company cited generic competition for key drugs and a stronger dollar. Revenue fell 9% YoY to $12.7B.\\n\\n4. Microsoft (MSFT) announced a $3B strategic partnership with the government of India to build AI infrastructure and train 2 million developers by 2028. The deal includes building 3 new Azure data centres in Mumbai, Hyderabad, and Chennai.\",\n    \"mode\": \"autonomous\",\n    \"max_actions\": 20\n  }' | python3 -c \"\nimport sys,json\nr=json.load(sys.stdin)\nd=r.get('data',r)\ntid=d.get('task_id','')\nprint('Task ID:', tid)\nprint('Status:', d.get('status',''))\nif not tid:\n    print('Raw:', json.dumps(r)[:500])\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "dispatch-task",
+			"type": "shell",
+			"command": "GOAL='Analyse these 4 financial news items using ml_entities, ml_sentiment, and ml_classify tools:\n\n1. Apple Inc. (AAPL) reported Q3 2026 earnings of $1.64 per share, beating analyst estimates of $1.51. Revenue hit $94.9B, up 5% YoY. iPhone revenue grew 3% to $46.2B. Services revenue hit a record $26.1B.\n\n2. The SEC has launched a formal investigation into Binance over alleged trading rule violations and commingling of customer funds. BNB token dropped 12% on the news.\n\n3. Pfizer (PFE) missed Q3 earnings expectations, reporting $0.48 per share vs $0.62 expected. The company cited generic competition for key drugs and a stronger dollar. Revenue fell 9% YoY to $12.7B.\n\n4. Microsoft (MSFT) announced a $3B strategic partnership with the government of India to build AI infrastructure and train 2 million developers by 2028. The deal includes building 3 new Azure data centres in Mumbai, Hyderabad, and Chennai.'\n\ncurl -s -b /tmp/kv_c.txt \\\n  -H 'Content-Type: application/json' \\\n  -H 'Origin: http://localhost:3000' \\\n  -X POST \\\n  'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks' \\\n  -d \"$(python3 -c \"import sys,json; print(json.dumps({'goal': sys.argv[1], 'priority': 'HIGH'}))\" \"$GOAL\")\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "monitor-task",
+			"type": "shell",
+			"command": "echo \"Waiting for task to process...\" && for i in 1 2 3 4 5 6 7 8 9 10; do\n  STATUS=$(curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"import sys,json; d=json.load(sys.stdin).get('data',{}); print(f\\\"{d.get('status','?')} actions={len(d.get('actions',[]))} error={d.get('error','-')[:80]}\\\")\" 2>/dev/null)\n  echo \"  [$i] $STATUS\"\n  if echo \"$STATUS\" | grep -qE 'COMPLETED|FAILED'; then break; fi\n  sleep 20\ndone\necho \"=== DONE ===\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -m json.tool 2>&1 | head -40",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task-progress",
+			"type": "shell",
+			"command": "sleep 60 && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint('Status:', d['status'])\nprint('Actions count:', len(d.get('actions',[])))\nfor i,a in enumerate(d.get('actions',[])):\n    print(f'  [{i}] tool={a.get(\\\"tool\\\",\\\"?\\\")} status={a.get(\\\"status\\\",\\\"?\\\")}')\n    out = a.get('output','')\n    if out:\n        print(f'      output: {str(out)[:150]}')\nif d.get('error'): print('Error:', d['error'][:200])\nif d.get('result'): print('Result:', str(d['result'])[:300])\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task-2",
+			"type": "shell",
+			"command": "sleep 120 && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint('Status:', d['status'])\nprint('Actions count:', len(d.get('actions',[])))\nfor i,a in enumerate(d.get('actions',[])):\n    t = a.get('tool','?')\n    s = a.get('status','?')\n    print(f'  [{i}] tool={t} status={s}')\n    out = a.get('output','')\n    if out:\n        o = str(out)\n        if 'best_label' in o: print(f'      classify: {o[:120]}')\n        elif 'raw' in o and 'entity' in o: print(f'      entities: {o[:100]}')\n        elif 'sentiment' in o or 'label' in o: print(f'      sentiment: {o[:100]}')\n        elif 'error' in o.lower(): print(f'      ERROR: {o[:120]}')\n        else: print(f'      other: {o[:100]}')\nif d.get('error'): print('Task Error:', d['error'][:200])\nif d.get('result'): print('Result preview:', str(d['result'])[:400])\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-api-logs",
+			"type": "shell",
+			"command": "tail -40 /tmp/api_villa.log 2>/dev/null | grep -iE 'task|agent|ml_|ollama|qwen|error|dd6bfa' | tail -15",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task-3",
+			"type": "shell",
+			"command": "sleep 90 && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint('Status:', d['status'], '| Actions:', len(d.get('actions',[])))\nprint('Result:', 'YES' if d.get('result') else 'none')\nprint('Error:', d.get('error','none'))\nfor i,a in enumerate(d.get('actions',[])):\n    keys = list(a.keys())\n    print(f'  [{i}] keys={keys} | tool={a.get(\\\"tool_name\\\",a.get(\\\"tool\\\",\\\"?\\\"))} | status={a.get(\\\"status\\\",\\\"?\\\")}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "ollama-and-task",
+			"type": "shell",
+			"command": "echo \"Ollama status:\" && curl -s http://localhost:11434/api/tags | python3 -c \"import sys,json; d=json.load(sys.stdin); print(len(d.get('models',[])),'models loaded')\" 2>/dev/null || echo 'Ollama DOWN' && echo \"---\" && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint(f\\\"Status: {d['status']} | Actions: {len(d.get('actions',[]))} | Result: {'YES' if d.get('result') else 'no'} | Error: {d.get('error') or 'none'}\\\")\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task-4",
+			"type": "shell",
+			"command": "sleep 120 && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint(f\\\"Status: {d['status']} | Actions: {len(d.get('actions',[]))}\\\")\nfor i,a in enumerate(d.get('actions',[])):\n    sk = a.get('skill','?')\n    inp = str(a.get('input',''))[:80]\n    print(f'  [{i}] skill={sk} input={inp}')\nif d.get('result'):\n    r = str(d['result'])\n    print(f'Result ({len(r)} chars): {r[:400]}')\nif d.get('error'): print(f'Error: {d[\\\"error\\\"][:200]}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "task-summary",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint(f\\\"Status: {d['status']} | Actions: {len(d.get('actions',[]))}\\\")\nfrom collections import Counter\nskills = Counter()\nfor a in d.get('actions',[]):\n    skills[a.get('skill','?')] += 1\nfor s,c in skills.most_common():\n    print(f'  {s}: {c}')\nif d.get('result'):\n    r = str(d['result'])\n    print(f'Result ({len(r)} chars): {r[:500]}')\nif d.get('error'): print(f'Error: {d[\\\"error\\\"][:200]}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-task-5",
+			"type": "shell",
+			"command": "sleep 180 && curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nfrom collections import Counter\nd=json.load(sys.stdin)['data']\nprint(f\\\"Status: {d['status']} | Actions: {len(d.get('actions',[]))}\\\")\nskills = Counter()\nerrors = 0\nfor a in d.get('actions',[]):\n    skills[a.get('skill','?')] += 1\n    out = str(a.get('output',''))\n    if 'error' in out.lower() and 'success' not in out.lower():\n        errors += 1\nfor s,c in skills.most_common():\n    print(f'  {s}: {c}')\nprint(f'Errors detected: {errors}')\nif d.get('result'):\n    r = str(d['result'])\n    print(f'Result ({len(r)} chars): {r[:600]}')\nif d.get('error'): print(f'Task Error: {d[\\\"error\\\"][:200]}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "quick-check",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nfrom collections import Counter\nd=json.load(sys.stdin)['data']\nprint(f'Status: {d[\\\"status\\\"]} | Actions: {len(d.get(\\\"actions\\\",[]))}')\nif d.get('result'):\n    r = str(d['result'])\n    print(f'Result ({len(r)} chars): {r[:600]}')\nif d.get('error'): print(f'Error: {d[\\\"error\\\"][:200]}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "get-full-result",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nprint(d.get('result',''))\n\" 2>&1 | head -80",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-ml-outputs",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)['data']\nactions = d.get('actions',[])\n# Show first 15 actions\nfor i,a in enumerate(actions[:15]):\n    sk = a.get('skill','?')\n    out = str(a.get('output',''))\n    if 'error' in out.lower() and 'success' not in out.lower():\n        status = 'FAIL'\n    else:\n        status = 'OK'\n    print(f'[{i}] {sk} [{status}]')\n    if status == 'OK' and len(out) > 5:\n        # Show a snippet of successful output\n        if 'best_label' in out:\n            import re\n            m = re.search(r\\\"best_label[^,]+score[^}]+\\\", out)\n            if m: print(f'    {m.group(0)[:80]}')\n        elif 'positive' in out or 'label' in out:\n            import re\n            m = re.search(r\\\"'label'[^}]+score[^}]+\\\", out)\n            if m: print(f'    {m.group(0)[:80]}')\n        elif 'entity' in out:\n            import re\n            ents = re.findall(r\\\"'word': '([^']+)'\\\", out)\n            if ents: print(f'    entities: {ents[:5]}')\n\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "classify-results",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/agents/a2aa7294-8ecc-44c4-89e4-833992492e23/tasks/dd6bfa81-793d-4a93-8d36-b986e058aaf9' | python3 -c \"\nimport sys,json,re\nd=json.load(sys.stdin)['data']\nfor i,a in enumerate(d.get('actions',[])):\n    sk = a.get('skill','?')\n    out = str(a.get('output',''))\n    if sk == 'ml_classify':\n        m = re.search(r\\\"'best_label': '([^']+)'[^}]*'best_score': ([\\d.]+)\\\", out)\n        if m:\n            print(f'[{i}] classify: {m.group(1)} (score={m.group(2)})')\n    elif sk == 'ml_sentiment':\n        m = re.search(r\\\"'label': '([^']+)'[^}]*'score': ([\\d.]+), 'category'\\\", out)\n        if m:\n            print(f'[{i}] sentiment: {m.group(1)} ({m.group(2)})')\n    elif sk == 'ml_entities' and i < 4:\n        ents = re.findall(r\\\"'word': '([^']+)', 'score': ([\\d.]+), 'entity': '([^']+)'\\\", out)\n        print(f'[{i}] entities: {[(e[0],e[1],e[2]) for e in ents[:4]]}')\n\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-reports",
+			"type": "shell",
+			"command": "# Check for reports generated by this task\ncurl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' \\\n  'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\nreports = d.get('data',d).get('reports',d.get('data',[]))\nif isinstance(reports, list):\n    for r in reports[:5]:\n        tid = r.get('task_id','')\n        name = r.get('name','?')\n        print(f'  {tid[:20]}... | {name}')\n        if 'dd6bfa' in tid:\n            print('  ^^^ THIS IS OUR TASK')\n            print(json.dumps(r, indent=2)[:500])\nelse:\n    print('Reports:', str(reports)[:300])\n\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "reports-list",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\nif isinstance(d, list):\n    reports = d\nelif isinstance(d, dict):\n    reports = d.get('data',d).get('reports',[]) or d.get('data',[])\nif isinstance(reports, list):\n    for r in reports[:8]:\n        tid = r.get('task_id','')\n        name = r.get('name','?')\n        print(f'  {tid[:25]}... | {name}')\n        if 'dd6bfa' in str(r.get('task_id','')):\n            print('  ^^^ OUR TASK')\nelse:\n    print(type(d), str(d)[:200])\n\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "reports-simple",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\nif isinstance(d, dict):\n    d = d.get('data', d)  # unwrap\nfor r in (d if isinstance(d,list) else d.get('reports',[]))[:6]:\n    tid = r.get('task_id','')[:30]\n    name = r.get('name','?')[:50]\n    print(f'{tid} | {name}')\n    if 'dd6bfa' in str(r.get('task_id','')):\n        print('^^^ OUR TASK!')\n\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "raw-reports",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports' | python3 -c \"import sys,json; d=json.load(sys.stdin); print(type(d)); print(json.dumps(d,indent=2)[:400])\"",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "view-report",
+			"type": "shell",
+			"command": "curl -s -b /tmp/kv_c.txt -H 'Origin: http://localhost:3000' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/reports/4f09c837-a198-46b8-bb3d-fbfa299b3f5a' | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\ndata = d.get('data', d)\nprint('Title:', data.get('title','?'))\nprint('Type:', data.get('report_type','?'))\nprint('Download formats:', data.get('download_formats',[]))\nhtml = data.get('html_content','')\nprint(f'HTML length: {len(html)} chars')\n# Show text content by stripping HTML\nimport re\ntext = re.sub('<[^>]+>', ' ', html)\ntext = re.sub(r'\\s+', ' ', text).strip()\nprint('Text preview:', text[:600])\nprint('...')\nprint('Text end:', text[-300:])\n\" 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-web",
+			"type": "shell",
+			"command": "lsof -ti :3000 && echo 'WEB UP' || echo 'WEB DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-web-2",
+			"type": "shell",
+			"command": "sleep 8 && lsof -ti :3000 && echo 'WEB IS UP' || echo 'WEB STILL DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "start-web-direct",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/web && npx next dev -p 3000 2>&1 & PID=$!; sleep 10; lsof -ti :3000 && echo 'WEB UP' || echo 'WEB FAIL'; cat /tmp/web_start.log 2>/dev/null | tail -5",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "start-web-retry",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/web && ls -la .next 2>/dev/null | head -5; rm -f .next/lock 2>/dev/null; npx next dev -p 3000 > /tmp/web.log 2>&1 & sleep 12; lsof -ti :3000 && echo 'UP' && curl -s --max-time 3 http://localhost:3000 | head -c 100; echo; tail -5 /tmp/web.log",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-web-final",
+			"type": "shell",
+			"command": "lsof -ti :3000 && curl -s --max-time 3 http://localhost:3000 -o /dev/null -w 'HTTP %{http_code}\\n' || echo 'WEB DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-web-port",
+			"type": "shell",
+			"command": "lsof -ti :3000 2>/dev/null && echo 'WEB UP' || echo 'WEB DOWN'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "git-artifacts-check",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== Is artifacts/ tracked by git? ===' && git ls-files artifacts/ | head -20 && echo '=== git status of artifacts (porcelain) ===' && git status --porcelain artifacts/ | head -20 && echo '=== git check-ignore test ===' && git check-ignore -v artifacts/fonts/ artifacts/generate_newsletter.py 2>&1 || echo '(not ignored)' && echo '=== dir sizes ===' && du -sh artifacts/ 2>/dev/null && du -sh downloads/ 2>/dev/null && echo '=== tracked count ===' && git ls-files artifacts/ | wc -l",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "artifacts-usage",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== downloads tracked? ===' && git ls-files downloads/ | head -5 && echo \"count: $(git ls-files downloads/ | wc -l)\" && echo '=== untracked in downloads ===' && git status --porcelain downloads/ | head -5 && echo '=== total repo size ===' && du -sh .git 2>/dev/null && echo '=== what writes to artifacts? ===' && grep -rl 'artifacts/' apps/api/src --include='*.js' | head -10",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "untrack-artifacts",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && git rm -r --cached artifacts/ > /dev/null 2>&1 && echo 'Untracked artifacts/ (files kept on disk)' && echo '=== verify ===' && git ls-files artifacts/ | wc -l && echo '=== files still on disk? ===' && ls artifacts/ | head -3 && echo '=== git status summary ===' && git status --porcelain | grep -v '^??' | head -10 && echo '--- untracked now: ---' && git status --porcelain | grep '^??' | head -5",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "git-state",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== remotes ===' && git remote -v && echo '=== branch ===' && git branch --show-current && echo '=== staged changes count ===' && git diff --cached --stat | tail -3 && echo '=== recent commits ===' && git --no-pager log --oneline -5",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "full-git-status",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== staged ===' && git diff --cached --name-status | head -40 && echo '=== unstaged modified ===' && git diff --name-status | head -20 && echo '=== untracked ===' && git status --porcelain | grep '^??'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "commit-changes",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && git add .gitignore apps/ml-service/README.md apps/api/src/services/task.service.js apps/ml-service/Dockerfile apps/ml-service/main.py docker-compose.yml render.yaml && git status --short | head -50 && echo '=== committing ===' && git commit -m \"chore: stop tracking runtime agent artifacts + ML service production hardening\n\n- .gitignore: ignore artifacts/ (runtime agent output: SVGs, HTML, ZIPs)\n- untrack previously committed artifacts/ files (kept on disk)\n- ML service: baked models into image, multi-arch torch, distilbert classify,\n  prewarm at startup, /ready healthcheck endpoint\n- API: retry-with-backoff for ML tool calls\n- compose + render.yaml: ML env vars, healthcheck, disk mount\" && echo '=== DONE ===' && git --no-pager log --oneline -1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-commit-state",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== git config signing ===' && git config --get commit.gpgsign 2>/dev/null; git config --get user.signingkey 2>/dev/null && echo '=== last commit ===' && git --no-pager log --oneline -2 && echo '=== is our commit there? ===' && git status --short | head -3 && echo '=== staged still? ===' && git diff --cached --name-only | head -3",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "check-signing-history",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== signature status of recent commits ===' && git --no-pager log --format='%h %G?' -5 && echo '=== does remote require signing? (branch protection) ===' && echo '(can not check remotely without API)' && echo '=== check if gpg alternative configured ===' && git config --get gpg.format 2>/dev/null || echo '(no gpg.format — SSH default since signingkey is .pub)'",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "commit-nosign",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && git commit --no-gpg-sign -m \"chore: stop tracking runtime agent artifacts + ML service production hardening\n\n- .gitignore: ignore artifacts/ (runtime agent output: SVGs, HTML, ZIPs)\n- untrack previously committed artifacts/ files (kept on disk)\n- ML service: baked models into image, multi-arch torch, distilbert classify,\n  prewarm at startup, /ready healthcheck endpoint\n- API: retry-with-backoff for ML tool calls\n- compose + render.yaml: ML env vars, healthcheck, disk mount\" && echo '=== COMMITTED ===' && git --no-pager log --oneline -1 && echo '=== remaining changes ===' && git status --short | head -10",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "push-to-origin",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && git push origin main 2>&1",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "verify-push",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent && echo '=== remote main now at ===' && git --no-pager log --oneline -1 origin/main && echo '=== artifacts still in remote HEAD tree? ===' && git ls-tree -r --name-only origin/main artifacts/ | wc -l && echo '=== local & remote in sync? ===' && git status -sb | head -1 && echo '=== artifacts folder still on disk (unaffected)? ===' && ls artifacts/ 2>/dev/null | head -3",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-analytics",
+			"type": "shell",
+			"command": "curl -s --max-time 30 -w '\\nHTTP:%{http_code} TIME:%{time_total}s' 'http://localhost:3001/api/v1/tenants/f4c1bdd2-6720-4a0d-9136-cb38423ad439/analytics?days=30' -H 'Content-Type: application/json' 2>&1 | tail -5"
+		},
+		{
+			"label": "Start API Server",
+			"type": "shell",
+			"command": "cd apps/api && node --env-file=.env src/index.js",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "test-ws-token",
+			"type": "shell",
+			"command": "curl -s -w '\nHTTP %{http_code}\n' http://localhost:3001/api/v1/auth/ws-token 2>&1; echo '---'; curl -s -w '\nHTTP %{http_code}\n' http://localhost:3001/api/v1/auth/nonexistent 2>&1"
+		},
+		{
+			"label": "check-env",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && ls -la .env* 2>/dev/null; echo '---'; grep -E 'OPENAI|ANTHROPIC|API_KEY' .env 2>/dev/null | sed 's/=.*/=xxx/' || echo 'no .env'"
+		},
+		{
+			"label": "check-tenant-llm",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nconst { query } = require('./src/db/pool.js');\n(async () => {\n  const rows = await query('SELECT id, name, llm_config FROM tenants WHERE status = \\\\'ACTIVE\\\\'');\n  for (const r of rows) {\n    console.log(JSON.stringify({ id: r.id, name: r.name, llm_config: r.llm_config }, null, 2));\n  }\n  process.exit(0);\n})().catch(e => { console.error(e); process.exit(1); });\n\" 2>&1 | head -60"
+		},
+		{
+			"label": "check-llm-config-db",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  try {\n    const res = await query(\\\"SELECT id, name, llm_config FROM tenants WHERE status = 'ACTIVE'\\\");\n    for (const r of res.rows) {\n      const cfg = typeof r.llm_config === 'string' ? JSON.parse(r.llm_config) : r.llm_config;\n      console.log('Tenant:', r.name, '| Config:', JSON.stringify(cfg?.defaultProvider), '| Providers:', Object.keys(cfg?.providers || {}));\n    }\n  } catch(e) { console.error(e); }\n  process.exit(0);\n})();\n\" 2>&1 | grep -v '^\\[' | head -20"
+		},
+		{
+			"label": "check-agent-llm",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT id, name, model, provider, llm_config FROM agents WHERE name ILIKE '%data%modell%' OR name ILIKE '%datamodell%' OR name ILIKE '%modeller%'\\\");\n  for (const r of res.rows) {\n    console.log(JSON.stringify({ id: r.id, name: r.name, model: r.model, provider: r.provider, llm_config: typeof r.llm_config === 'string' ? JSON.parse(r.llm_config) : r.llm_config }, null, 2));\n  }\n  if (!res.rows.length) {\n    const all = await query('SELECT id, name, model, provider FROM agents LIMIT 10');\n    console.log('No matching agent found. First 10 agents:');\n    for (const r of all.rows) console.log(JSON.stringify({ id: r.id, name: r.name, model: r.model, provider: r.provider }));\n  }\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query'",
+			"group": "none"
+		},
+		{
+			"label": "check-agent-schema",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'agents' ORDER BY ordinal_position\\\");\n  for (const r of res.rows) console.log(r.column_name, '-', r.data_type);\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "check-data-modeller",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT id, name, llm_provider, llm_model, status FROM agents WHERE name ILIKE '%modell%'\\\");\n  for (const r of res.rows) console.log(JSON.stringify(r, null, 2));\n  if (!res.rows.length) {\n    const all = await query('SELECT id, name, llm_provider, llm_model, status FROM agents LIMIT 10');\n    console.log('No match. First 10:');\n    for (const r of all.rows) console.log(JSON.stringify(r));\n  }\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "find-data-modeller",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT id, name, llm_provider, llm_model, status FROM agents WHERE name ILIKE '%data%'\\\");\n  for (const r of res.rows) console.log(JSON.stringify(r));\n  if (!res.rows.length) console.log('none found with data in name');\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "check-ollama-config",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT id, name, llm_config FROM tenants WHERE status = 'ACTIVE'\\\");\n  for (const r of res.rows) {\n    const cfg = typeof r.llm_config === 'string' ? JSON.parse(r.llm_config) : r.llm_config;\n    const ollama = cfg?.providers?.ollama || {};\n    console.log('Tenant:', r.name);\n    console.log('  defaultProvider:', cfg?.defaultProvider);\n    console.log('  ollama.baseUrl:', ollama.baseUrl);\n    console.log('  ollama.hasApiKey:', !!ollama.apiKey);\n    console.log('  ollama.model:', ollama.model);\n  }\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "check-agent-tenant",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT a.id, a.name, a.llm_provider, a.llm_model, a.status, a.tenant_id, t.name as tenant_name FROM agents a JOIN tenants t ON a.tenant_id = t.id WHERE a.name ILIKE '%data%mod%'\\\");\n  for (const r of res.rows) console.log(JSON.stringify(r, null, 2));\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "check-agent-llmconfig",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const cols = await query(\\\"SELECT column_name FROM information_schema.columns WHERE table_name = 'agents' AND column_name LIKE '%llm%' OR column_name LIKE '%config%'\\\");\n  console.log('llm columns in agents:', cols.rows.map(r=>r.column_name));\n  const res = await query(\\\"SELECT id, name, CASE WHEN table_has_llm_config THEN 'has llm_config col' ELSE 'no' END FROM (SELECT a.id, a.name, (SELECT count(*) FROM information_schema.columns WHERE table_name='agents' AND column_name='llm_config') > 0 as table_has_llm_config FROM agents a WHERE a.id = '346be314-71d4-4329-9e0a-e2cede33c669') sub\\\");\n  console.log(res.rows[0]);\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "check-dm-llmconfig",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env -e \"\nimport { query } from './src/db/pool.js';\n(async () => {\n  const res = await query(\\\"SELECT id, name, llm_provider, llm_model, llm_config FROM agents WHERE id = '346be314-71d4-4329-9e0a-e2cede33c669'\\\");\n  const r = res.rows[0];\n  console.log('llm_provider:', r.llm_provider);\n  console.log('llm_model:', r.llm_model);\n  console.log('llm_config (raw):', JSON.stringify(r.llm_config));\n  process.exit(0);\n})();\n\" 2>&1 | grep -vE '^\\[|INFO|Slow query|Cache'"
+		},
+		{
+			"label": "kill-3001",
+			"type": "shell",
+			"command": "lsof -ti :3001 2>/dev/null | while read pid; do echo \"Killing $pid\"; kill -9 \"$pid\" 2>/dev/null; done; sleep 1; lsof -ti :3001 && echo 'STILL THERE' || echo 'CLEAN'"
+		},
+		{
+			"label": "check-ws-token-curl",
+			"type": "shell",
+			"command": "curl -s http://localhost:3001/api/v1/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"admin@kuvalam.com\",\"password\":\"admin123\"}' -c /tmp/kv-cookies.txt > /dev/null && curl -s http://localhost:3001/api/v1/auth/ws-token -b /tmp/kv-cookies.txt | python3 -c \"import sys,json; d=json.load(sys.stdin); t=d.get('data',{}).get('token',''); print(f'Token length: {len(t)}, token preview: {t[:30] if t else \\\"EMPTY\\\"}')\""
+		},
+		{
+			"label": "restart-api",
+			"type": "shell",
+			"command": "fuser -k 3001/tcp 2>/dev/null; sleep 1; cd /Users/PaulJoseph/pgent/apps/api && nohup node src/index.js > /tmp/api.log 2>&1 & echo 'API restart initiated'"
+		},
+		{
+			"label": "DB Queries Check",
+			"type": "shell",
+			"command": "node /Users/PaulJoseph/pgent/scratch/check_db.mjs && echo '---' && ls -laR /Users/PaulJoseph/pgent/artifacts/f4c1bdd2-6720-4a0d-9136-cb38423ad439/ 2>&1 || echo 'Artifacts dir not found'"
+		},
+		{
+			"label": "DB and Artifacts Check",
+			"type": "shell",
+			"command": "node /Users/PaulJoseph/pgent/scratch/check_db.mjs"
+		},
+		{
+			"label": "List artifact date dirs",
+			"type": "shell",
+			"command": "echo '=== 2026-08-03 ===' && ls -la /Users/PaulJoseph/pgent/artifacts/f4c1bdd2-6720-4a0d-9136-cb38423ad439/2026-08-03/ 2>&1 && echo '' && echo '=== 2026-08-02 ===' && ls -la /Users/PaulJoseph/pgent/artifacts/f4c1bdd2-6720-4a0d-9136-cb38423ad439/2026-08-02/ 2>&1 && echo '' && echo '=== DM downloads dir ===' && ls -la /Users/PaulJoseph/downloads/DM/ 2>&1 || echo 'DM dir not found'"
+		},
+		{
+			"label": "restart-api",
+			"type": "shell",
+			"command": "fuser -k 3001/tcp 2>/dev/null; sleep 1; cd /Users/PaulJoseph/pgent/apps/api && node --env-file=.env src/index.js"
+		},
+		{
+			"label": "verify-agent-fixes",
+			"type": "shell",
+			"command": "node /tmp/verify_fixes.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "verify-agent-fixes",
+			"type": "shell",
+			"command": "node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "verify-vf",
+			"type": "shell",
+			"command": "node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "verify-vf2",
+			"type": "shell",
+			"command": "sleep 3 && node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "kill-api",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3001) 2>/dev/null; echo killed",
+			"isBackground": false
+		},
+		{
+			"label": "start-api",
+			"type": "shell",
+			"command": "cd /Users/PaulJoseph/pgent/apps/api && nohup node --env-file=.env src/index.js > /tmp/api.log 2>&1 & echo started PID=$!",
+			"isBackground": false
+		},
+		{
+			"label": "verify-final",
+			"type": "shell",
+			"command": "sleep 3 && node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "restart-api-fix",
+			"type": "shell",
+			"command": "kill -9 $(lsof -ti :3001) 2>/dev/null; sleep 1; cd /Users/PaulJoseph/pgent/apps/api && nohup node --env-file=.env src/index.js > /tmp/api.log 2>&1 & echo PID=$!",
+			"isBackground": false
+		},
+		{
+			"label": "verify-final-fix",
+			"type": "shell",
+			"command": "sleep 3 && node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-api-ready",
+			"type": "shell",
+			"command": "for i in 1 2 3 4 5; do curl -s http://localhost:3001/health && break; sleep 2; done",
+			"isBackground": false
+		},
+		{
+			"label": "check-api-log",
+			"type": "shell",
+			"command": "tail -30 /tmp/api.log 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-log",
+			"type": "shell",
+			"command": "cat /tmp/api.log 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "verify-fix-scopes",
+			"type": "shell",
+			"command": "node /tmp/vf.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-northwind-db",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT datname FROM pg_database WHERE datname ILIKE '%north%' OR datname ILIKE '%wind%' ORDER BY datname;\" 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-northwind-sql",
+			"type": "shell",
+			"command": "head -30 /Users/PaulJoseph/pgent/northwind_schema.sql && echo '...' && wc -l /Users/PaulJoseph/pgent/northwind_schema.sql",
+			"isBackground": false
+		},
+		{
+			"label": "create-northwind",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d postgres -c \"CREATE DATABASE northwind;\" 2>&1 && echo \"---DB CREATED---\" && PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d northwind -f /Users/PaulJoseph/pgent/northwind_schema.sql 2>&1 && echo \"---SCHEMA LOADED---\" && PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d northwind -c \"SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;\" 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-db-tool-ids",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT id, name FROM builtin_tools WHERE name ILIKE '%postgres%' OR name ILIKE '%database%' OR id ILIKE '%postgres%' OR id ILIKE '%database%' OR id = 'database';\" 2>&1 && echo '===' && PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT DISTINCT tool_id, COUNT(*) FROM tool_connections WHERE tenant_id='f4c1bdd2-6720-4a0d-9136-cb38423ad439' GROUP BY tool_id ORDER BY tool_id;\" 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-tool-ids",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT DISTINCT tool_id, COUNT(*) FROM tool_connections WHERE tenant_id='f4c1bdd2-6720-4a0d-9136-cb38423ad439' GROUP BY tool_id ORDER BY tool_id;\" 2>&1 && echo '===' && PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT id, tool_id, name, status, deployment_type FROM tool_connections WHERE tenant_id='f4c1bdd2-6720-4a0d-9136-cb38423ad439' ORDER BY tool_id, name;\" 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "create-northwind-conn",
+			"type": "shell",
+			"command": "node /tmp/create_northwind_conn.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "create-northwind-connector",
+			"type": "shell",
+			"command": "node /tmp/create_northwind_conn.mjs 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "insert-northwind-conn",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"\nINSERT INTO tool_connections (tenant_id, tool_id, name, auth_type, config, deployment_type, status)\nVALUES (\n  'f4c1bdd2-6720-4a0d-9136-cb38423ad439',\n  'database',\n  'Northwind',\n  'USERNAME_PASSWORD',\n  '{\\\"host\\\":\\\"localhost\\\",\\\"port\\\":\\\"5434\\\",\\\"database\\\":\\\"northwind\\\",\\\"user\\\":\\\"axon\\\",\\\"password\\\":\\\"axon_dev_password\\\",\\\"dbType\\\":\\\"postgresql\\\",\\\"ssl\\\":\\\"false\\\"}'::jsonb,\n  'local',\n  'ACTIVE'\n) RETURNING id, name, tool_id, status;\n\" 2>&1",
+			"isBackground": false
+		},
+		{
+			"label": "check-northwind-conn",
+			"type": "shell",
+			"command": "PGPASSWORD=axon_dev_password psql -h localhost -p 5434 -U axon -d axon_db -c \"SELECT id, name, tool_id, status FROM tool_connections WHERE name = 'Northwind';\" 2>&1",
+			"isBackground": false
 		}
 	]
 }

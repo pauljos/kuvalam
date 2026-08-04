@@ -48,7 +48,10 @@ async function request(path: string, options: RequestInit = {}, _isRetry = false
   // On expired access token, try to silently mint a new one via the refresh
   // cookie, then replay the original request exactly once. This makes the
   // 15-minute JWT invisible to users \u2014 sessions feel like they last 30 days.
-  if (res.status === 401 && !_isRetry && !path.startsWith('/auth/')) {
+  // Exclude only the auth endpoints that don't need a refresh (login, register,
+  // refresh itself, etc.). /auth/me and /auth/ws-token SHOULD trigger refresh.
+  const AUTH_NO_REFRESH = /^\/auth\/(login|register|refresh|logout|forgot-password|reset-password)$/
+  if (res.status === 401 && !_isRetry && !AUTH_NO_REFRESH.test(path)) {
     console.log('Token expired, attempting refresh...')
     const refreshed = await tryRefreshSession()
     console.log('Refresh result:', refreshed)
@@ -112,6 +115,10 @@ export const api = {
   login: (body: any) => request('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
   me: () => request('/auth/me'),
+  fetchWSToken: async (): Promise<string> => {
+    const res = await request('/auth/ws-token')
+    return res?.token || ''
+  },
 
   // Tenants
   createTenant: (body: any) => request('/tenants', { method: 'POST', body: JSON.stringify(body) }),
@@ -167,7 +174,12 @@ export const api = {
   dispatchTask: (tenantId: string, agentId: string, body: any) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`, { method: 'POST', body: JSON.stringify(body) }),
   listTasks: (tenantId: string, agentId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks`),
   getTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}`),
+  getAgentLogs: (tenantId: string, params?: { limit?: string }) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    return request(`/tenants/${tenantId}/agent-logs${qs}`)
+  },
   cancelTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' }),
+  retryTask: (tenantId: string, agentId: string, taskId: string, mode: 'checkpoint' | 'fresh' = 'checkpoint') => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}/retry`, { method: 'POST', body: JSON.stringify({ mode }) }),
   deleteTask: (tenantId: string, agentId: string, taskId: string) => request(`/tenants/${tenantId}/agents/${agentId}/tasks/${taskId}`, { method: 'DELETE' }),
   linkKB: (tenantId: string, agentId: string, kbId: string) => request(`/tenants/${tenantId}/agents/${agentId}/knowledge-bases/${kbId}`, { method: 'POST', body: '{}' }),
 

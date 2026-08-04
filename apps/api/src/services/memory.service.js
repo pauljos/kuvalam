@@ -92,30 +92,12 @@ export async function retrieveMemory(agentId, goal, limit = 20) {
         [agentId, goal.slice(0, 500), limit]
       )
       rows = result.rows
-
-      // Fallback: if no keyword match, return recent memory (up to half the limit)
-      if (rows.length === 0) {
-        const fallback = await query(
-          `SELECT entity_type, entity_name, detail, last_seen_at
-           FROM agent_memory
-           WHERE agent_id = $1
-           ORDER BY last_seen_at DESC
-           LIMIT $2`,
-          [agentId, Math.ceil(limit / 2)]
-        )
-        rows = fallback.rows
-      }
+      // If no keyword match, return nothing — do NOT fall back to recent memory.
+      // Injecting unrelated recent facts contaminates the agent's context with
+      // irrelevant data from past tasks.
     } else {
-      // No goal provided — fall back to recency-based retrieval
-      const result = await query(
-        `SELECT entity_type, entity_name, detail, last_seen_at
-         FROM agent_memory
-         WHERE agent_id = $1
-         ORDER BY last_seen_at DESC
-         LIMIT $2`,
-        [agentId, limit]
-      )
-      rows = result.rows
+      // No goal: return nothing — without a goal we cannot judge relevance.
+      rows = []
     }
 
     if (rows.length === 0) return []

@@ -30,14 +30,8 @@ export async function listSharedMemory(tenantId, { category } = {}) {
 export async function retrieveSharedMemory(tenantId, goal, limit = 15) {
   try {
     if (!goal || goal.trim().length < 3) {
-      const { rows } = await query(
-        `SELECT key, value, category
-         FROM tenant_shared_memory
-         WHERE tenant_id = $1 AND (expires_at IS NULL OR expires_at > NOW())
-         ORDER BY updated_at DESC LIMIT $2`,
-        [tenantId, limit]
-      )
-      return rows
+      // No meaningful goal — do NOT return unrelated shared facts.
+      return []
     }
 
     const { rows } = await query(
@@ -56,16 +50,10 @@ export async function retrieveSharedMemory(tenantId, goal, limit = 15) {
       [tenantId, goal.slice(0, 500), limit]
     )
 
-    // Fallback: if no FTS hit, return most recent entries
-    if (rows.length === 0) {
-      const { rows: recent } = await query(
-        `SELECT key, value, category FROM tenant_shared_memory
-         WHERE tenant_id = $1 AND (expires_at IS NULL OR expires_at > NOW())
-         ORDER BY updated_at DESC LIMIT $2`,
-        [tenantId, Math.ceil(limit / 2)]
-      )
-      return recent
-    }
+    // No keyword match — return nothing.
+    // Do NOT fall back to most-recent entries: injecting unrelated shared facts
+    // (from a different agent's domain) contaminates context without relevance.
+    if (rows.length === 0) return []
     return rows
   } catch { return [] }
 }
@@ -78,6 +66,16 @@ export async function retrieveSharedMemory(tenantId, goal, limit = 15) {
 export async function upsertSharedMemory(tenantId, { key, value, category = 'GENERAL', agentId, taskId, source = 'AGENT', expiresAt } = {}) {
   if (!key || !value) throw new AppError('VALIDATION_ERROR', 'key and value are required', 400)
   if (key.length > 500) throw new AppError('VALIDATION_ERROR', 'key must be ≤ 500 characters', 400)
+
+  // ── Scope gate: when an agent writes shared memory, require
+  // 'write_tenant_memory' built-in scope (parity with tenant_memory).
+  if (agentId) {
+    const { resolveAgentScopes } = await import('./agent-scope.service.js')
+    const scopes = await resolveAgentScopes(tenantId, agentId)
+    if (!scopes?.allowedBuiltins?.has('write_tenant_memory')) {
+      throw new AppError('SCOPE_DENIED', 'Agent does not have write_tenant_memory scope — cannot write to shared memory', 403)
+    }
+  }
 
   const { rows: [row] } = await query(
     `INSERT INTO tenant_shared_memory (tenant_id, key, value, category, agent_id, task_id, source, expires_at)

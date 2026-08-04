@@ -184,14 +184,15 @@ export async function initQueues(logger) {
  * Enqueue an agent task job.
  * Falls back to setImmediate if Redis is unavailable.
  */
-export async function enqueueTask(task, agent, executeTaskFn) {
+export async function enqueueTask(task, agent, executeTaskFn, options = {}) {
+  const jobId = options.jobId || task.id
   if (taskQueue && isRedisAvailable) {
-    console.log(`[Queue] Enqueuing task ${task.id} via BullMQ (priority: ${task.priority || 'MEDIUM'})`)
+    console.log(`[Queue] Enqueuing task ${task.id} via BullMQ (priority: ${task.priority || 'MEDIUM'}) jobId=${jobId}`)
     await taskQueue.add(
       `task:${task.id}`,
       { task, agent },
       {
-        jobId: task.id,     // Deduplicate by task ID
+        jobId,
         priority: task.priority === 'HIGH' ? 1 : task.priority === 'LOW' ? 10 : 5,
       }
     )

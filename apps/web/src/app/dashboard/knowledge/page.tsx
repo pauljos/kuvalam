@@ -521,11 +521,9 @@ export default function KnowledgePage() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
                 {graphs.map(g => (
-                  <div key={g.id} onClick={() => setSelectedGraph(g)} className="card" style={{
+                  <div key={g.id} onClick={() => setSelectedGraph(g)} className="card card-hover" style={{
                     padding: 20, borderLeft: '4px solid var(--purple, #8b5cf6)', cursor: 'pointer',
-                    transition: 'transform 0.1s, box-shadow 0.1s',
-                  }} onMouseOver={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-lg)' }}
-                     onMouseOut={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '' }}>
+                  }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <div>
                         <h3 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>{g.name}</h3>

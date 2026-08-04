@@ -11,6 +11,13 @@ const WorkflowCanvas = dynamic(() => import('@/components/WorkflowCanvas'), {
   loading: () => <div className="skeleton" style={{ height: 'calc(100vh - 120px)', width: '100%', borderRadius: 12 }}></div>
 })
 
+// Step-type → icon for the mini chips on workflow cards
+const STEP_TYPE_ICONS: Record<string, string> = {
+  AGENT: '🤖', CREW: '👥', HTTP: '🌐', APPROVAL: '✅', CONDITION: '🔀',
+  TOOL: '🔧', TRANSFORM: '🔄', DELAY: '⏱️', SET: '⚙️', LOOP: '🔁',
+  NOTIFY: '🔔', PARALLEL: '⧉', SCRIPT: '📜',
+}
+
 export default function WorkflowsPage() {
   const { tenantId, toast } = useApp()
   const [workflows, setWorkflows] = useState<any[]>([])
@@ -244,26 +251,122 @@ export default function WorkflowsPage() {
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
-              {workflows.map(wf => (
-                <div key={wf.id} className="card card-hover" style={{ padding: 24, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', minHeight: 220 }}>
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                      <span className={`badge badge-${wf.status === 'ACTIVE' ? 'active' : 'draft'}`}>{wf.status}</span>
-                      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{wf.steps?.length || 0} steps</span>
+              {workflows.map(wf => {
+                const isActive = wf.status === 'ACTIVE'
+                const stepTypes = Array.from(new Set((wf.steps || []).map((s: any) => s.type).filter(Boolean))) as string[]
+                const trigger = wf.trigger?.type || 'MANUAL'
+                const triggerIcon = trigger === 'SCHEDULE' ? '🕒' : '▶️'
+                const lastExec = (wf as any).last_execution_status as string | undefined
+                const isExecRunning = lastExec === 'RUNNING' || lastExec === 'PENDING_APPROVAL'
+                const isExecFailed = lastExec === 'FAILED'
+                const topBarBg = isExecRunning
+                  ? 'linear-gradient(90deg, #3b82f6, #818cf8)'
+                  : isExecFailed
+                  ? 'linear-gradient(90deg, #ef4444, #f87171)'
+                  : isActive
+                  ? 'linear-gradient(90deg, #10b981, #34d399)'
+                  : 'linear-gradient(90deg, #f59e0b, #fbbf24)'
+                const cardBorder = isExecRunning
+                  ? '1px solid #93c5fd'
+                  : isExecFailed
+                  ? '1px solid #fca5a5'
+                  : isActive
+                  ? '1px solid var(--green-border)'
+                  : '1px solid var(--border)'
+                return (
+                <div key={wf.id} className="card card-hover" style={{
+                  padding: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+                  border: cardBorder,
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.04)',
+                }}>
+                  {/* Top accent gradient bar */}
+                  <div className={isExecRunning ? 'bar-running' : undefined} style={{
+                    height: 4, flexShrink: 0,
+                    background: topBarBg,
+                  }} />
+
+                  <div style={{ padding: '16px 10px 20px 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {/* Top row: icon + name + status */}
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                      <div style={{
+                        width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                        background: isActive ? 'linear-gradient(135deg, #d1fae5, #a7f3d0)' : 'linear-gradient(135deg, #fef3c7, #fde68a)',
+                        border: `1.5px solid ${isActive ? 'var(--green-border)' : 'var(--border)'}`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+                        boxShadow: 'inset 0 1px 2px rgba(255,255,255,0.6)',
+                      }}>⟳</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 2 }}>
+                          <h3 title={wf.name} style={{ fontWeight: 800, fontSize: 14, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{wf.name}</h3>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={() => deleteWorkflow(wf.id)}
+                            title="Delete workflow"
+                            style={{ padding: '2px 6px', color: 'var(--red)', fontSize: 11, lineHeight: '18px', background: 'transparent', border: 'none', borderRadius: 4, flexShrink: 0, cursor: 'pointer' }}
+                          >🗑</button>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span style={{
+                            fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 10,
+                            background: isActive ? '#d1fae5' : '#fef3c7',
+                            color: isActive ? '#065f46' : '#92400e',
+                            border: `1px solid ${isActive ? '#a7f3d0' : '#fde68a'}`,
+                          }}>
+                            {isActive ? '● Active' : wf.status}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 500 }}>
+                            {triggerIcon} {trigger === 'SCHEDULE' ? 'Scheduled' : 'Manual'}
+                            <span style={{ margin: '0 4px', opacity: 0.4 }}>·</span>
+                            {wf.steps?.length || 0} steps
+                            {wf.on_failure && (
+                              <>
+                                <span style={{ margin: '0 4px', opacity: 0.4 }}>·</span>
+                                <span style={{ color: wf.on_failure === 'STOP' ? '#b45309' : 'var(--green-dark)' }}>
+                                  {wf.on_failure === 'STOP' ? '⏹ stop' : '▶ continue'}
+                                </span>
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>{wf.name}</h3>
-                    <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 20 }}>
-                      {wf.description || 'No description provided'}
-                    </p>
-                  </div>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => triggerWorkflow(wf.id)}>🚀 Execute</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => openCanvasEdit(wf)}>Edit</button>
-                    <button className="btn btn-secondary btn-sm" onClick={() => duplicateWorkflow(wf.id)} title="Duplicate workflow" style={{ padding: '0 10px' }}>⧉</button>
-                    <button className="btn btn-danger btn-sm" onClick={() => deleteWorkflow(wf.id)} title="Delete workflow" style={{ padding: '0 10px' }}>🗑</button>
+
+                    {/* Description */}
+                    {wf.description && (
+                      <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, margin: 0, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                        {wf.description}
+                      </p>
+                    )}
+
+                    {/* Step type chips */}
+                    {stepTypes.length > 0 && (
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {stepTypes.slice(0, 6).map(t => (
+                          <span key={t} style={{
+                            fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+                            background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                          }}>
+                            {STEP_TYPE_ICONS[t] || '•'} {t.charAt(0) + t.slice(1).toLowerCase()}
+                          </span>
+                        ))}
+                        {stepTypes.length > 6 && (
+                          <span style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, background: '#f3f4f6', color: '#4b5563', border: '1px solid #e5e7eb' }}>
+                            +{stepTypes.length - 6} more
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    <div style={{ display: 'flex', gap: 8, paddingTop: 4 }}>
+                      <button className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => triggerWorkflow(wf.id)}>🚀 Execute</button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => openCanvasEdit(wf)}>Edit</button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => duplicateWorkflow(wf.id)} title="Duplicate workflow" style={{ padding: '6px 12px' }}>⧉</button>
+                    </div>
                   </div>
                 </div>
-              ))}
+              )})}
             </div>
           )
         ) : (

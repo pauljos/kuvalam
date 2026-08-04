@@ -131,6 +131,17 @@ function getOpenAIClient(apiKey, baseUrl) {
   // the SDK still refuses to construct without one. Supply a placeholder.
   const isLocal = baseUrl && /localhost|127\.0\.0\.1|::1|host\.docker\.internal/i.test(baseUrl)
   const key = apiKey || process.env.OPENAI_API_KEY || (isLocal ? 'not-required' : undefined)
+  // Give a clear, actionable error when no API key is available.
+  // The OpenAI SDK would otherwise throw a cryptic "OPENAI_API_KEY environment
+  // variable is missing" — but this is often a tenant-level config issue, not
+  // a missing env var. Point the user to Settings → LLM.
+  if (!key) {
+    throw new Error(
+      'No API key configured for your LLM provider. ' +
+      'Go to Settings → LLM and add an API key for your provider, ' +
+      'or set OPENAI_API_KEY in your environment.'
+    )
+  }
   const options = { apiKey: key }
   if (baseUrl) options.baseURL = baseUrl
   return new OpenAI(options)
@@ -191,6 +202,8 @@ export async function complete({ tenantId, agentId, messages, tools = [], model 
       // Log token usage for billing
       if (tenantId) {
         try {
+          const _sys = messages?.find(m => m.role === 'system')
+          const _lastUser = [...(messages || [])].reverse().find(m => m.role === 'user')
           await auditLog({
             eventType: 'llm.tokens_used', tenantId,
             actorId: agentId || 'system', actorType: 'AGENT',
@@ -199,7 +212,11 @@ export async function complete({ tenantId, agentId, messages, tools = [], model 
               model: resolvedModel,
               promptTokens: usage.prompt_tokens,
               completionTokens: usage.completion_tokens,
-              totalTokens: usage.total_tokens
+              totalTokens: usage.total_tokens,
+              goal: goal ? String(goal).slice(0, 200) : undefined,
+              messageCount: messages?.length,
+              systemPrompt: _sys?.content ? String(_sys.content).slice(0, 4000) : undefined,
+              lastUserMessage: _lastUser?.content ? String(_lastUser.content).slice(0, 1500) : undefined
             }
           })
         } catch { /* audit failure must not break LLM call */ }
@@ -321,6 +338,8 @@ export async function completeStream({ tenantId, agentId, messages, tools = [], 
 
       if (tenantId) {
         try {
+          const _sys = messages?.find(m => m.role === 'system')
+          const _lastUser = [...(messages || [])].reverse().find(m => m.role === 'user')
           await auditLog({
             eventType: 'llm.tokens_used', tenantId,
             actorId: agentId || 'system', actorType: 'AGENT',
@@ -329,7 +348,11 @@ export async function completeStream({ tenantId, agentId, messages, tools = [], 
               model: resolvedModel,
               promptTokens: usage.prompt,
               completionTokens: usage.completion,
-              totalTokens: usage.total
+              totalTokens: usage.total,
+              goal: goal ? String(goal).slice(0, 200) : undefined,
+              messageCount: messages?.length,
+              systemPrompt: _sys?.content ? String(_sys.content).slice(0, 4000) : undefined,
+              lastUserMessage: _lastUser?.content ? String(_lastUser.content).slice(0, 1500) : undefined
             }
           })
         } catch { /* audit failure must not break LLM call */ }
@@ -352,6 +375,126 @@ export async function completeStream({ tenantId, agentId, messages, tools = [], 
       if (err.status === 401) throw new Error('LLM_AUTH_ERROR')
       throw err
     }
+  }
+}
+
+// ─── Tool-capability probe ─────────────────────────────────────────────────
+// In-memory cache of model → tool-capability results. One cheap API call per
+// unknown model, cached for the server lifetime. Avoids wasting a full task
+// execution on models (e.g. qwen3:4b) that claim "tools" in metadata but
+// don't actually return function calls at runtime.
+//
+// Industry standard: no provider exposes reliable capability metadata via API.
+// Ollama's /api/show "capabilities" field is self-reported and often wrong.
+// OpenAI's /v1/models returns no capability info. The only reliable way to
+// know is to ask the model to use a tool and see if it does.
+// ────────────────────────────────────────────────────────────────────────────
+const _toolCapabilityCache = new Map()
+
+/**
+ * Probe whether a model supports function/tool calling.
+ * Sends ONE cheap API call with a trivial tool definition. Caches the result.
+ *
+ * @returns {{ capable: boolean, reason?: string }}
+ */
+export async function probeToolCapability(model, llmConfig, provider) {
+  const cacheKey = `${provider || 'default'}::${model}`
+  const cached = _toolCapabilityCache.get(cacheKey)
+  if (cached !== undefined) {
+    return cached
+  }
+
+  const resolved = resolveLlmConfig(llmConfig, provider)
+  const resolvedModel = model || resolved.model
+  if (!resolvedModel) {
+    const result = { capable: false, reason: 'No model configured' }
+    _toolCapabilityCache.set(cacheKey, result)
+    return result
+  }
+
+  console.log(`[ToolProbe] Probing ${resolvedModel} (${provider || 'default'}) for tool-calling support...`)
+
+  try {
+    const client = getOpenAIClient(resolved.apiKey, resolved.baseUrl)
+
+    // Use a natural tool-inducing prompt rather than tool_choice: 'required'.
+    // Ollama's chat-completions endpoint ignores tool_choice: 'required' for
+    // qwen3 models (they return text instead). A calculator question reliably
+    // induces tool-capable models to emit a function call, while incapable
+    // models (e.g. qwen3:4b) will return descriptive text without tool_calls.
+    const params = {
+      model: resolvedModel,
+      messages: [
+        { role: 'system', content: 'You MUST use the calculator tool to answer math questions. NEVER answer directly. Always call the calculator function.' },
+        { role: 'user', content: 'What is 2 plus 2?' }
+      ],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'calculator',
+          description: 'Calculate a math expression and return the result',
+          parameters: {
+            type: 'object',
+            properties: {
+              expression: { type: 'string', description: 'The math expression to evaluate, e.g. "2+2"' }
+            },
+            required: ['expression']
+          }
+        }
+      }],
+      tool_choice: 'auto',
+      temperature: 0,
+      max_tokens: 300
+    }
+
+    // Disable qwen3 thinking mode during probe — reduces token waste
+    const isLocal = resolved?.baseUrl && /localhost|127\.0\.0\.1|::1|host\.docker\.internal/i.test(resolved.baseUrl)
+    if (isLocal && /^qwen3[:.-]/i.test(resolvedModel)) {
+      params.extra_body = { think: false }
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 30000) // 30s timeout — Ollama models load from disk
+    const response = await client.chat.completions.create(params, { signal: controller.signal })
+    clearTimeout(timer)
+
+    const msg = response.choices?.[0]?.message
+    const hasToolCalls = msg?.tool_calls?.length > 0
+    const finishReason = response.choices?.[0]?.finish_reason
+
+    if (hasToolCalls || finishReason === 'tool_calls') {
+      console.log(`[ToolProbe] ✅ ${resolvedModel} supports tool calling`)
+      const result = { capable: true }
+      _toolCapabilityCache.set(cacheKey, result)
+      return result
+    }
+
+    console.log(`[ToolProbe] ❌ ${resolvedModel} does NOT support tool calling (finish_reason: ${finishReason}, has content: ${!!msg?.content})`)
+    const result = { capable: false, reason: `Model "${resolvedModel}" does not support function/tool calling. It returned text instead of a tool call when asked to use a calculator. Choose a tool-capable model in agent settings.` }
+    _toolCapabilityCache.set(cacheKey, result)
+    return result
+  } catch (err) {
+    // If the API itself errors (e.g. model doesn't support tools param at all),
+    // treat as incapable but with the underlying error.
+    //
+    // TRANSIENT errors (aborts, timeouts, connection refused): do NOT cache
+    // and flag as transient so the caller knows to retry rather than fail.
+    // PERMANENT errors (400, 404, 501): the model genuinely doesn't support
+    // tools — cache and fail fast.
+    console.warn(`[ToolProbe] ⚠️  ${resolvedModel} probe failed with error: ${err.message}`)
+    const isToolParamError = /tool|calling|function/i.test(err.message) || err.status === 400
+    const isTransient = !isToolParamError && err.status !== 501 && err.status !== 404
+    const reason = isToolParamError
+      ? `Model "${resolvedModel}" does not support function/tool calling (API rejected the tools parameter). Choose a different model.`
+      : isTransient
+        ? `Could not verify tool support for "${resolvedModel}": ${err.message}. (Transient error — will retry on next task.)`
+        : `Could not verify tool support for "${resolvedModel}": ${err.message}. Treating as incapable to be safe.`
+    const result = { capable: false, reason, transient: isTransient }
+    // Only cache definite results, not transient errors
+    if (!isTransient) {
+      _toolCapabilityCache.set(cacheKey, result)
+    }
+    return result
   }
 }
 

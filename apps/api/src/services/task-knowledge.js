@@ -53,14 +53,17 @@ export async function retrieveKnowledge(agent, goal) {
   try {
     // 3. External vector DB search (Pinecone, Weaviate, Qdrant, etc.)
     const { rows: vectorConns } = await query(
-      `SELECT tc.id, tc.name, tc.tool_id, tc.config FROM tool_connections tc
+      `SELECT tc.id, tc.name, tc.tool_id, tc.config
+       FROM tool_connections tc
+       JOIN agent_tool_scopes ats ON ats.connector_id = tc.id
        WHERE tc.tenant_id = $1 AND tc.status = 'ACTIVE'
+         AND ats.agent_id = $2 AND ats.scope_type = 'connector'
          AND (
            tc.tool_id IN ('PINECONE', 'WEAVIATE', 'QDRANT', 'MILVUS', 'VECTORDB', 'VECTOR_DB', 'VECTOR')
            OR (tc.name ILIKE '%vector%') OR (tc.name ILIKE '%pinecone%')
            OR (tc.name ILIKE '%weaviate%') OR (tc.name ILIKE '%qdrant%'))
        LIMIT 3`,
-      [agent.tenant_id]
+      [agent.tenant_id, agent.id]
     )
     for (const conn of vectorConns) {
       try {
@@ -155,14 +158,26 @@ export async function loadEpisodicMemory(agentId, goal) {
     const { rows } = await query(
       `SELECT goal_summary, outcome, result_summary FROM agent_episodic_memory
        WHERE agent_id = $1 AND outcome = 'SUCCESS'
-       ORDER BY created_at DESC LIMIT 3`,
+       ORDER BY created_at DESC LIMIT 10`,
       [agentId]
     )
     if (rows.length === 0) return []
 
+    // Filter by goal relevance: only include entries whose goal_summary shares
+    // at least one significant keyword (4+ chars) with the current goal.
+    // This prevents cross-topic contamination where a past task's output
+    // bleeds into an unrelated task and the LLM copies the pattern.
+    const goalTokens = new Set((goal || '').toLowerCase().match(/[a-z]{4,}/g) || [])
+    const relevant = rows.filter(r => {
+      const memTokens = (r.goal_summary || '').toLowerCase().match(/[a-z]{4,}/g) || []
+      return memTokens.some(t => goalTokens.has(t))
+    }).slice(0, 3)
+
+    if (relevant.length === 0) return []
+
     return [{
       role: 'system',
-      content: `PAST EXPERIENCE (similar tasks):\n${rows.map(r => `- Goal: ${r.goal_summary}\n  Result: ${r.result_summary}`).join('\n')}`
+      content: `PAST EXPERIENCE (similar tasks):\n${relevant.map(r => `- Goal: ${r.goal_summary}\n  Result: ${r.result_summary}`).join('\n')}`
     }]
   } catch {
     return []

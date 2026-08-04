@@ -81,6 +81,23 @@ export default async function approvalsRoutes(fastify) {
     }
   })
 
+  // Revert an APPROVED/REJECTED approval back to PENDING so it can be re-actioned
+  fastify.post('/tenants/:tenantId/approvals/:approvalId/revert', async (req, reply) => {
+    const { tenantId, approvalId } = req.params
+    const { rows: [approval] } = await query(
+      `SELECT * FROM approval_requests WHERE id = $1 AND tenant_id = $2`,
+      [approvalId, tenantId]
+    )
+    if (!approval) throw new AppError('NOT_FOUND', 'Approval not found', 404)
+    if (approval.status === 'PENDING') throw new AppError('ALREADY_PENDING', 'Approval is already pending', 400)
+    await query(
+      `UPDATE approval_requests SET status = 'PENDING', decided_by = NULL, decided_at = NULL, decision_note = NULL, modified_input = NULL WHERE id = $1`,
+      [approvalId]
+    )
+    await auditLog({ eventType: 'approval.reverted', tenantId, actorId: req.user.id, actorType: 'USER', resourceType: 'ApprovalRequest', resourceId: approvalId, action: 'APPROVAL_REVERT', afterState: { previousStatus: approval.status } })
+    return { success: true, data: { id: approvalId, status: 'PENDING' }, meta: ts() }
+  })
+
   // Auto-reject expired approvals (admin/maintenance endpoint)
   fastify.post('/tenants/:tenantId/approvals/cleanup', async (req, reply) => {
     try {

@@ -320,7 +320,7 @@ async function _refreshAgentHealth(tenantId) {
 async function _evaluateCircuitBreakers(tenantId) {
   const opened = []
   const { rows } = await query(
-    `SELECT agent_id, running_tasks, completed_24h, failed_24h, circuit_state
+    `SELECT agent_id, running_tasks, completed_24h, failed_24h, circuit_state, circuit_reason, circuit_opened_at
      FROM agent_health
      WHERE tenant_id = $1`,
     [tenantId]
@@ -330,7 +330,10 @@ async function _evaluateCircuitBreakers(tenantId) {
     const failureRate = total > 0 ? Number(h.failed_24h) / total : 0
 
     // Open the breaker on excessive failure rate with a sample floor.
-    if (h.circuit_state === 'CLOSED' && total >= CIRCUIT_MIN_SAMPLE && failureRate >= CIRCUIT_FAILURE_RATE) {
+    // Skip if the circuit was manually reset within the last 60 minutes (grace period).
+    const recentlyReset = h.circuit_reason === 'manual_reset' && h.circuit_opened_at &&
+      new Date(h.circuit_opened_at) > new Date(Date.now() - 60 * 60_000)
+    if (!recentlyReset && h.circuit_state === 'CLOSED' && total >= CIRCUIT_MIN_SAMPLE && failureRate >= CIRCUIT_FAILURE_RATE) {
       const reason = `failure rate ${(failureRate * 100).toFixed(0)}% over ${total} tasks in 24h`
       await query(
         `UPDATE agent_health

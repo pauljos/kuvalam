@@ -50,11 +50,20 @@ export default function ApprovalsPage() {
   useEffect(() => {
     if (!tenantId) return
 
-    const url = new URL(API_BASE)
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    url.pathname = `/ws/tenants/${tenantId}/telemetry`
-    const ws = new WebSocket(url.toString())
-    wsRef.current = ws
+    let cancelled = false
+    const wsRefLocal = { current: null as WebSocket | null }
+
+    // Fetch a short-lived WS token (httpOnly cookie can't be read by JS
+    // and won't be sent cross-origin by the WebSocket constructor).
+    api.fetchWSToken().then(token => {
+      if (cancelled) return
+      const url = new URL(API_BASE)
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      url.pathname = `/ws/tenants/${tenantId}/telemetry`
+      url.searchParams.set('token', token)
+      const ws = new WebSocket(url.toString())
+      wsRef.current = ws
+      wsRefLocal.current = ws
 
     ws.onmessage = (event) => {
       let msg: any
@@ -68,10 +77,14 @@ export default function ApprovalsPage() {
       }
     }
 
-    ws.onerror = () => {} // Silently handle WS errors
-    ws.onclose = () => {}
+      ws.onerror = () => {} // Silently handle WS errors
+      ws.onclose = () => {}
+    }).catch(() => {})
 
-    return () => { ws.close() }
+    return () => {
+      cancelled = true
+      wsRefLocal.current?.close()
+    }
   }, [tenantId, load, filter])
 
   // ── Countdown timer (refreshes every second for pending deadlines) ────────
@@ -115,6 +128,17 @@ export default function ApprovalsPage() {
       toast('error', 'Decision failed', err.message)
     } finally {
       setDeciding(null)
+    }
+  }
+
+  // ── Revert an approval back to PENDING ──────────────────────────────────
+  async function revertApproval(approvalId: string) {
+    try {
+      await api.request(`/tenants/${tenantId}/approvals/${approvalId}/revert`, { method: 'POST' })
+      toast('success', 'Reverted to pending', 'You can now approve or reject this request.')
+      load(tenantId, filter)
+    } catch (err: any) {
+      toast('error', 'Revert failed', err.message)
     }
   }
 
@@ -387,6 +411,15 @@ export default function ApprovalsPage() {
                           <div style={{ color: '#dc2626', marginTop: 4, fontSize: 11 }}>
                             Auto-rejected: Timeout
                           </div>
+                        )}
+                        {(a.status === 'APPROVED' || a.status === 'REJECTED') && (
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            style={{ marginTop: 8, fontSize: 11 }}
+                            onClick={() => revertApproval(a.id)}
+                          >
+                            ↩ Re-open
+                          </button>
                         )}
                       </div>
                     )}

@@ -59,8 +59,10 @@ export function requiresApproval({ toolName, autonomyLevel, hasApprovalScope }) 
 
   switch (level) {
     case AUTONOMY_LEVELS.AUTONOMOUS:
-      // Autonomous: never require approval regardless of tool or scope
-      return false
+      // Autonomous: run everything without approval, but still respect
+      // explicit scope-level requires_approval — scopes are more granular
+      // than the agent-wide autonomy setting.
+      return hasApprovalScope
 
     case AUTONOMY_LEVELS.GUARDED:
       // Guarded: approve high-risk tools automatically, or any tool explicitly marked
@@ -487,8 +489,9 @@ async function resumeAgentTask(tenantId, approval, modifiedInput) {
   // Re-enqueue the task for continuation
   // The task remains in AWAITING_APPROVAL status — executeTask's resume logic
   // will detect the approved state and continue execution.
+  // Use a unique jobId to bypass BullMQ deduplication (original job same ID is in completed set).
   const { executeTask } = await import('./task.service.js')
-  await enqueueTask(task, agent, executeTask)
+  await enqueueTask(task, agent, executeTask, { jobId: `${task.id}-resume-${Date.now()}` })
 }
 
 /**

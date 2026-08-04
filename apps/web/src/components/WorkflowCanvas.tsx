@@ -872,7 +872,6 @@ function useLiveExecStatus(
   useEffect(() => {
     setStatusMap({})
     if (!execId || !tenantId) return
-    const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws/tenants/${tenantId}/telemetry`
     let ws: WebSocket | null = null
     let cancelled = false
 
@@ -904,8 +903,17 @@ function useLiveExecStatus(
       }, 1500)
     }
 
-    try {
-      ws = new WebSocket(wsUrl)
+    // Fetch a short-lived WS token, then connect.  Wrapped in an IIFE so
+    // the useEffect callback stays synchronous (required for cleanup return).
+    (async () => {
+      try {
+        const token = await (await import('@/lib/api')).api.fetchWSToken()
+        if (cancelled) return
+        const url = new URL(API_BASE)
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+        url.pathname = `/ws/tenants/${tenantId}/telemetry`
+        url.searchParams.set('token', token)
+        ws = new WebSocket(url.toString())
       ws.onmessage = (ev) => {
         let msg: any
         try { msg = JSON.parse(ev.data) } catch { return }
@@ -923,9 +931,10 @@ function useLiveExecStatus(
         })
       }
       ws.onerror = () => { startPolling() }
-    } catch {
-      startPolling()
-    }
+      } catch {
+        startPolling()
+      }
+    })()
 
     return () => {
       cancelled = true

@@ -45,6 +45,7 @@ import profileRoutes from './routes/profile.routes.js'
 import customModelsRoutes from './routes/custom-models.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
 import taskOutputsRoutes from './routes/task-outputs.routes.js'
+import agentLogsRoutes from './routes/agent-logs.routes.js'
 import artifactsRoutes from './routes/artifacts.routes.js'
 import chatRoutes from './routes/chat.routes.js'
 import webhookReceiverRoutes from './routes/webhook-receiver.routes.js'
@@ -426,6 +427,7 @@ await fastify.register(profileRoutes, { prefix: '/api/v1' })
 await fastify.register(customModelsRoutes, { prefix: '/api/v1' })
 await fastify.register(reportsRoutes, { prefix: '/api/v1' })
 await fastify.register(taskOutputsRoutes, { prefix: '/api/v1' })
+await fastify.register(agentLogsRoutes, { prefix: '/api/v1' })
 await fastify.register(artifactsRoutes, { prefix: '/api/v1' })
 await fastify.register(chatRoutes, { prefix: '/api/v1' })
 await fastify.register(webhookReceiverRoutes, { prefix: '/api/v1' })

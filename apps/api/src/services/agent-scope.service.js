@@ -272,15 +272,17 @@ const ARCHETYPE_ALIASES = {
   'tenant_supervisor':  'tenant-supervisor',
   'supervisor':         'tenant-supervisor',  // Scope preset names (direct passthrough)
   'data-analyst':       'data-analyst',
+  'analytics':          'data-analyst',
   'analyst':            'analyst',
   'browser-automation': 'browser-automation',
 }
 
 export function getArchetypeScopePresets(archetype) {
   // Normalize through alias map (case-insensitive fallback)
+  // Unknown archetypes → 'generalist' so every agent gets sensible defaults
   const key = ARCHETYPE_ALIASES[archetype]
     || ARCHETYPE_ALIASES[archetype?.toLowerCase()]
-    || null
+    || 'generalist'
   if (!key) return null
 
   const presets = {
